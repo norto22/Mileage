@@ -368,6 +368,26 @@ test("the traffic race result lists every racer and the car by its model, and th
 		"a win the server could not pay never says again in 0 min");
 });
 
+test("an unpaid win's reward row: a wait under a minute reads 1 min, a bad wait reads not paid, no row with the reward off", () => {
+	const {scope} = load();
+	const won = (extra) => {
+		scope.emit("MileageAiRace", Object.assign({phase: "result", race: "ai8", host: "norto22", car: "Ibishu Pessima",
+			winner: "norto22", places: PLACES, prize: 0, reward: 2000, why: "finished", you: "norto22"}, extra));
+		return rows(scope.traffic.view);
+	};
+	assert.deepStrictEqual(won({prizeAgainIn: 30}), ["Race reward: Again in 1 min; the win counts on the leaderboard"],
+		"30 s left is rounded up, never shown as 0 min");
+	assert.deepStrictEqual(won({prizeAgainIn: 61}), ["Race reward: Again in 2 min; the win counts on the leaderboard"]);
+	assert.deepStrictEqual(won({prizeAgainIn: -5}), ["Race reward: Not paid for this race; the win counts on the leaderboard"],
+		"a negative wait is no wait");
+	assert.deepStrictEqual(won({prizeAgainIn: "soon"}), ["Race reward: Not paid for this race; the win counts on the leaderboard"],
+		"a wait that is not a number is no wait");
+	assert.deepStrictEqual(won({prizeAgainIn: undefined}),
+		["Race reward: Not paid for this race; the win counts on the leaderboard"], "no wait sent");
+	assert.deepStrictEqual(won({reward: 0, prizeAgainIn: 0}), [], "the reward is off: nothing to say about it");
+	assert.deepStrictEqual(won({reward: 0, prizeAgainIn: 300}), [], "off, even while a wait runs");
+});
+
 // Every text a view holds, for the check below.
 function texts(value) {
 	if (typeof value === "string") return [value];

@@ -996,3 +996,25 @@ World.test("a press the server never answers can be made again later", function(
 	expect(press(world, ann), "sent again once the request was lost")
 	same(#heard(world, ann, "countdown"), 1, "the race starts")
 end)
+
+World.test("a win the server could not pay says so and starts no wait, so the next seen win is paid", function(world)
+	local ann, t = annAndCar(world, 2000)
+	-- Only the host's game can time the car here, so the win counts but is never paid.
+	world.hideTraffic = true
+	raceAnn(world, ann, t, 66, 35)
+	local result = card(world, ann, "result")
+	same(result.winner, "Ann", "she beat it")
+	same(result.prize, 0, "nothing paid")
+	same(result.reward, 2000, "the result still names the reward on this server")
+	same(result.prizeAgainIn, 0, "an unpaid win starts no wait")
+	same(ann.money, 1000, "not paid")
+	world.hideTraffic = false
+	world:drive(ann, 0, 0)
+	t.car.pos, t.car.racing = {x = 4, y = 3, z = 0}, false
+	world:advance(2)
+	raceAnn(world, ann, t, 40, 35)
+	local results = heard(world, ann, "result")
+	same(results[#results].prize, 2000, "the next win, with the car seen, is paid at once")
+	same(ann.money, 3000, "Ann's career gains $2,000")
+	same(wins(world, "Ann"), 2, "both wins count")
+end)
