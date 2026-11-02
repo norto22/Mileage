@@ -265,7 +265,8 @@ end
 function M.join(id)
 	if not invite or invite.id ~= id or invite.sent then return false end
 	local sr = streetRace()
-	local why = sr and sr.eligibility() or "Racing is not available."
+	local why = "Racing is not available."
+	if sr then why = sr.eligibility() end
 	if why then
 		invite.note = why
 		ui({phase = "invite", race = invite.id, host = invite.host, car = invite.car, distance = invite.distance,
