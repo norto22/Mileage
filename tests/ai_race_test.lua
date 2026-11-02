@@ -822,3 +822,177 @@ World.test("declining sends nothing and clears the invite", function(world)
 	same(sentToServer(world, bob, "mileageAiRace"), 0, "nothing sent")
 	world:as(bob, function() same(mileage_aiRace.press(), false, "no invite left to join") end)
 end)
+
+--== amounts, limits and endings the cards name ===============================
+
+World.test("two joined players make the race reward 200%, paid to the winner alone", function(world)
+	local ann, t, bob = threeNear(world, 2000)
+	-- Dan drives 150 m from Ann, inside the 300 m invite circle.
+	local dan = world:join("Dan", 1000, 3)
+	world:advance(1)
+	press(world, ann)
+	world:as(bob, function() mileage_aiRace.press() end)
+	world:as(dan, function() mileage_aiRace.press() end)
+	world:pump()
+	same(heard(world, dan, "countdown")[1].prize, 4000, "200% with two joined players")
+	same(lastRace(world, ann, "countdown").reward, 4000, "the host sees 200% too")
+	t.car.speed = 75
+	world:advance(5)
+	world:advance(30)
+	world:drive(dan, FINISH.x, FINISH.y, FINISH.z)
+	untilResult(world, dan)
+	same(card(world, dan, "result").winner, "Dan", "Dan beat the car")
+	same(dan.money, 5000, "Dan gets 200% of $2,000")
+	same(bob.money, 1000, "Bob nothing")
+	same(ann.money, 1000, "Ann nothing")
+	same(card(world, ann, "result").reward, 4000, "the result names the 200% reward")
+end)
+
+World.test("the race reward with one joined player is rounded down to whole dollars", function(world)
+	local ann, t, bob = threeNear(world, 1001)
+	press(world, ann)
+	same(card(world, bob, "invite").prize, 1501, "150% of $1,001 rounded down")
+	world:as(bob, function() mileage_aiRace.press() end)
+	world:pump()
+	t.car.speed = 75
+	world:advance(5)
+	world:advance(30)
+	world:drive(bob, FINISH.x, FINISH.y, FINISH.z)
+	untilResult(world, bob)
+	same(card(world, bob, "result").prize, 1501, "paid rounded down")
+	same(bob.money, 2501, "Bob's career gains $1,501")
+	same(ann.money, 1000, "Ann nothing")
+end)
+
+World.test("a player's time equal to the traffic car's does not beat it", function(world)
+	local ann = annAndCar(world, 2000)
+	-- The server cannot read the traffic car, and both times arrive straight from the host.
+	world.hideTraffic = true
+	press(world, ann)
+	local id = heard(world, ann, "countdown")[1].race
+	world.filter = function(m)
+		if m.way == "toServer" and m.name == "mileageRaceReport" then return "drop" end
+	end
+	world:advance(5)
+	world:advance(40)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	world:serverOutput(function()
+		mileageRaceReport(ann.id, World.encode({race = id, finished = 40}))
+		mileageRaceReport(ann.id, World.encode({race = id, aiFinished = 40}))
+	end)
+	world:pump()
+	world:advance(6)
+	local result = card(world, ann, "result")
+	same(result.aiWon, true, "the car keeps the tie")
+	same(result.winner, nil, "no player won")
+	same(result.places[1].car, true, "the car listed first")
+	same(wins(world, "Ann"), 0, "no leaderboard win for a tie")
+	same(ann.money, 1000, "nothing paid")
+end)
+
+World.test("the server takes a finish 1350 to 4150 m from the host's car and refuses one just outside", function(world)
+	roads(world)
+	local ann = world:join("Ann", 1000, 0)
+	local mine = world:giveTraffic(ann, {x = 4, y = 3})
+	-- Ann's own car stands at the origin, where the server reads it.
+	local function request(y)
+		local before = #heard(world, ann, "countdown")
+		world:serverOutput(function()
+			mileageAiRace(ann.id, World.encode({request = {car = mine.sid, start = {x = 0, y = 0, z = 0},
+				finish = {x = 0, y = y, z = 0}, model = "Ibishu Pessima"}}))
+		end)
+		world:pump()
+		local started = heard(world, ann, "countdown")[before + 1]
+		if started then
+			world:serverOutput(function() mileageRaceReport(ann.id, World.encode({race = started.race, gaveUp = true})) end)
+			world:pump()
+			return "started"
+		end
+		local refused = heard(world, ann, "refused")
+		return refused[#refused] and refused[#refused].why
+	end
+	local tooFar = "The finish must be 1.5 to 4 km away. Try again."
+	same(request(1350), "started", "1350 m: the picker's 1.5 km less the 150 m the car moved")
+	same(request(1349), tooFar, "1349 m is too close")
+	same(request(4150), "started", "4150 m: 4 km plus 150 m")
+	same(request(4151), tooFar, "4151 m is too far")
+end)
+
+World.test("the car's model name is cut to 40 characters without control characters, and none is the traffic car", function(world)
+	roads(world)
+	local ann = world:join("Ann", 1000, 0)
+	local mine = world:giveTraffic(ann, {x = 4, y = 3})
+	local function start(model)
+		local before = #heard(world, ann, "countdown")
+		world:serverOutput(function()
+			mileageAiRace(ann.id, World.encode({request = {car = mine.sid, start = {x = 0, y = 0, z = 0}, finish = FINISH,
+				model = model}}))
+		end)
+		world:pump()
+		local countdown = heard(world, ann, "countdown")[before + 1]
+		world:serverOutput(function() mileageRaceReport(ann.id, World.encode({race = countdown.race, gaveUp = true})) end)
+		world:pump()
+		return countdown.car
+	end
+	local long = start("Ibishu\nPessima " .. string.rep("x", 60))
+	expect(#long <= 40, "at most 40 characters: " .. #long)
+	expect(not long:find("%c"), "no control characters")
+	same(long:sub(1, 14), "Ibishu Pessima", "the name kept")
+	same(start(nil), "traffic car", "no model sent")
+	same(start("   "), "traffic car", "only spaces")
+end)
+
+World.test("when the host leaves, a joined player's race ends with no winner and their panel goes", function(world)
+	local ann, t, bob = threeNear(world, 2000)
+	press(world, ann)
+	world:as(bob, function() mileage_aiRace.press() end)
+	world:pump()
+	t.car.speed = 30
+	world:advance(10)
+	world:hook(ann, "onBeamMPServerLeave")
+	world:leave(ann)
+	local result = card(world, bob, "result")
+	same(result.why, "hostLeft", "Ann left")
+	same(result.winner, nil, "no winner")
+	world:as(bob, function() same(mileage_streetRace.current(), nil, "Bob's race panel is gone") end)
+	world:drive(bob, FINISH.x, FINISH.y, FINISH.z)
+	world:advance(8)
+	same(bob.money, 1000, "Bob is not paid for finishing alone")
+	same(wins(world, "Bob"), 0, "no win")
+end)
+
+World.test("with no wait set, every win against the traffic car is paid", function(world)
+	local ann, t = annAndCar(world, 2000)
+	world:setConfig("server", "aiRacePrizeCooldownMinutes", "0")
+	raceAnn(world, ann, t, 30, 40)
+	same(ann.money, 3000, "the first win paid")
+	world:drive(ann, 0, 0)
+	t.car.pos, t.car.racing = {x = 4, y = 3, z = 0}, false
+	world:advance(2)
+	raceAnn(world, ann, t, 30, 40)
+	same(ann.money, 5000, "the next win paid at once")
+	same(card(world, ann, "result").prizeAgainIn, 0, "no wait shown")
+end)
+
+World.test("the owner's race reward is held to 0 to 1,000,000", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	world:setConfig("server", "aiRacePrize", "5000000")
+	local status = heard(world, ann, "status")
+	same(status[#status].prize, 1000000, "capped at 1,000,000")
+	world:setConfig("server", "aiRacePrize", "-50")
+	status = heard(world, ann, "status")
+	same(status[#status].prize, 0, "never below 0")
+end)
+
+World.test("a press the server never answers can be made again later", function(world)
+	local ann = annAndCar(world, 2000)
+	world.filter = function(m)
+		if m.way == "toServer" and m.name == "mileageAiRace" then return "drop" end
+	end
+	expect(press(world, ann), "the press sent a request")
+	same(press(world, ann), false, "not sent twice while it waits")
+	world:advance(11)
+	world.filter = nil
+	expect(press(world, ann), "sent again once the request was lost")
+	same(#heard(world, ann, "countdown"), 1, "the race starts")
+end)
