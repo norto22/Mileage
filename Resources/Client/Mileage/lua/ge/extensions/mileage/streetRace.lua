@@ -24,7 +24,7 @@ local BESIDE_METRES = 4
 local PANEL_EVERY_SECONDS = 0.25
 
 -- The race under way here: {id, phase, other, stake, finish, radius, countdownLeft,
--- elapsed, reported, frozen}
+-- elapsed, reported, frozen, rolling, reward}
 local race = nil
 local panelWait = 0
 
@@ -38,7 +38,12 @@ local function report(fields)
 	TriggerServerEvent("mileageRaceReport", jsonEncode(fields))
 end
 
+-- A rolling race's panel also shows that nobody stops, and the race reward.
 local function ui(data)
+	if race and race.rolling and data.race == race.id then
+		data.rolling = true
+		data.reward = race.reward
+	end
 	guihooks.trigger("MileageRace", data)
 end
 
@@ -262,6 +267,39 @@ function M.startEventRace(info)
 	local c = compat()
 	if c then c.setNavigationTarget(race.finish) end
 	ui({phase = "countdown", race = race.id, other = race.other, stake = 0, count = math.ceil(race.countdownLeft)})
+	return true
+end
+
+--- A race with a rolling start (a race against a traffic car): the same countdown, timing,
+--- finish report and Give up as an event race, but no car is held or moved, so everyone
+--- keeps driving through the countdown. info: {id, finish, radius, seconds, other, reward}
+function M.startRollingRace(info)
+	if type(info) ~= "table" or type(info.id) ~= "string" or not isPoint(info.finish) then return false end
+	race = {id = info.id, phase = "countdown", other = type(info.other) == "string" and info.other or "the race",
+		stake = 0, rolling = true, reward = tonumber(info.reward) or 0, finish = info.finish,
+		radius = tonumber(info.radius) or 20, countdownLeft = tonumber(info.seconds) or 5}
+	local c = compat()
+	if c then c.setNavigationTarget(race.finish) end
+	ui({phase = "countdown", race = race.id, other = race.other, stake = 0, count = math.ceil(race.countdownLeft)})
+	return true
+end
+
+--- The race under way here, {id, phase, elapsed}, or nil. A race against a traffic car
+--- times that car on this clock.
+function M.current()
+	if not race then return nil end
+	return {id = race.id, phase = race.phase, elapsed = race.elapsed}
+end
+
+--- Changes who a rolling race is against and its race reward (a player joined).
+--- info: {other, reward}
+function M.setRaceInfo(id, info)
+	if not race or race.id ~= id or not race.rolling or type(info) ~= "table" then return false end
+	if type(info.other) == "string" then race.other = info.other end
+	if tonumber(info.reward) then race.reward = tonumber(info.reward) end
+	if race.phase == "countdown" and race.countdownLeft then
+		ui({phase = "countdown", race = race.id, other = race.other, stake = 0, count = math.ceil(race.countdownLeft)})
+	end
 	return true
 end
 

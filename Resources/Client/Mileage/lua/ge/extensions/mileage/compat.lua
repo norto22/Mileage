@@ -315,6 +315,64 @@ function M.getMapNodes()
 	return nil
 end
 
+--== races against a traffic car =============================================
+-- The traffic car beside the player races to a road point, so these read the game's
+-- traffic data, its road routes and the car's model name. Each returns nil (or an empty
+-- list) when the game lacks it, and the race is then not offered or ends.
+
+-- The game's traffic cars by game vehicle id, or nil.
+function M.getTrafficData()
+	local fn = pickOrWarn(gameplay_traffic, "gameplay_traffic", "getTrafficData", "traffic cars cannot be raced")
+	if not fn then return nil end
+	local ok, data = pcall(fn)
+	if ok and type(data) == "table" then return data end
+	return nil
+end
+
+-- The road route, as node names, from pos to the road node named node, or nil.
+function M.getPointNodePath(pos, node)
+	local fn = pickOrWarn(map, "map", "getPointNodePath", "traffic cars cannot be raced")
+	if not fn or type(pos) ~= "table" or type(node) ~= "string" then return nil end
+	local ok, path = pcall(fn, vec3(pos.x, pos.y, pos.z), node)
+	if ok and type(path) == "table" and #path > 0 then return path end
+	return nil
+end
+
+-- About metres of road beyond node, heading along dir, as node names, so a racing car
+-- does not brake for the finish; an empty list when the game cannot tell.
+function M.getRoadBeyond(node, dir, metres)
+	local fn = pickOrWarn(map, "map", "getGraphpath", "a racing traffic car brakes at the finish")
+	if not fn or type(dir) ~= "table" then return {} end
+	local ok, path = pcall(function()
+		return fn():getRandomPathG(node, vec3(dir.x, dir.y, dir.z), metres, nil, nil, false)
+	end)
+	if ok and type(path) == "table" then return path end
+	return {}
+end
+
+-- The model's name as the game shows it ("Ibishu Pessima"), or the model key.
+function M.getModelName(jbeam)
+	local fn = pick(core_vehicles, "getModel")
+	if fn and type(jbeam) == "string" then
+		local ok, data = pcall(fn, jbeam)
+		local model = ok and type(data) == "table" and data.model or nil
+		if type(model) == "table" then
+			local name = table.concat({tostring(model.Brand or ""), tostring(model.Name or "")}, " "):match("^%s*(.-)%s*$")
+			if name ~= "" then return name end
+		end
+	end
+	return type(jbeam) == "string" and jbeam or nil
+end
+
+-- The control bound to a key action ("j"), or nil when none is.
+function M.getControlForAction(action)
+	local fn = pick(core_input_bindings, "getControlForAction")
+	if not fn then return nil end
+	local ok, control = pcall(fn, action)
+	if ok and type(control) == "string" and control ~= "" then return control end
+	return nil
+end
+
 function M.hasRaceFunctions()
 	return pick(core_groundMarkers, "getTargetPos") ~= nil and pick(spawn, "safeTeleport") ~= nil
 end

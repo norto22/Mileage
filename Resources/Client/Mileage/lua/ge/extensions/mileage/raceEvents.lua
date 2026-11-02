@@ -36,27 +36,49 @@ local function report(fields)
 	TriggerServerEvent("mileageRaceReport", jsonEncode(fields))
 end
 
--- A random road node between min and max metres from start, sent to the server.
-local function pickFinish(message)
+-- How many random road points pickRoadPoint offers to accept before it gives up.
+local PICK_TRIES = 10
+
+--- A random road node between min and max metres (flat) from from: {pos = {x, y, z},
+--- node = its name in the game's road map}, or nil when there is none. accept(candidate),
+--- when given, is asked about up to PICK_TRIES random candidates and the first it takes is
+--- returned; race events pass none, a race against a traffic car passes its road route check.
+function M.pickRoadPoint(from, min, max, accept)
 	local c = compat()
 	local nodes = c and c.getMapNodes()
-	if type(nodes) ~= "table" or not isPoint(message.start) then return end
-	local low, high = tonumber(message.min) or 1500, tonumber(message.max) or 4000
+	if type(nodes) ~= "table" or not isPoint(from) then return nil end
+	local low, high = tonumber(min) or 1500, tonumber(max) or 4000
 	local candidates = {}
-	for _, node in pairs(nodes) do
+	for name, node in pairs(nodes) do
 		local pos = type(node) == "table" and node.pos
 		if isPoint(pos) then
-			local dx, dy = pos.x - message.start.x, pos.y - message.start.y
+			local dx, dy = pos.x - from.x, pos.y - from.y
 			local metres = math.sqrt(dx * dx + dy * dy)
-			if metres >= low and metres <= high then table.insert(candidates, pos) end
+			if metres >= low and metres <= high then
+				table.insert(candidates, {pos = {x = pos.x, y = pos.y, z = pos.z}, node = name})
+			end
 		end
 	end
-	if #candidates == 0 then
+	for _ = 1, PICK_TRIES do
+		if #candidates == 0 then return nil end
+		local i = math.random(#candidates)
+		local candidate = candidates[i]
+		if type(accept) ~= "function" or accept(candidate) then return candidate end
+		-- Not offered again.
+		candidates[i] = candidates[#candidates]
+		candidates[#candidates] = nil
+	end
+	return nil
+end
+
+-- A random road node between min and max metres from start, sent to the server.
+local function pickFinish(message)
+	local picked = M.pickRoadPoint(message.start, message.min, message.max)
+	if not picked then
 		log("W", logTag, "no road point within the event's distance; the server uses its own finish")
 		return
 	end
-	local pos = candidates[math.random(#candidates)]
-	report({race = message.id, finish = {x = pos.x, y = pos.y, z = pos.z}})
+	report({race = message.id, finish = picked.pos})
 end
 
 -- Moves this car to its place on the grid and starts the race here.

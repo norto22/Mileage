@@ -60,6 +60,13 @@ local defaultConfig = {
 		-- 0 is off. The same two players earn it at most once per cooldown (0 to 1440 min).
 		racePrize = 0,
 		racePrizeCooldownMinutes = 10,
+		-- Players may race one of their own traffic cars on the road ("Race this car" in the
+		-- prompts app). aiRacePrize is the race reward the server pays the first player who
+		-- beats the traffic car, 0 to 1000000 (0 is off), plus half of it for each player who
+		-- joined; one player earns it at most once per cooldown (0 to 1440 min).
+		allowAiRaces = true,
+		aiRacePrize = 0,
+		aiRacePrizeCooldownMinutes = 10,
 		-- The shortest race allowed, in metres from start to finish (0 to 20000), and the
 		-- time after which a race nobody finished ends with both stakes back (1 to 120 min).
 		raceMinDistance = 500,
@@ -147,8 +154,8 @@ local ledger = {
 
 local STATS_SECONDS = 60
 local STATS_FEATURES = {"damage", "carStates", "trafficMarks", "trafficShare", "paint", "prefabs", "drag",
-	"payments", "transfers", "offers", "races", "leaderboard", "events", "alive", "trafficLights", "notifications",
-	"config"}
+	"payments", "transfers", "offers", "races", "leaderboard", "events", "aiRaces", "alive", "trafficLights",
+	"notifications", "config"}
 
 -- totals[feature] and slots[second % STATS_SECONDS].counts[feature]:
 -- {received, sent, recipients, bytes}.
@@ -687,6 +694,7 @@ function onInit()
 	MP.RegisterEvent("mileageOffer","mileageOffer")
 	MP.RegisterEvent("mileageOfferAnswer","mileageOfferAnswer")
 	MP.RegisterEvent("mileageRaceReport","mileageRaceReport")
+	MP.RegisterEvent("mileageAiRace","mileageAiRace")
 	MP.RegisterEvent("mileageDragTime","mileageDragTime")
 	MP.RegisterEvent("mileageLeaderboard","mileageLeaderboard")
 
@@ -1226,6 +1234,9 @@ local function features()
 		raceStakeMax = serverNumber("raceStakeMax", 0, 1000000),
 		racePrize = serverNumber("racePrize", 0, 1000000),
 		racePrizeCooldownMinutes = serverNumber("racePrizeCooldownMinutes", 0, 1440),
+		allowAiRaces = serverSwitch("allowAiRaces"),
+		aiRacePrize = serverNumber("aiRacePrize", 0, 1000000),
+		aiRacePrizeCooldownMinutes = serverNumber("aiRacePrizeCooldownMinutes", 0, 1440),
 		raceMinDistance = serverNumber("raceMinDistance", 0, 20000),
 		raceTimeLimitMinutes = serverNumber("raceTimeLimitMinutes", 1, 120),
 		sessionSendingMax = tonumber(Config.server.sessionSendingMax) or 0,
@@ -1745,6 +1756,25 @@ local function carNear(player_id, point, metres)
 	return nil
 end
 
+-- Where the server sees one of the player's own cars (not traffic), {x, y, z}, or nil when
+-- it cannot read one: where a race against a traffic car starts, and who is near it.
+local function carPosition(player_id)
+	if type(MP.GetPlayerVehicles) ~= "function" or type(MP.GetPositionRaw) ~= "function" then return nil end
+	local ok, vehicles = pcall(MP.GetPlayerVehicles, player_id)
+	if not ok or type(vehicles) ~= "table" then return nil end
+	for vehicleId in pairs(vehicles) do
+		if not isTraffic(tostring(player_id) .. "-" .. tostring(vehicleId)) then
+			local readOk, raw = pcall(MP.GetPositionRaw, player_id, vehicleId)
+			local at = readOk and positionOf(raw) or nil
+			if at then
+				positionsEverRead = true
+				return at
+			end
+		end
+	end
+	return nil
+end
+
 -- Whether a finish report from player_id counts: a time that could have been driven, from
 -- a game whose car the server sees at the finish.
 local function finishCounts(player_id, seconds, start, finish, sinceGreen)
@@ -1770,6 +1800,7 @@ local function readCars(names, point)
 end
 
 Money.finishCounts, Money.metresBetween, Money.readCars = finishCounts, metresBetween, readCars
+Money.carPosition, Money.plausibleTime = carPosition, plausibleTime
 
 -- A racer's game reports: {race, pose = {pos, dir, up}} (the challenger, for the start),
 -- {race, ready = true} (the challenged, beside it), {race, failed = why},
@@ -1780,6 +1811,8 @@ function mileageRaceReport(player_id, data)
 	if not report or type(report.race) ~= "string" then return end
 	-- Set by the events section: reports about an event's race.
 	if Money.eventRaceReport and Money.eventRaceReport(player_id, report) then return end
+	-- Set by the AI races section: reports about a race against a traffic car.
+	if Money.aiRaceReport and Money.aiRaceReport(player_id, report) then return end
 	local race = racesData.races[report.race]
 	local live = liveRaces[report.race]
 	local name = MP.GetPlayerName(player_id)
@@ -2496,6 +2529,382 @@ Money.eventsPlayerLeft = eventsPlayerLeft
 Money.loadEvent = loadEvent
 end
 
+--== AI races ================================================================
+-- A player races one of their own traffic cars on the road ("Race this car" in the
+-- Mileage prompts app). Only the game that spawned a traffic car can drive it, so the
+-- host's game picks a random road finish 1.5 to 4 km away that the car can reach and asks
+-- for the race (mileageAiRace {request}). The server checks it and starts a ROLL_SECONDS
+-- rolling countdown in which nobody stops; the host's game takes the car off traffic duty,
+-- sends it a race route at zero and reports its time (mileageRaceReport {race, aiFinished}
+-- or {race, aiOut}). Players whose car the server sees within INVITE_METRES of the host
+-- are invited for the same countdown ({join = id}) and race from where they are, timed from
+-- the same zero. The fastest counted time AI_DECIDE_SECONDS after the first wins: a player
+-- who beats the traffic car gets a leaderboard win and, when the owner set
+-- server.aiRacePrize and that player's own cooldown has passed, the race reward from the
+-- server, plus half of it for each player who joined. The race belongs to its host: their
+-- Give up or leaving, or the traffic car dropping out, ends it for everyone with no winner.
+-- Nothing is kept across a server start. The games' window never calls this AI; only the
+-- owner's settings and this console do.
+--
+-- aiRaces[id] = {id, host, car, model, start, finish, phase = "countdown" | "racing",
+-- goAt, deadline, racers = {[name] = {start}}, invited = {[name] = true}, reward,
+-- reports = {[name] = seconds}, aiSeconds, firstReportAt}
+
+do
+local startTransfer, careerStarted, playerIdByName, isPoint = Money.startTransfer, Money.careerStarted,
+	Money.playerIdByName, Money.isPoint
+local SERVER_PARTY = Money.SERVER
+
+local ROLL_SECONDS = 5
+local AI_DECIDE_SECONDS = 5
+local AI_FINISH_RADIUS = 20
+local INVITE_METRES = 300
+-- The game picks a finish 1.5 to 4 km from its car; the car has moved a little by the time
+-- the server reads it.
+local FINISH_MIN, FINISH_MAX, FINISH_SLACK = 1500, 4000, 150
+local MODEL_MAX_LENGTH = 40
+local PRIZE_HIGH = 1000000
+
+local aiRaces = {}
+local aiSeq = 0
+-- When each player last earned the race reward (os.time); not kept across starts, as the
+-- player race prize's cooldown is not.
+local aiPrizeEarnedAt = {}
+
+local REFUSED = {
+	off = "Racing traffic is off on this server.",
+	career = "Your career has not started on this server yet.",
+	busy = "You are already in a race.",
+	car = "Only your own traffic can race you.",
+	traffic = "That car is not traffic.",
+	carBusy = "That car is already racing.",
+	finish = "No finish was set for the race.",
+	distance = "The finish must be 1.5 to 4 km away. Try again.",
+}
+
+local function rewardFor(joined)
+	return math.floor(serverNumber("aiRacePrize", 0, PRIZE_HIGH) * (1 + 0.5 * joined))
+end
+
+-- Seconds until name may earn the race reward again; 0 when they may now.
+local function prizeAgainIn(name)
+	local earned = aiPrizeEarnedAt[name]
+	if not earned then return 0 end
+	return math.max(0, serverNumber("aiRacePrizeCooldownMinutes", 0, 1440) * 60 - (os.time() - earned))
+end
+
+local function sendStatus(player_id)
+	local name = MP.GetPlayerName(player_id)
+	sendJson("aiRaces", player_id, "rxMileageAiRace", {phase = "status", allowed = serverSwitch("allowAiRaces"),
+		prize = serverNumber("aiRacePrize", 0, PRIZE_HIGH), prizeAgainIn = name and prizeAgainIn(name) or 0})
+end
+
+local function sendTo(name, message)
+	local id = playerIdByName(name)
+	if id then sendJson("aiRaces", id, "rxMileageAiRace", message) end
+end
+
+local function racerNames(race)
+	local names = {}
+	for name in pairs(race.racers) do table.insert(names, name) end
+	table.sort(names)
+	return names
+end
+
+-- Players who joined the host's race.
+local function joinedCount(race)
+	return #racerNames(race) - (race.racers[race.host] and 1 or 0)
+end
+
+local function raceOf(name)
+	for _, race in pairs(aiRaces) do
+		if race.racers[name] then return race end
+	end
+	return nil
+end
+
+-- A player in a race against a traffic car is racing for street race challenges and event
+-- joins and starts too (Money.busy reads this).
+local streetInRace = Money.inRace
+Money.inRace = function(name)
+	return raceOf(name) ~= nil or (streetInRace ~= nil and streetInRace(name))
+end
+
+local function modelText(model)
+	local text = type(model) == "string" and model:gsub("%c", " "):match("^%s*(.-)%s*$"):sub(1, MODEL_MAX_LENGTH) or ""
+	if text == "" then return "traffic car" end
+	return text
+end
+
+local function flatMetres(a, b)
+	local dx, dy = a.x - b.x, a.y - b.y
+	return math.sqrt(dx * dx + dy * dy)
+end
+
+-- Invited players who did not join hear that the invitation is over.
+local function closeInvites(race)
+	for name in pairs(race.invited) do
+		if not race.racers[name] then sendTo(name, {phase = "inviteClosed", race = race.id}) end
+	end
+	race.invited = {}
+end
+
+-- Zero: the reward counts the players in the race now, and the invitation closes.
+local function goIfDue(race, now)
+	if race.phase ~= "countdown" or now < race.goAt then return end
+	race.phase = "racing"
+	race.reward = rewardFor(joinedCount(race))
+	closeInvites(race)
+end
+
+local function placesText(places)
+	local parts = {}
+	for i, place in ipairs(places) do
+		table.insert(parts, string.format("%d. %s %.1f s", i, consoleText(place.name), place.seconds))
+	end
+	return #parts > 0 and table.concat(parts, ", ") or "no times"
+end
+
+-- Ends the race: the winner's win and reward, then every racer hears the result and their
+-- new status.
+local function endAiRace(race, winner, aiWon, why, places)
+	aiRaces[race.id] = nil
+	closeInvites(race)
+	places = places or {}
+	local paid = 0
+	if winner then
+		if Money.leaderboardWin then Money.leaderboardWin(winner) end
+		if (race.reward or 0) > 0 and prizeAgainIn(winner) == 0 then
+			paid = race.reward
+			aiPrizeEarnedAt[winner] = os.time()
+			startTransfer({kind = "prize", from = SERVER_PARTY, to = winner, amount = paid, giveLabel = "Race reward"})
+		end
+	end
+	for _, name in ipairs(racerNames(race)) do
+		local id = playerIdByName(name)
+		if id then
+			sendJson("aiRaces", id, "rxMileageAiRace", {phase = "result", race = race.id, host = race.host,
+				car = race.model, winner = winner, aiWon = aiWon == true, places = places, prize = paid,
+				reward = race.reward or 0, prizeAgainIn = prizeAgainIn(name), why = why, you = name})
+			sendStatus(id)
+		end
+	end
+	local outcome
+	if winner then
+		outcome = consoleText(winner) .. " wins" .. (paid > 0 and string.format(", $%d race reward", paid) or ", no reward")
+	elseif aiWon then
+		outcome = "the traffic car wins, no reward"
+	else
+		outcome = "no winner (" .. why .. ")"
+	end
+	print(string.format("[Mileage] AI race %s (%s's %s): %s; %s", race.id, consoleText(race.host),
+		consoleText(race.model), placesText(places), outcome))
+end
+
+-- The fastest time wins; a player's time equal to the traffic car's does not beat it.
+local function decideAiRace(race, why)
+	local places = {}
+	for name, seconds in pairs(race.reports) do table.insert(places, {name = name, seconds = seconds}) end
+	if race.aiSeconds then table.insert(places, {name = race.model, seconds = race.aiSeconds, car = true}) end
+	table.sort(places, function(a, b)
+		if a.seconds ~= b.seconds then return a.seconds < b.seconds end
+		if (a.car == true) ~= (b.car == true) then return a.car == true end
+		return a.name < b.name
+	end)
+	local first = places[1]
+	local aiWon = first ~= nil and first.car == true
+	endAiRace(race, (first and not aiWon) and first.name or nil, aiWon, why or "finished", places)
+end
+
+-- Every racer and the traffic car have a time.
+local function allIn(race)
+	if not race.aiSeconds then return false end
+	for name in pairs(race.racers) do
+		if not race.reports[name] then return false end
+	end
+	return true
+end
+
+local function refuse(player_id, why)
+	sendJson("aiRaces", player_id, "rxMileageAiRace", {phase = "refused", why = REFUSED[why] or why})
+end
+
+local function requestProblem(player_id, name, request)
+	if not serverSwitch("allowAiRaces") then return "off" end
+	if not careerStarted(player_id) then return "career" end
+	if Money.busy and Money.busy(name) then return "busy" end
+	if not Money.ownsVehicle or not Money.ownsVehicle(player_id, request.car) then return "car" end
+	if not isTraffic(request.car) then return "traffic" end
+	for _, race in pairs(aiRaces) do
+		if race.car == request.car then return "carBusy" end
+	end
+	if not isPoint(request.start) or not isPoint(request.finish) then return "finish" end
+	return nil
+end
+
+local function invite(race)
+	for id, name in pairs(MP.GetPlayers() or {}) do
+		if name ~= race.host and MP.IsPlayerConnected(id) and careerStarted(id)
+				and not (Money.busy and Money.busy(name)) then
+			local at = Money.carPosition(id)
+			if at and Money.metresBetween(at, race.start) <= INVITE_METRES then
+				race.invited[name] = true
+				sendJson("aiRaces", id, "rxMileageAiRace", {phase = "invite", race = race.id, host = race.host,
+					car = race.model, finish = race.finish, seconds = ROLL_SECONDS, prize = rewardFor(joinedCount(race) + 1),
+					distance = math.floor(flatMetres(at, race.finish))})
+			end
+		end
+	end
+end
+
+local function startAiRace(player_id, name, request)
+	-- Where the server sees the host's car, when it can.
+	local start = Money.carPosition(player_id) or {x = request.start.x, y = request.start.y, z = request.start.z}
+	local metres = flatMetres(start, request.finish)
+	if metres < FINISH_MIN - FINISH_SLACK or metres > FINISH_MAX + FINISH_SLACK then
+		refuse(player_id, "distance")
+		return
+	end
+	aiSeq = aiSeq + 1
+	local now = signalTimer:GetCurrent()
+	local race = {id = "ai" .. aiSeq .. "-" .. os.time(), host = name, car = request.car, model = modelText(request.model),
+		start = start, finish = {x = request.finish.x, y = request.finish.y, z = request.finish.z}, phase = "countdown",
+		goAt = now + ROLL_SECONDS, racers = {[name] = {start = start}}, invited = {}, reports = {}}
+	race.deadline = race.goAt + serverNumber("raceTimeLimitMinutes", 1, 120) * 60
+	race.reward = rewardFor(0)
+	aiRaces[race.id] = race
+	sendJson("aiRaces", player_id, "rxMileageAiRace", {phase = "countdown", race = race.id, host = name, car = race.model,
+		finish = race.finish, radius = AI_FINISH_RADIUS, seconds = ROLL_SECONDS, prize = race.reward, racers = {name}})
+	invite(race)
+	local invited = 0
+	for _ in pairs(race.invited) do invited = invited + 1 end
+	print(string.format("[Mileage] AI race %s: %s races their %s to a finish %d m away, %d invited", race.id,
+		consoleText(name), consoleText(race.model), math.floor(metres), invited))
+end
+
+local function joinAiRace(player_id, name, id)
+	local race = aiRaces[id]
+	local now = signalTimer:GetCurrent()
+	if race then goIfDue(race, now) end
+	if not race or race.phase ~= "countdown" or not race.invited[name] or race.racers[name]
+			or not careerStarted(player_id) or (Money.busy and Money.busy(name)) then
+		sendJson("aiRaces", player_id, "rxMileageAiRace", {phase = "inviteClosed", race = id})
+		return
+	end
+	race.racers[name] = {start = Money.carPosition(player_id)}
+	local reward = rewardFor(joinedCount(race))
+	local racers = racerNames(race)
+	sendJson("aiRaces", player_id, "rxMileageAiRace", {phase = "countdown", race = race.id, host = race.host,
+		car = race.model, finish = race.finish, radius = AI_FINISH_RADIUS, seconds = race.goAt - now, prize = reward,
+		racers = racers})
+	for _, racer in ipairs(racers) do
+		sendTo(racer, {phase = "joined", race = race.id, racers = racers, prize = reward})
+	end
+end
+
+-- A player's game asks for a race, {request = {car = "<player_id>-<vehicle_id>", start,
+-- finish, model}}, or joins one it was invited to, {join = race id}.
+function mileageAiRace(player_id, data)
+	received("aiRaces")
+	local message = decodeTable(data)
+	local name = MP.GetPlayerName(player_id)
+	if not message or not name then return end
+	if type(message.join) == "string" then
+		joinAiRace(player_id, name, message.join)
+		return
+	end
+	if type(message.request) ~= "table" then return end
+	local why = requestProblem(player_id, name, message.request)
+	if why then
+		refuse(player_id, why)
+		return
+	end
+	startAiRace(player_id, name, message.request)
+end
+
+-- Reports about a race against a traffic car, from mileageRaceReport: a racer's
+-- {race, finished = seconds} or {race, gaveUp = true}, and from the host alone
+-- {race, aiFinished = seconds}, {race, aiOut = why} or {race, failed = why}. Returns true
+-- when the report was about such a race, ended or not.
+Money.aiRaceReport = function(player_id, report)
+	local race = aiRaces[report.race]
+	if not race then return report.race:match("^ai%d") ~= nil end
+	local name = MP.GetPlayerName(player_id)
+	if not name or not race.racers[name] then return true end
+	local now = signalTimer:GetCurrent()
+	goIfDue(race, now)
+	local isHost = name == race.host
+	if report.gaveUp == true or report.failed ~= nil then
+		if isHost then
+			endAiRace(race, nil, false, report.failed ~= nil and "failed" or "hostGaveUp")
+		elseif not race.reports[name] then
+			-- An invited racer drops out; the others race on.
+			race.racers[name] = nil
+			sendTo(name, {phase = "result", race = race.id, host = race.host, car = race.model, out = true,
+				why = "gaveUp", places = {}, prize = 0, reward = race.reward or 0, you = name})
+			if allIn(race) then decideAiRace(race) end
+		end
+		return true
+	end
+	if isHost and report.aiOut ~= nil then
+		if not race.aiSeconds then endAiRace(race, nil, false, "aiOut") end
+		return true
+	end
+	if race.phase ~= "racing" then return true end
+	local sinceGo = now - race.goAt
+	if isHost and report.aiFinished ~= nil then
+		if not race.aiSeconds
+				and Money.plausibleTime(report.aiFinished, Money.metresBetween(race.start, race.finish), sinceGo) then
+			race.aiSeconds = report.aiFinished
+			race.firstReportAt = race.firstReportAt or now
+		end
+	elseif report.finished ~= nil and not race.reports[name]
+			and Money.finishCounts(player_id, report.finished, race.racers[name].start or race.start, race.finish,
+				sinceGo) then
+		race.reports[name] = report.finished
+		race.firstReportAt = race.firstReportAt or now
+	end
+	if allIn(race) then decideAiRace(race) end
+	return true
+end
+
+local function aiRacesTick()
+	local now = signalTimer:GetCurrent()
+	for _, race in pairs(aiRaces) do
+		goIfDue(race, now)
+		if race.firstReportAt and now - race.firstReportAt >= AI_DECIDE_SECONDS then
+			decideAiRace(race)
+		elseif race.phase == "racing" and now >= race.deadline then
+			if race.firstReportAt then decideAiRace(race, "timeout") else endAiRace(race, nil, false, "timeout") end
+		end
+	end
+end
+
+-- The host leaving ends their race; another racer who leaves before finishing drops out,
+-- and one who already finished keeps their time.
+local function aiRacesPlayerLeft(name)
+	for _, race in pairs(aiRaces) do
+		race.invited[name] = nil
+		if race.host == name then
+			endAiRace(race, nil, false, "hostLeft")
+		elseif race.racers[name] and not race.reports[name] then
+			race.racers[name] = nil
+			if allIn(race) then decideAiRace(race) end
+		end
+	end
+end
+
+Money.aiRacesCareerStarted = sendStatus
+-- Every player whose career runs hears the owner's settings again.
+Money.sendAiRaceStatus = function()
+	for id in pairs(MP.GetPlayers() or {}) do
+		if careerStarted(id) then sendStatus(id) end
+	end
+end
+Money.aiRacesTick = aiRacesTick
+Money.aiRacesPlayerLeft = aiRacesPlayerLeft
+end
+
 -- Loads what the money, racing, leaderboard and event sections keep between starts.
 Money.start = function()
 	Money.loadTransfers()
@@ -2826,6 +3235,7 @@ local function ownsVehicle(player_id, serverVehicleID)
 	return owner ~= nil and owner == tostring(tonumber(player_id))
 		and vehicle == tostring(tonumber(vehicle))
 end
+Money.ownsVehicle = ownsVehicle
 
 -- Sends every player the state of one vehicle; the full map goes only to a player who
 -- asks for it (careerVehSyncRequested).
@@ -2962,6 +3372,7 @@ function careerSyncRequested(player_id, data)
 		entry.careerActive = true
 		Money.transfersCareerStarted(player_id)
 		Money.eventsCareerStarted(player_id)
+		Money.aiRacesCareerStarted(player_id)
 	end
 end
 
@@ -2979,6 +3390,7 @@ function careerStartResult(player_id, data)
 		print("[Mileage] " .. describePlayer(player_id) .. " started their career")
 		Money.transfersCareerStarted(player_id)
 		Money.eventsCareerStarted(player_id)
+		Money.aiRacesCareerStarted(player_id)
 	elseif result.started == false then
 		dropUnstartedPlayer(player_id, "career start failed: " .. consoleText(result.reason or "no reason given"))
 	end
@@ -3160,6 +3572,7 @@ function tick()
 	Money.offersTick()
 	Money.racesTick()
 	Money.eventsTick()
+	Money.aiRacesTick()
 	ticksSinceAlive = ticksSinceAlive + 1
 	if ticksSinceAlive >= ALIVE_EVERY_TICKS then
 		ticksSinceAlive = 0
@@ -3210,6 +3623,7 @@ function onPlayerDisconnectHandler(player_id)
 	if name then
 		Money.racesPlayerLeft(name)
 		Money.eventsPlayerLeft(name)
+		Money.aiRacesPlayerLeft(name)
 	end
 	loadedPrefabs[player_id] = nil
 	ledger.send[player_id] = nil
@@ -3298,6 +3712,7 @@ function SetConfig(arguments)
 	WriteJson(configPath .. "config.json", Config)
 	sendJson("config", -1, "rxClientConfigUpdate", Config.client)
 	Money.sendFeatures(-1)
+	Money.sendAiRaceStatus()
 	-- Offers of a feature switched off close on the next tick.
 	-- An amount, a switch or a total may have changed everyone's share.
 	sharesChanged()
