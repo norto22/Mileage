@@ -542,6 +542,39 @@ World.test("a report about an ended race changes nothing", function(world)
 	same(#heard(world, ann, "result"), 1, "one result")
 end)
 
+--== the key and the load order (T13) =========================================
+
+World.test("the key action file names mileageAiRace under Gameplay with no default key and calls press", function(world)
+	local file = World.realOpen("Resources/Client/Mileage/lua/ge/extensions/core/input/actions/mileage.json", "r")
+	expect(file, "the action file exists")
+	local actions = World.decode(file:read("*a"))
+	file:close()
+	local action = actions.mileageAiRace
+	same(action.cat, "gameplay", "under Gameplay")
+	same(action.title, "Race the car beside you (Mileage)", "its title")
+	same(action.onDown, "if mileage_aiRace then mileage_aiRace.press() end", "presses the button")
+	same(action.ctx, "tlua", "game Lua")
+	local keys = 0
+	for _ in pairs(actions) do keys = keys + 1 end
+	same(keys, 1, "one action")
+	expect(not action.binding and not action.default, "no default key")
+	-- Each game asks the game to read the file again when Mileage loads.
+	world:join("Ann", 1000, 0)
+	same(world.actionReloads, 1, "read again once")
+	same(world.actionFile, "/lua/ge/extensions/core/input/actions/mileage.json", "this file")
+end)
+
+World.test("the mod loads the traffic race after the street race and race events", function()
+	local file = World.realOpen("Resources/Client/Mileage/scripts/Mileage/modScript.lua", "r")
+	local text = file:read("*a")
+	file:close()
+	local street = text:find("loadPersistent('mileage/streetRace')", 1, true)
+	local events = text:find("loadPersistent('mileage/raceEvents')", 1, true)
+	local traffic = text:find("loadPersistent('mileage/aiRace')", 1, true)
+	expect(traffic, "aiRace is loaded")
+	expect(traffic > street and traffic > events, "after both")
+end)
+
 --== players near you (T10, T11) =============================================
 
 -- Ann and her traffic car, Bob 50 m away and Cat 900 m away.

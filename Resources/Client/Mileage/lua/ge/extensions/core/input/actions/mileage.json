@@ -1,0 +1,10 @@
+{
+  "mileageAiRace": {
+    "cat": "gameplay",
+    "order": 1,
+    "ctx": "tlua",
+    "onDown": "if mileage_aiRace then mileage_aiRace.press() end",
+    "title": "Race the car beside you (Mileage)",
+    "desc": "Race the traffic car beside you, or join a race you are invited to"
+  }
+}
