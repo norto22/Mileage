@@ -1478,6 +1478,35 @@ end)
 
 --== second opinion: a stop before the line, height, a reset after the finish =====
 
+-- Bob's game clock runs 3 s ahead of the server's, which the server allows; the host's
+-- game then throws the traffic car through the finish in one tick.
+World.test("a traffic car thrown through the finish after a joined player's finish does not take the win", function(world)
+	local ann, t, bob = threeNear(world, 2000)
+	press(world, ann)
+	local id = heard(world, ann, "countdown")[1].race
+	world:as(bob, function() mileage_aiRace.press() end)
+	world:pump()
+	world.filter = function(m)
+		if m.way == "toServer" and m.name == "mileageRaceReport" and (m.data:find("finished", 1, true)
+				or m.data:find("aiOut", 1, true)) then
+			return "drop"
+		end
+	end
+	t.car.speed = 30
+	world:advance(5)
+	world:advance(35)
+	world:drive(bob, FINISH.x, FINISH.y, FINISH.z)
+	world:serverOutput(function() mileageRaceReport(bob.id, World.encode({race = id, finished = 38})) end)
+	world:pump()
+	-- From about 1 km out to 100 m past the finish in one tick.
+	t.car.pos, t.car.speed = {x = 0, y = 2600, z = 0}, 0
+	untilResult(world, bob, 10)
+	local result = card(world, bob, "result")
+	same(result.winner, "Bob", "the throw gives the car no time")
+	same(result.aiWon, false, "the car did not win")
+	same(bob.money, 4000, "Bob gets 150%")
+end)
+
 -- Ann reaches the line while the car stands 37 m from the finish; it drives on after her
 -- time is in and crosses on its first reading after the stop.
 World.test("a traffic car that stood still before the line is timed from its last reading, not before the stop", function(world)
