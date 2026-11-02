@@ -2552,17 +2552,20 @@ end
 -- sends it a race route at zero and reports its time (mileageRaceReport {race, aiFinished}
 -- or {race, aiOut}). Players whose car the server sees within INVITE_METRES of the host
 -- are invited for the same countdown ({join = id}) and race from where they are, timed from
--- the same zero. The fastest counted time AI_DECIDE_SECONDS after the first wins: a player
--- who beats the traffic car gets a leaderboard win and, when the owner set
--- server.aiRacePrize and that player's own cooldown has passed, the race reward from the
--- server, plus half of it for each player who joined. The race belongs to its host: their
--- Give up or leaving, or the traffic car dropping out, ends it for everyone with no winner.
--- Nothing is kept across a server start. The games' window never calls this AI; only the
--- owner's settings and this console do.
+-- the same zero. The race is decided AI_DECIDE_SECONDS after the first counted time, the
+-- car's or a player's, whether or not the others have one: the fastest counted time wins,
+-- and anyone still driving is listed as not finished. A player who beats the traffic car
+-- gets a leaderboard win and, when the owner set server.aiRacePrize and that player's own
+-- cooldown has passed, the race reward from the server, plus half of it for each player who
+-- joined. A racer with a counted time keeps it whatever happens next: their Give up is
+-- ignored, and the traffic car dropping out after it is only noted. Before any player has a
+-- time, the host's Give up or leaving, or the traffic car dropping out, ends the race for
+-- everyone with no winner. Nothing is kept across a server start. The games' window never
+-- calls this AI; only the owner's settings and this console do.
 --
 -- aiRaces[id] = {id, host, car, model, start, finish, phase = "countdown" | "racing",
 -- goAt, deadline, racers = {[name] = {start}}, invited = {[name] = true}, reward,
--- reports = {[name] = seconds}, aiSeconds, firstReportAt}
+-- reports = {[name] = seconds}, aiSeconds, firstReportAt, carOut = "gone" | "stuck" | "out"}
 
 do
 local startTransfer, careerStarted, playerIdByName, isPoint = Money.startTransfer, Money.careerStarted,
@@ -2686,12 +2689,24 @@ local function placesText(places)
 	return #parts > 0 and table.concat(parts, ", ") or "no times"
 end
 
+-- Racers without a time, by name, then the traffic car without one: still on its way, or
+-- out with why.
+local function notFinishedOf(race)
+	local list = {}
+	for _, name in ipairs(racerNames(race)) do
+		if not race.reports[name] then table.insert(list, {name = name}) end
+	end
+	if not race.aiSeconds then table.insert(list, {name = race.model, car = true, out = race.carOut}) end
+	return list
+end
+
 -- Ends the race: the winner's win and reward, then every racer hears the result and their
 -- new status.
 local function endAiRace(race, winner, aiWon, why, places)
 	aiRaces[race.id] = nil
 	closeInvites(race)
 	places = places or {}
+	local notFinished = notFinishedOf(race)
 	local paid = 0
 	if winner then
 		if Money.leaderboardWin then Money.leaderboardWin(winner) end
@@ -2707,8 +2722,8 @@ local function endAiRace(race, winner, aiWon, why, places)
 		local id = playerIdByName(name)
 		if id then
 			sendJson("aiRaces", id, "rxMileageAiRace", {phase = "result", race = race.id, host = race.host,
-				car = race.model, winner = winner, aiWon = aiWon == true, places = places, prize = paid,
-				reward = race.reward or 0, prizeAgainIn = prizeAgainIn(name), why = why, you = name})
+				car = race.model, winner = winner, aiWon = aiWon == true, places = places, notFinished = notFinished,
+				prize = paid, reward = race.reward or 0, prizeAgainIn = prizeAgainIn(name), why = why, you = name})
 			sendStatus(id)
 		end
 	end
@@ -2737,6 +2752,21 @@ local function decideAiRace(race, why)
 	local first = places[1]
 	local aiWon = first ~= nil and first.car == true
 	endAiRace(race, (first and not aiWon) and first.name or nil, aiWon, why or "finished", places)
+end
+
+-- Why a traffic car is out, as the host's game reports it.
+local CAR_OUT = {gone = true, stuck = true}
+
+-- The traffic car dropped out. Before any player has a time the race ends with no winner;
+-- after one it is only noted, and the race is decided as usual. Returns true when the race
+-- ended.
+local function carOut(race, why)
+	if next(race.reports) == nil then
+		endAiRace(race, nil, false, "aiOut")
+		return true
+	end
+	race.carOut = race.carOut or why
+	return false
 end
 
 -- Every racer and the traffic car have a time.
@@ -2860,9 +2890,11 @@ Money.aiRaceReport = function(player_id, report)
 	goIfDue(race, now)
 	local isHost = name == race.host
 	if report.gaveUp == true or report.failed ~= nil then
+		-- A racer with a counted time keeps it, the host too.
+		if race.reports[name] then return true end
 		if isHost then
 			endAiRace(race, nil, false, report.failed ~= nil and "failed" or "hostGaveUp")
-		elseif not race.reports[name] then
+		else
 			-- An invited racer drops out; the others race on.
 			race.racers[name] = nil
 			sendTo(name, {phase = "result", race = race.id, host = race.host, car = race.model, out = true,
@@ -2872,7 +2904,7 @@ Money.aiRaceReport = function(player_id, report)
 		return true
 	end
 	if isHost and report.aiOut ~= nil then
-		if not race.aiSeconds then endAiRace(race, nil, false, "aiOut") end
+		if not race.aiSeconds then carOut(race, CAR_OUT[report.aiOut] and report.aiOut or "out") end
 		return true
 	end
 	if race.phase ~= "racing" then return true end
@@ -2907,11 +2939,11 @@ local function watchTrafficCar(race, now)
 		race.firstReportAt = race.firstReportAt or now
 		return false
 	end
+	if race.carOut then return false end
 	if not race.stillAt or Money.metresBetween(at, race.stillAt) >= AI_STILL_METRES then
 		race.stillAt, race.stillSince = at, now
 	elseif now - race.stillSince >= AI_STILL_SECONDS then
-		endAiRace(race, nil, false, "aiOut")
-		return true
+		return carOut(race, "stuck")
 	end
 	return false
 end
@@ -2921,15 +2953,13 @@ local function aiRacesTick()
 	for _, race in pairs(aiRaces) do
 		goIfDue(race, now)
 		if watchTrafficCar(race, now) then
-			-- Ended: the traffic car stopped.
-		elseif race.firstReportAt and now - race.firstReportAt >= AI_DECIDE_SECONDS
-				and (race.aiSeconds or not race.carSeen) then
-			-- A player ahead of a car the server can see waits for it to finish: only then is
-			-- it known that they beat it.
+			-- Ended: the traffic car stopped before anyone finished.
+		elseif race.firstReportAt and now - race.firstReportAt >= AI_DECIDE_SECONDS then
+			-- Decided on the first counted time, whether or not the car or the other racers
+			-- have one yet.
 			decideAiRace(race)
 		elseif race.phase == "racing" and now >= race.deadline then
-			-- A car the server sees that never finished: nobody is known to have beaten it.
-			if race.firstReportAt and (race.aiSeconds or not race.carSeen) then
+			if race.firstReportAt then
 				decideAiRace(race, "timeout")
 			else
 				endAiRace(race, nil, false, "timeout")
