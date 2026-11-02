@@ -675,7 +675,9 @@ World.test("a host's game that hides the traffic car's time cannot win when the 
 	local result = card(world, ann, "result")
 	same(result.aiWon, true, "the server saw the car finish first")
 	same(result.places[1].car, true, "the car first")
-	same(result.places[1].seconds, 36, "on the server's clock")
+	local carSeconds = result.places[1].seconds
+	expect(carSeconds > 35 and carSeconds < 36,
+		"on the server's clock, where it crossed the line between its readings at 35 and 36 s: " .. carSeconds)
 	same(ann.money, 1000, "not paid")
 	same(wins(world, "Ann"), 0, "no win")
 end)
