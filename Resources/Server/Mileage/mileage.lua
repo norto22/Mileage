@@ -2732,8 +2732,9 @@ local function endAiRace(race, winner, aiWon, why, places)
 		if Money.leaderboardWin then Money.leaderboardWin(winner) end
 		-- The reward needs the traffic car seen by the server, racing: where it cannot be read,
 		-- only the host's game says how it raced.
-		if (race.reward or 0) > 0 and race.carSeen then withheld = withheldWhy(race, places[1].seconds) end
-		if (race.reward or 0) > 0 and race.carSeen and not withheld and prizeAgainIn(winner) == 0 then
+		local rewarded = (race.reward or 0) > 0 and race.carSeen
+		if rewarded then withheld = withheldWhy(race, places[1].seconds) end
+		if rewarded and not withheld and prizeAgainIn(winner) == 0 then
 			paid = race.reward
 			aiPrizeEarnedAt[winner] = os.time()
 			startTransfer({kind = "prize", from = SERVER_PARTY, to = winner, amount = paid, giveLabel = "Race reward"})
