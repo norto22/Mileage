@@ -1756,23 +1756,26 @@ local function carNear(player_id, point, metres)
 	return nil
 end
 
--- Where the server sees one of the player's own cars (not traffic), {x, y, z}, or nil when
--- it cannot read one: where a race against a traffic car starts, and who is near it.
-local function carPosition(player_id)
+-- Where the server sees the player's own car (not traffic) nearest to point, {x, y, z}, or
+-- nil when it cannot read one: where a race against a traffic car starts, and who is near
+-- it. A player may own a parked car far away; the one they drive is the one near the race.
+local function carPosition(player_id, point)
 	if type(MP.GetPlayerVehicles) ~= "function" or type(MP.GetPositionRaw) ~= "function" then return nil end
 	local ok, vehicles = pcall(MP.GetPlayerVehicles, player_id)
 	if not ok or type(vehicles) ~= "table" then return nil end
+	local best, bestMetres = nil, nil
 	for vehicleId in pairs(vehicles) do
 		if not isTraffic(tostring(player_id) .. "-" .. tostring(vehicleId)) then
 			local readOk, raw = pcall(MP.GetPositionRaw, player_id, vehicleId)
 			local at = readOk and positionOf(raw) or nil
 			if at then
 				positionsEverRead = true
-				return at
+				local metres = metresBetween(at, point)
+				if not bestMetres or metres < bestMetres then best, bestMetres = at, metres end
 			end
 		end
 	end
-	return nil
+	return best
 end
 
 -- Whether a finish report from player_id counts: a time that could have been driven, from
@@ -1800,7 +1803,18 @@ local function readCars(names, point)
 end
 
 Money.finishCounts, Money.metresBetween, Money.readCars = finishCounts, metresBetween, readCars
-Money.carPosition, Money.plausibleTime = carPosition, plausibleTime
+-- Where the server sees one car by its server vehicle id ("<player_id>-<vehicle_id>"),
+-- traffic included, {x, y, z}, or nil when it cannot read it: a race against a traffic car
+-- watches that car itself rather than taking the host's game's word for it.
+local function vehiclePosition(serverVehicleID)
+	if type(MP.GetPositionRaw) ~= "function" or type(serverVehicleID) ~= "string" then return nil end
+	local owner, vehicle = serverVehicleID:match("^(%d+)%-(%d+)$")
+	if not owner then return nil end
+	local ok, raw = pcall(MP.GetPositionRaw, tonumber(owner), tonumber(vehicle))
+	return ok and positionOf(raw) or nil
+end
+
+Money.carPosition, Money.plausibleTime, Money.vehiclePosition = carPosition, plausibleTime, vehiclePosition
 
 -- A racer's game reports: {race, pose = {pos, dir, up}} (the challenger, for the start),
 -- {race, ready = true} (the challenged, beside it), {race, failed = why},
@@ -2564,6 +2578,13 @@ local INVITE_METRES = 300
 local FINISH_MIN, FINISH_MAX, FINISH_SLACK = 1500, 4000, 150
 local MODEL_MAX_LENGTH = 40
 local PRIZE_HIGH = 1000000
+-- The server reads the traffic car itself wherever BeamMP lets it: the car's time is when
+-- the server sees it within AI_SEEN_METRES of the finish, a time the host's game reports
+-- counts only with the car within AI_CHECK_METRES of it, and a car that moves less than
+-- AI_STILL_METRES in AI_STILL_SECONDS of racing is out. A modified host game can then not
+-- hide the car's time, nor stop it, to collect the reward.
+local AI_SEEN_METRES, AI_CHECK_METRES = 40, 150
+local AI_STILL_METRES, AI_STILL_SECONDS = 15, 20
 
 local aiRaces = {}
 local aiSeq = 0
@@ -2746,7 +2767,7 @@ local function invite(race)
 	for id, name in pairs(MP.GetPlayers() or {}) do
 		if name ~= race.host and MP.IsPlayerConnected(id) and careerStarted(id)
 				and not (Money.busy and Money.busy(name)) then
-			local at = Money.carPosition(id)
+			local at = Money.carPosition(id, race.start)
 			if at and Money.metresBetween(at, race.start) <= INVITE_METRES then
 				race.invited[name] = true
 				sendJson("aiRaces", id, "rxMileageAiRace", {phase = "invite", race = race.id, host = race.host,
@@ -2758,8 +2779,10 @@ local function invite(race)
 end
 
 local function startAiRace(player_id, name, request)
-	-- Where the server sees the host's car, when it can.
-	local start = Money.carPosition(player_id) or {x = request.start.x, y = request.start.y, z = request.start.z}
+	-- Where the server sees the host's car, when it can: of the host's own cars, the one
+	-- nearest where their game says it is.
+	local start = Money.carPosition(player_id, request.start)
+		or {x = request.start.x, y = request.start.y, z = request.start.z}
 	local metres = flatMetres(start, request.finish)
 	if metres < FINISH_MIN - FINISH_SLACK or metres > FINISH_MAX + FINISH_SLACK then
 		refuse(player_id, "distance")
@@ -2791,7 +2814,7 @@ local function joinAiRace(player_id, name, id)
 		sendJson("aiRaces", player_id, "rxMileageAiRace", {phase = "inviteClosed", race = id})
 		return
 	end
-	race.racers[name] = {start = Money.carPosition(player_id)}
+	race.racers[name] = {start = Money.carPosition(player_id, race.start)}
 	local reward = rewardFor(joinedCount(race))
 	local racers = racerNames(race)
 	sendJson("aiRaces", player_id, "rxMileageAiRace", {phase = "countdown", race = race.id, host = race.host,
@@ -2853,7 +2876,9 @@ Money.aiRaceReport = function(player_id, report)
 	if race.phase ~= "racing" then return true end
 	local sinceGo = now - race.goAt
 	if isHost and report.aiFinished ~= nil then
+		local seen = Money.vehiclePosition(race.car)
 		if not race.aiSeconds
+				and (not seen or Money.metresBetween(seen, race.finish) <= AI_CHECK_METRES)
 				and Money.plausibleTime(report.aiFinished, Money.metresBetween(race.start, race.finish), sinceGo) then
 			race.aiSeconds = report.aiFinished
 			race.firstReportAt = race.firstReportAt or now
@@ -2868,11 +2893,33 @@ Money.aiRaceReport = function(player_id, report)
 	return true
 end
 
+-- The server's own reading of the racing traffic car: its time at the finish, or out when
+-- it stands still. Returns true when that ended the race.
+local function watchTrafficCar(race, now)
+	if race.phase ~= "racing" or race.aiSeconds then return false end
+	local at = Money.vehiclePosition(race.car)
+	if not at then return false end
+	if Money.metresBetween(at, race.finish) <= AI_SEEN_METRES then
+		race.aiSeconds = now - race.goAt
+		race.firstReportAt = race.firstReportAt or now
+		return false
+	end
+	if not race.stillAt or Money.metresBetween(at, race.stillAt) >= AI_STILL_METRES then
+		race.stillAt, race.stillSince = at, now
+	elseif now - race.stillSince >= AI_STILL_SECONDS then
+		endAiRace(race, nil, false, "aiOut")
+		return true
+	end
+	return false
+end
+
 local function aiRacesTick()
 	local now = signalTimer:GetCurrent()
 	for _, race in pairs(aiRaces) do
 		goIfDue(race, now)
-		if race.firstReportAt and now - race.firstReportAt >= AI_DECIDE_SECONDS then
+		if watchTrafficCar(race, now) then
+			-- Ended: the traffic car stopped.
+		elseif race.firstReportAt and now - race.firstReportAt >= AI_DECIDE_SECONDS then
 			decideAiRace(race)
 		elseif race.phase == "racing" and now >= race.deadline then
 			if race.firstReportAt then decideAiRace(race, "timeout") else endAiRace(race, nil, false, "timeout") end

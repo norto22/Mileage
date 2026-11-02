@@ -542,6 +542,103 @@ World.test("a report about an ended race changes nothing", function(world)
 	same(#heard(world, ann, "result"), 1, "one result")
 end)
 
+--== a host's game that lies about the traffic car (security S1) ===================
+
+-- Drops the host's own reports about the traffic car, as a modified game would.
+local function silenceTrafficCar(world)
+	world.filter = function(m)
+		if m.way == "toServer" and m.name == "mileageRaceReport" and (m.data:find("aiFinished", 1, true)
+				or m.data:find("aiOut", 1, true)) then
+			return "drop"
+		end
+	end
+end
+
+World.test("a host's game that hides the traffic car's time cannot win when the server sees the car finish first", function(world)
+	local ann, t = annAndCar(world, 2000)
+	silenceTrafficCar(world)
+	raceAnn(world, ann, t, 70, 37)
+	local result = card(world, ann, "result")
+	same(result.aiWon, true, "the server saw the car finish first")
+	same(result.places[1].car, true, "the car first")
+	same(result.places[1].seconds, 36, "on the server's clock")
+	same(ann.money, 1000, "not paid")
+	same(wins(world, "Ann"), 0, "no win")
+end)
+
+World.test("a traffic car that stops ends the race with no winner even when the host's game says nothing", function(world)
+	local ann, t = annAndCar(world, 2000)
+	silenceTrafficCar(world)
+	press(world, ann)
+	world:advance(5)
+	world:advance(19)
+	same(card(world, ann, "result"), nil, "still racing after 19 s")
+	world:advance(2)
+	same(card(world, ann, "result").why, "aiOut", "the server saw it stand still")
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	world:advance(8)
+	same(ann.money, 1000, "nobody paid")
+	expect(t, "the car")
+end)
+
+World.test("a traffic car time is ignored while the server sees the car far from the finish", function(world)
+	local ann, t = annAndCar(world, 2000)
+	press(world, ann)
+	local id = heard(world, ann, "countdown")[1].race
+	t.car.speed = 30
+	world:advance(30)
+	world:serverOutput(function() mileageRaceReport(ann.id, World.encode({race = id, aiFinished = 25})) end)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	world:advance(8)
+	same(card(world, ann, "result").winner, "Ann", "the claimed time did not count")
+	same(ann.money, 3000, "paid")
+end)
+
+World.test("where the server cannot read cars the host's game reports the traffic car", function(world)
+	local ann, t = annAndCar(world, 2000)
+	world.hidePositions = true
+	raceAnn(world, ann, t, 70, 37)
+	same(card(world, ann, "result").aiWon, true, "the reported time counts")
+	same(ann.money, 1000, "not paid")
+end)
+
+--== second opinion: the clock after a finish, and the car being driven ==========
+
+World.test("a traffic car that arrives after the host is timed after the host, on the running clock", function(world)
+	local ann, t = annAndCar(world, 2000)
+	-- Only the host's game can time the car here.
+	world.hidePositions = true
+	press(world, ann)
+	t.car.speed = 66
+	world:advance(5)
+	world:advance(35)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	world:advance(8)
+	local result = card(world, ann, "result")
+	same(result.places[1].name, "Ann", "Ann first")
+	same(result.places[1].seconds, 36, "her time")
+	same(result.places[2].car, true, "the car second")
+	same(result.places[2].seconds, 38, "the car's own time, not hers")
+	same(result.winner, "Ann", "she beat it")
+	same(ann.money, 3000, "paid")
+end)
+
+World.test("a parked car far away does not move the race's start or who is invited", function(world)
+	roads(world)
+	world:setConfig("server", "aiRacePrize", "2000")
+	local ann = world:join("Ann", 1000, 0)
+	local bob = world:join("Bob", 1000, 1)
+	ann.parkedCar = {pos = {x = 0, y = 7000, z = 0}}
+	bob.parkedCar = {pos = {x = 3000, y = -3000, z = 0}}
+	world:giveTraffic(ann, {x = 4, y = 3})
+	world:advance(1)
+	expect(press(world, ann), "the press sent a request")
+	same(#heard(world, ann, "refused"), 0, "not refused for the parked car")
+	same(world:printedMatching("Ann races their Ibishu Pessima to a finish 2500 m away, 1 invited"), 1,
+		"the start is the car she drives, and Bob is invited")
+	same(#heard(world, bob, "invite"), 1, "Bob's driven car is near")
+end)
+
 --== the key and the load order (T13) =========================================
 
 World.test("the key action file names mileageAiRace under Gameplay with no default key and calls press", function(world)

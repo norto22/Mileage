@@ -244,10 +244,21 @@ function World:startServer()
 		GetPlayerVehicles = function(id)
 			local p = world.players[id]
 			if world.hidePositions or p.hideCar or not p or not p.car then return nil end
+			-- p.parkedCar = {pos}: a second car of theirs, parked somewhere else (vehicle 9).
+			if p.parkedCar then return {[9] = {name = "parked"}, [0] = {name = p.car.JBeam}} end
 			return {[0] = {name = p.car.JBeam}}
 		end,
 		GetPositionRaw = function(id, vid)
 			local p = world.players[id]
+			-- A traffic car, by its server vehicle id.
+			local t = world.traffic[tostring(id) .. "-" .. tostring(vid)]
+			if t and not world.hidePositions and not t.gone then
+				return {pos = {t.car.pos.x, t.car.pos.y, t.car.pos.z}}
+			end
+			if not world.hidePositions and p and p.parkedCar and vid == 9 then
+				local at = p.parkedCar.pos
+				return {pos = {at.x, at.y, at.z}}
+			end
 			if world.hidePositions or not p or not p.car or vid ~= 0 then return nil end
 			return {pos = {p.car.pos.x, p.car.pos.y, p.car.pos.z}}
 		end,

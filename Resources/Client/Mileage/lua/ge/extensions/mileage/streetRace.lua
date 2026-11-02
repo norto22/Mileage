@@ -233,8 +233,11 @@ local function updateRace(dt)
 		end
 		return
 	end
-	if race.phase ~= "racing" or race.reported then return end
+	if race.phase ~= "racing" then return end
+	-- The clock runs on after this car's finish: a race against a traffic car times that car
+	-- on it (current()).
 	race.elapsed = race.elapsed + dt
+	if race.reported then return end
 	local veh = playerVehicle()
 	local left = veh and race.finish and distance(veh:getPosition(), race.finish) or nil
 	if left and left <= race.radius then
