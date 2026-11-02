@@ -1117,3 +1117,136 @@ World.test("a win the server could not pay says so and starts no wait, so the ne
 	same(ann.money, 3000, "Ann's career gains $2,000")
 	same(wins(world, "Ann"), 2, "both wins count")
 end)
+
+--== decided at the first player's finish (#122, #123, #116) ===================
+
+-- The entry of a result's notFinished list named name, or the car's when name is nil.
+local function notFinished(result, name)
+	for _, entry in ipairs(result and result.notFinished or {}) do
+		if (name == nil and entry.car == true) or (name ~= nil and entry.name == name and not entry.car) then
+			return entry
+		end
+	end
+	return nil
+end
+
+World.test("a player who beats the traffic car gets the result within 6 s of finishing", function(world)
+	local ann, t = annAndCar(world, 2000)
+	press(world, ann)
+	-- About 83 s to the finish: still more than 1 km out when Ann arrives.
+	t.car.speed = 30
+	world:advance(5)
+	world:advance(40)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	world:advance(6)
+	local result = card(world, ann, "result")
+	expect(result ~= nil, "no result 6 s after Ann finished")
+	same(result.winner, "Ann", "she won")
+	same(result.why, "finished", "decided on her finish")
+	same(ann.money, 3000, "the race reward")
+	same(wins(world, "Ann"), 1, "a leaderboard win")
+	same(#result.places, 1, "only Ann has a time")
+	local car = notFinished(result)
+	expect(car ~= nil, "the car is listed as not finished")
+	same(car.name, "Ibishu Pessima", "by its model")
+	same(car.out, nil, "still on its way")
+	expect(givenBack(t), "the car is back in traffic")
+end)
+
+World.test("the traffic car gone after the player finished still leaves her the winner, paid", function(world)
+	local ann, t = annAndCar(world, 2000)
+	press(world, ann)
+	t.car.speed = 30
+	world:advance(5)
+	world:advance(30)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	world:advance(1)
+	t.gone = true
+	world:advance(5)
+	local result = card(world, ann, "result")
+	expect(result ~= nil, "a result")
+	same(result.winner, "Ann", "she won")
+	same(result.why, "finished", "not ended by the car")
+	same(ann.money, 3000, "paid")
+	same(wins(world, "Ann"), 1, "the win counts")
+	same(notFinished(result).out, "gone", "the car is listed as out")
+	same(#heard(world, ann, "result"), 1, "one result")
+end)
+
+World.test("the traffic car stalling after the player finished still leaves her the winner", function(world)
+	local ann, t = annAndCar(world, 2000)
+	-- The host's game says nothing; the server's own stand-still check sees the car stop.
+	silenceTrafficCar(world)
+	press(world, ann)
+	t.car.speed = 30
+	world:advance(5)
+	world:advance(30)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	world:advance(1)
+	t.car.speed = 0
+	world:advance(25)
+	local result = card(world, ann, "result")
+	same(result and result.winner, "Ann", "she won")
+	same(ann.money, 3000, "paid")
+	same(#heard(world, ann, "result"), 1, "one result")
+end)
+
+World.test("a player who finished is free for a race event once the result is in", function(world)
+	local ann, t = annAndCar(world, 2000)
+	press(world, ann)
+	t.car.speed = 20
+	world:advance(5)
+	world:advance(40)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	world:advance(10)
+	world:console("Mileage Event 5 100 random")
+	local announced = nil
+	for _, m in ipairs(world:received(ann, "rxMileageEvent")) do announced = m end
+	world:as(ann, function() mileage_raceEvents.join(announced.id) end)
+	world:pump()
+	local refused = nil
+	for _, m in ipairs(world:received(ann, "rxMileageEvent")) do if m.phase == "refused" then refused = m end end
+	same(refused and refused.why, nil, "the event join is taken")
+end)
+
+World.test("a joined player still driving when the race is decided is listed as not finished", function(world)
+	local ann, t, bob = threeNear(world, 2000)
+	press(world, ann)
+	world:as(bob, function() mileage_aiRace.press() end)
+	world:pump()
+	t.car.speed = 30
+	world:advance(5)
+	world:advance(30)
+	world:drive(bob, FINISH.x, FINISH.y, FINISH.z)
+	world:advance(6)
+	local result = card(world, ann, "result")
+	expect(result ~= nil, "decided about 5 s after Bob's finish")
+	same(result.winner, "Bob", "Bob won")
+	same(bob.money, 4000, "Bob gets 150%")
+	same(#result.places, 1, "only Bob has a time")
+	expect(notFinished(result, "Ann") ~= nil, "Ann is listed as not finished")
+	expect(notFinished(result) ~= nil, "and the car")
+	world:as(ann, function() same(mileage_streetRace.current(), nil, "Ann's race panel is gone") end)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	world:advance(5)
+	same(#heard(world, ann, "result"), 1, "her later arrival changes nothing")
+	same(ann.money, 1000, "Ann nothing")
+end)
+
+World.test("the host giving up after her own finish keeps her time", function(world)
+	local ann, t = annAndCar(world, 2000)
+	press(world, ann)
+	local id = heard(world, ann, "countdown")[1].race
+	t.car.speed = 30
+	world:advance(5)
+	world:advance(30)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	world:advance(1)
+	world:serverOutput(function() mileageRaceReport(ann.id, World.encode({race = id, gaveUp = true})) end)
+	world:pump()
+	world:advance(5)
+	local result = card(world, ann, "result")
+	same(result and result.why, "finished", "the race was not ended by her Give up")
+	same(result.winner, "Ann", "she won")
+	same(ann.money, 3000, "paid")
+end)
