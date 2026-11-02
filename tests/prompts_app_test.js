@@ -388,6 +388,38 @@ test("an unpaid win's reward row: a wait under a minute reads 1 min, a bad wait 
 	assert.deepStrictEqual(won({reward: 0, prizeAgainIn: 300}), [], "off, even while a wait runs");
 });
 
+test("a traffic race result lists racers and the car without a time, and says why a reward was withheld", () => {
+	const {scope} = load();
+	const shown = (extra) => {
+		scope.emit("MileageAiRace", Object.assign({phase: "result", race: "ai9", host: "norto22", car: "Ibishu Pessima",
+			winner: "norto22", aiWon: false, places: [{name: "norto22", seconds: 40.2}], prize: 3000, reward: 3000,
+			prizeAgainIn: 600, why: "finished", you: "norto22"}, extra));
+		return scope.traffic.view;
+	};
+	const placeRows = (v) => [...v.places].map((r) => r.place + " " + r.name + " " + r.value);
+	let v = shown({notFinished: [{name: "Sam"}, {name: "Ibishu Pessima", car: true}]});
+	assert.strictEqual(v.title, "You won");
+	assert.deepStrictEqual(placeRows(v), ["1 You 0:40.2", "- Sam did not finish", "- Ibishu Pessima still on its way"]);
+	v = shown({notFinished: [{name: "Ibishu Pessima", car: true, out: "gone"}]});
+	assert.deepStrictEqual(placeRows(v), ["1 You 0:40.2", "- Ibishu Pessima out: crashed or stuck"]);
+	v = shown({notFinished: [{name: "norto22"}], winner: "Sam", places: [{name: "Sam", seconds: 39}], you: "norto22"});
+	assert.deepStrictEqual(placeRows(v), ["1 Sam 0:39.0", "- You did not finish"]);
+	v = shown({notFinished: "broken"});
+	assert.deepStrictEqual(placeRows(v), ["1 You 0:40.2"], "a list that is not one adds nothing");
+	v = shown({prize: 0, prizeAgainIn: 0, rewardWithheld: "slow"});
+	assert.deepStrictEqual(rows(v),
+		["Race reward: Not paid: the Ibishu Pessima was too slow to count as racing; the win counts on the leaderboard"]);
+	v = shown({prize: 0, prizeAgainIn: 0, rewardWithheld: "jumped"});
+	assert.deepStrictEqual(rows(v),
+		["Race reward: Not paid: the Ibishu Pessima jumped farther than a car can drive; the win counts on the leaderboard"]);
+	scope.emit("MileageAiRace", {phase: "result", race: "ai10", host: "norto22", car: "Ibishu Pessima", places: [],
+		notFinished: [{name: "norto22"}, {name: "Ibishu Pessima", car: true, out: "stuck"}], prize: 0, reward: 2000,
+		why: "aiOut", you: "norto22"});
+	assert.strictEqual(scope.traffic.view.note,
+		"The Ibishu Pessima dropped out before anyone finished, so the race ended with no winner and no race reward. " +
+		"The car is back in traffic.");
+});
+
 // Every text a view holds, for the check below.
 function texts(value) {
 	if (typeof value === "string") return [value];
@@ -412,7 +444,11 @@ test("no text the app shows for a traffic race says AI", () => {
 		prize: 3000, seconds: 5});
 	take();
 	[{winner: "norto22"}, {winner: "Sam"}, {winner: "norto22", prize: 0}, {aiWon: true}, {why: "timeout", places: []},
-		{why: "aiOut"}, {why: "hostGaveUp", host: "norto22"}, {why: "hostLeft"}, {why: "failed"}, {out: true}]
+		{why: "aiOut"}, {why: "hostGaveUp", host: "norto22"}, {why: "hostLeft"}, {why: "failed"}, {out: true},
+		{winner: "norto22", notFinished: [{name: "Sam"}, {name: "Ibishu Pessima", car: true}]},
+		{winner: "norto22", notFinished: [{name: "Ibishu Pessima", car: true, out: "stuck"}]},
+		{winner: "norto22", prize: 0, prizeAgainIn: 0, rewardWithheld: "slow"},
+		{winner: "norto22", prize: 0, prizeAgainIn: 0, rewardWithheld: "jumped"}]
 		.forEach((extra) => {
 			scope.emit("MileageAiRace", Object.assign({phase: "result", why: "finished"}, base, extra));
 			take();
