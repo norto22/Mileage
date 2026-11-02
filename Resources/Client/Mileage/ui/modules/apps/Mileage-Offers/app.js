@@ -293,9 +293,11 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 			var rows = [];
 			if (prize > 0) {
 				rows.push({label: "You get", value: moDollars(prize) + " race reward"});
-			} else if ((Number(data.reward) || 0) > 0) {
-				rows.push({label: "Race reward", value: "Again in " + Math.ceil((Number(data.prizeAgainIn) || 0) / 60) +
+			} else if ((Number(data.reward) || 0) > 0 && (Number(data.prizeAgainIn) || 0) > 0) {
+				rows.push({label: "Race reward", value: "Again in " + Math.ceil(Number(data.prizeAgainIn) / 60) +
 					" min; the win counts on the leaderboard"});
+			} else if ((Number(data.reward) || 0) > 0) {
+				rows.push({label: "Race reward", value: "Not paid for this race; the win counts on the leaderboard"});
 			}
 			return {title: "You won", places: places, rows: rows, close: true};
 		}

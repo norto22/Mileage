@@ -359,6 +359,13 @@ test("the traffic race result lists every racer and the car by its model, and th
 	scope.emit("MileageAiRace", {phase: "result", race: "ai5", host: "norto22", car: "Ibishu Pessima", out: true,
 		places: [], prize: 0, why: "gaveUp", you: "Sam"});
 	assert.strictEqual(scope.traffic.view.title, "You left the race");
+	scope.emit("MileageAiRace", {phase: "result", race: "ai6", host: "norto22", car: "Ibishu Pessima", winner: "norto22",
+		places: PLACES, prize: 0, reward: 2000, prizeAgainIn: 240, why: "finished", you: "norto22"});
+	assert.deepStrictEqual(rows(scope.traffic.view), ["Race reward: Again in 4 min; the win counts on the leaderboard"]);
+	scope.emit("MileageAiRace", {phase: "result", race: "ai7", host: "norto22", car: "Ibishu Pessima", winner: "norto22",
+		places: PLACES, prize: 0, reward: 2000, prizeAgainIn: 0, why: "finished", you: "norto22"});
+	assert.deepStrictEqual(rows(scope.traffic.view), ["Race reward: Not paid for this race; the win counts on the leaderboard"],
+		"a win the server could not pay never says again in 0 min");
 });
 
 // Every text a view holds, for the check below.
