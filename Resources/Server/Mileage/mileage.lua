@@ -2558,10 +2558,10 @@ end
 -- and anyone still driving is listed as not finished. A player who beats the traffic car
 -- gets a leaderboard win and, when the owner set server.aiRacePrize and that player's own
 -- cooldown has passed, the race reward from the server, plus half of it for each player who
--- joined. A racer with a counted time keeps it whatever happens next: their Give up is
--- ignored, and the traffic car dropping out after it is only noted. Before any player has a
--- time, the host's Give up or leaving, or the traffic car dropping out, ends the race for
--- everyone with no winner. Nothing is kept across a server start. The games' window never
+-- joined. A racer with a counted time keeps it when they press Give up, and the traffic car
+-- dropping out after any player's counted time is only noted. The race belongs to its host:
+-- their leaving, or their Give up before their own counted time, ends it for everyone with
+-- no winner, as does the traffic car dropping out before any player has a time. Nothing is kept across a server start. The games' window never
 -- calls this AI; only the owner's settings and this console do.
 --
 -- aiRaces[id] = {id, host, car, model, start, finish, phase = "countdown" | "racing",
@@ -2595,8 +2595,9 @@ local AI_STILL_METRES, AI_STILL_SECONDS = 15, 20
 -- The reward is paid only for a car the server saw race: no new reading farther from the
 -- last one than Money.MAX_SPEED_MPS for the time between them plus AI_LATE_SECONDS (for late
 -- or bunched-up positions), and at least AI_PACE_MPS times the winner's time of distance
--- driven, on any road. Both count readings up to AI_LATE_SECONDS after the first player's
--- finish, so a crash after it does not cost the winner the reward.
+-- driven, on any road. Both are judged on readings up to the first player's finish, and
+-- distance on readings up to AI_LATE_SECONDS after it, so a crash or reset after it does not
+-- cost the winner the reward (see readCar).
 local AI_LATE_SECONDS = 2
 local AI_PACE_MPS = 8
 local WITHHELD_TEXT = {jumped = "the car jumped", slow = "the car was too slow"}
@@ -2953,14 +2954,14 @@ Money.aiRaceReport = function(player_id, report)
 end
 
 -- Where, from 0 at a to 1 at b, the straight path from a to b first comes within radius of
--- centre on the flat; nil when it does not.
+-- centre, height included as the players' finish is; nil when it does not.
 local function enteringAt(a, b, centre, radius)
-	local ax, ay = a.x - centre.x, a.y - centre.y
-	local c = ax * ax + ay * ay - radius * radius
+	local ax, ay, az = a.x - centre.x, a.y - centre.y, a.z - centre.z
+	local c = ax * ax + ay * ay + az * az - radius * radius
 	if c <= 0 then return 0 end
-	local dx, dy = b.x - a.x, b.y - a.y
-	local qa = dx * dx + dy * dy
-	local qb = 2 * (ax * dx + ay * dy)
+	local dx, dy, dz = b.x - a.x, b.y - a.y, b.z - a.z
+	local qa = dx * dx + dy * dy + dz * dz
+	local qb = 2 * (ax * dx + ay * dy + az * dz)
 	local disc = qb * qb - 4 * qa * c
 	if qa == 0 or disc < 0 then return nil end
 	local s = (-qb - math.sqrt(disc)) / (2 * qa)
@@ -2968,12 +2969,15 @@ local function enteringAt(a, b, centre, radius)
 	return s
 end
 
--- A reading of the racing traffic car. Only a new one counts: its distance from the last new
--- one adds to the distance driven, a step too long for the time between them marks the car
--- jumped (both up to AI_LATE_SECONDS after the first player's finish), and the car's time is
--- where the path between them crossed the finish line.
+-- A reading of the racing traffic car. Only a new one counts. Its distance from the last new
+-- one adds to the distance driven, and a step too long for the time between them marks the
+-- car jumped; after the first player's finish a step that long is ignored (a reset or a
+-- crash), and others count for AI_LATE_SECONDS more, for readings that arrive late. The
+-- car's time is where the path crossed the finish line, between the last time the server
+-- read the old position and now, so a stop before the line never makes the time early.
 local function readCar(race, at, now)
-	local last, lastAt = race.carLast, race.carLastAt
+	local last, lastAt, readAt = race.carLast, race.carLastAt, race.carReadAt
+	race.carReadAt = now
 	if last and last.x == at.x and last.y == at.y and last.z == at.z then return end
 	race.carLast, race.carLastAt = at, now
 	if not last then
@@ -2981,13 +2985,16 @@ local function readCar(race, at, now)
 		return
 	end
 	local metres = flatMetres(last, at)
-	if not race.firstFinishAt or now <= race.firstFinishAt + AI_LATE_SECONDS then
+	local jumped = metres > Money.MAX_SPEED_MPS * (now - lastAt + AI_LATE_SECONDS)
+	if not race.firstFinishAt or now <= race.firstFinishAt then
 		race.carDriven = race.carDriven + metres
-		if metres > Money.MAX_SPEED_MPS * (now - lastAt + AI_LATE_SECONDS) then race.carJumped = true end
+		if jumped then race.carJumped = true end
+	elseif now <= race.firstFinishAt + AI_LATE_SECONDS and not jumped then
+		race.carDriven = race.carDriven + metres
 	end
 	local s = enteringAt(last, at, race.finish, AI_FINISH_RADIUS)
 	if s then
-		race.aiSeconds = lastAt + s * (now - lastAt) - race.goAt
+		race.aiSeconds = readAt + s * (now - readAt) - race.goAt
 		race.firstReportAt = race.firstReportAt or now
 	end
 end
