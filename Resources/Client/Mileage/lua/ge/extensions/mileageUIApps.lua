@@ -192,10 +192,6 @@ local replacedPlayerLists = {
 	"multiplayerplayerlist", -- pre-0.39 name
 }
 
--- This mod's player list from before it was renamed from CareerMP, which players' saved
--- layouts and override files still name. It becomes Mileage's where the player put it.
-local OLD_PLAYER_LIST = "careermpplayerlist"
-
 -- Cached catalogue of apps that actually exist on disk right now.
 -- getUIAppsData scans every app.json, and the game itself warns when it takes over
 -- 100ms, so this is fetched once and reused.
@@ -331,20 +327,6 @@ local function replaceApp(layout, oldName, newApp)
 	end
 end
 
--- Like replaceApp, but the new entry keeps the old one's placement (position and size).
-local function replaceKeepingPlacement(layout, oldName, newApp)
-	local replaced = false
-	local i, old = findApp(layout, oldName)
-	while i do
-		local app = deepcopy(newApp)
-		if type(old.placement) == "table" then app.placement = deepcopy(old.placement) end
-		layout.apps[i] = app
-		replaced = true
-		i, old = findApp(layout, oldName)
-	end
-	return replaced
-end
-
 -- Build of the game we are running, used to tell a layout written for this version
 -- from one carried over from an older install.
 local function getGameBuild()
@@ -368,14 +350,12 @@ local function loadLayout(customDir, defaultDir, filename)
 	local default = jsonReadFile(defaultDir .. filename .. ".uilayout.json")
 
 	if custom then
-		-- careerMPBuild is the stamp written before the rename from CareerMP; reading it
-		-- keeps a player's layouts from being rebuilt just because the mod was renamed.
-		local stamp = custom.mileageBuild or custom.careerMPBuild
+		local stamp = custom.mileageBuild
 		local stale = stamp ~= getGameBuild()
 		if stale and default then
 			log("I", logTag, string.format(
 				"layout '%s' was written for build %s, rebuilding from this build's default (%s)",
-				filename, tostring(stamp or "pre-Mileage"), getGameBuild()))
+				filename, tostring(stamp or "none"), getGameBuild()))
 			return deepcopy(default), customDir, true
 		end
 		return deepcopy(custom), customDir, false
@@ -384,25 +364,17 @@ local function loadLayout(customDir, defaultDir, filename)
 	if default then return deepcopy(default), customDir, true end
 end
 
-local function applyMpAppOverrides(filename, oldNames)
-	local mpLayout = jsonReadFile(userDefaultAppLayoutDirectory .. filename)
+-- Lets a server or user override app placement by shipping their own
+-- mileage.uilayout.json.
+local function loadMpAppOverrides()
+	local mpLayout = jsonReadFile(userDefaultAppLayoutDirectory .. "mileage.uilayout.json")
 	if mpLayout and type(mpLayout.apps) == "table" then
 		for _, app in pairs(mpLayout.apps) do
 			if type(app) == "table" and app.appName then
-				if oldNames and app.appName == OLD_PLAYER_LIST then app.appName = "mileageplayerlist" end
 				multiplayerApps[app.appName] = app
 			end
 		end
 	end
-end
-
--- Lets a server or user override app placement by shipping their own
--- mileage.uilayout.json. A careermp.uilayout.json from before the rename can only be the
--- player's own (no mod ships it any more), so it goes on top, with the old player list
--- read as Mileage's.
-local function loadMpAppOverrides()
-	applyMpAppOverrides("mileage.uilayout.json")
-	applyMpAppOverrides("careermp.uilayout.json", true)
 end
 
 local function processLayout(layoutInfo, isDefault)
@@ -417,9 +389,6 @@ local function processLayout(layoutInfo, isDefault)
 	-- A rebuilt layout is already this build's default, so it needs stamping and
 	-- writing even if adding our apps happens to change nothing.
 	local updated = rebuilt or false
-
-	-- Before pruning, which would drop the old name as an app the game no longer has.
-	updated = replaceKeepingPlacement(layout, OLD_PLAYER_LIST, multiplayerApps.mileageplayerlist) or updated
 
 	-- Belt and braces for layouts that are already current: drop anything the game
 	-- no longer ships. A rebuilt layout has nothing to prune.

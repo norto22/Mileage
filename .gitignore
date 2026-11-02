@@ -1,6 +1,8 @@
 # Scratch file written by the updater when checking the remote version
 Resources/Server/Mileage/versions/.remote.json
-Resources/Server/CareerMP/versions/.remote.json
+
+# Python's bytecode cache, written when tools/set_version.py imports release_check
+__pycache__/
 
 # Release packages written by tools/build.py --package
 dist/

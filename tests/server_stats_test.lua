@@ -299,15 +299,12 @@ local function consoleLines(line)
 	return server.printed
 end
 
-for _, prefix in ipairs({"Mileage", "CareerMP", "CMP"}) do
-	test("the console command " .. prefix .. " Help prints Mileage's help", function()
-		newServer({0})
-		local lines = consoleLines(prefix .. " Help")
-		same(countLines(lines, "Mileage Help "), 1, "Help line")
-		same(countLines(lines, "Mileage SetConfig "), 1, "SetConfig line")
-		same(countLines(lines, "CareerMP"), 0, "old name in the help")
-	end)
-end
+test("the console command Mileage Help prints Mileage's help", function()
+	newServer({0})
+	local lines = consoleLines("Mileage Help")
+	same(countLines(lines, "Mileage Help "), 1, "Help line")
+	same(countLines(lines, "Mileage SetConfig "), 1, "SetConfig line")
+end)
 
 test("a console line with another prefix runs no Mileage command", function()
 	newServer({0})

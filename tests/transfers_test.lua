@@ -225,7 +225,6 @@ World.test("Mileage Transfers lists what waits, with its age, amount and player"
 	same(countLines(lines, "Transfers waiting: 1"), 1, "count line")
 	same(countLines(lines, tid(world, 1) .. " (payment, $400 from Ann to Bob)"), 1, "transfer line")
 	same(countLines(lines, "waiting to give to Bob"), 1, "who it waits on")
-	expect(countLines(world:console("CareerMP Transfers"), "Transfers waiting: 1") == 1, "old prefix")
 end)
 
 World.test("a transfer waiting more than a minute is logged once", function(world)

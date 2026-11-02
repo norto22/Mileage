@@ -244,10 +244,22 @@ function World:startServer()
 		GetPlayerVehicles = function(id)
 			local p = world.players[id]
 			if world.hidePositions or p.hideCar or not p or not p.car then return nil end
+			-- p.parkedCar = {pos}: a second car of theirs, parked somewhere else (vehicle 9).
+			if p.parkedCar then return {[9] = {name = "parked"}, [0] = {name = p.car.JBeam}} end
 			return {[0] = {name = p.car.JBeam}}
 		end,
 		GetPositionRaw = function(id, vid)
 			local p = world.players[id]
+			-- A traffic car, by its server vehicle id.
+			local t = world.traffic[tostring(id) .. "-" .. tostring(vid)]
+			-- world.hideTraffic: the server cannot read traffic cars, only players' own.
+			if t and not world.hidePositions and not world.hideTraffic and not t.gone then
+				return {pos = {t.car.pos.x, t.car.pos.y, t.car.pos.z}}
+			end
+			if not world.hidePositions and p and p.parkedCar and vid == 9 then
+				local at = p.parkedCar.pos
+				return {pos = {at.x, at.y, at.z}}
+			end
 			if world.hidePositions or not p or not p.car or vid ~= 0 then return nil end
 			return {pos = {p.car.pos.x, p.car.pos.y, p.car.pos.z}}
 		end,
@@ -383,6 +395,7 @@ World.CLIENT_FILES = {
 	{"mileage_streetRace", CLIENT .. "mileage/streetRace.lua"},
 	{"mileage_leaderboard", CLIENT .. "mileage/leaderboard.lua"},
 	{"mileage_raceEvents", CLIENT .. "mileage/raceEvents.lua"},
+	{"mileage_aiRace", CLIENT .. "mileage/aiRace.lua"},
 }
 
 local function fileExists(path)
@@ -410,6 +423,62 @@ function World:giveCar(p)
 	end
 	p.car = car
 	return car
+end
+
+-- One of p's game's traffic cars at x, y (z 0), heading dir (north unless given), a
+-- traffic car the game's traffic system drives (gameplay_traffic) and the server marks as
+-- traffic. opts: {x, y, dir, jbeam}. Returns {car, sid, entry}; car.commands lists what was
+-- queued on it, and once it is sent a race route it drives there at car.speed m/s.
+function World:giveTraffic(p, opts)
+	opts = opts or {}
+	self.trafficCount = (self.trafficCount or 0) + 1
+	local n = self.trafficCount
+	local car = {id = 5000 + n, JBeam = opts.jbeam or "pessima", pos = {x = opts.x or 0, y = opts.y or 0, z = 0},
+		dir = opts.dir or {x = 0, y = 1, z = 0}, up = {x = 0, y = 0, z = 1}, commands = {}, speed = 0}
+	function car:getPosition() return self.pos end
+	function car:getDirectionVector() return self.dir end
+	function car:getDirectionVectorUp() return self.up end
+	local world = self
+	function car:queueLuaCommand(cmd)
+		table.insert(self.commands, cmd)
+		local first = cmd:match('^ai%.driveUsingPath%({wpTargetList = {"([^"]+)"')
+		if first then
+			self.racing = true
+			self.target = (world.roadNodes or {})[first] and world.roadNodes[first].pos
+		end
+		if cmd == "ai.setRacing(false)" then self.racing = false end
+	end
+	local entry = {isAi = true, roleName = "standard", autoRole = "standard", enableRespawn = true,
+		enableAutoPooling = true, roles = {}}
+	function entry:setRole(name)
+		self.roleName = name
+		table.insert(self.roles, name)
+	end
+	p.trafficData[car.id] = entry
+	local sid = p.id .. "-" .. n
+	local t = {car = car, sid = sid, entry = entry, owner = p}
+	self.traffic[sid] = t
+	self:serverOutput(function()
+		onVehicleSpawnHandler(p.id, n)
+		careerVehicleTrafficMarks(p.id, encode({[sid] = true}))
+	end)
+	self:pump()
+	return t
+end
+
+-- Traffic cars sent a race route drive straight at their target, car.speed metres a second.
+function World:moveTraffic()
+	for _, t in pairs(self.traffic) do
+		local car = t.car
+		if car.racing and car.target and car.speed > 0 and not t.gone then
+			local dx, dy = car.target.x - car.pos.x, car.target.y - car.pos.y
+			local left = math.sqrt(dx * dx + dy * dy)
+			local step = math.min(left, car.speed)
+			if left > 0 then
+				car.pos = {x = car.pos.x + dx / left * step, y = car.pos.y + dy / left * step, z = car.pos.z}
+			end
+		end
+	end
 end
 
 -- Moves p's car to x, y, z (z 0 unless given); a frozen car does not move.
@@ -447,13 +516,40 @@ function World:loadGame(p)
 			end
 			return list
 		end,
-		isOwn = function(gid) return p.car ~= nil and p.car.id == gid and p.car.own ~= false end,
+		isOwn = function(gid)
+			if p.trafficData[gid] then return true end
+			return p.car ~= nil and p.car.id == gid and p.car.own ~= false
+		end,
+		getServerVehicleID = function(gid)
+			if p.car and p.car.id == gid then return p.id .. "-0" end
+			for sid, t in pairs(world.traffic) do
+				if t.car.id == gid then return sid end
+			end
+			return nil
+		end,
+		-- Other players' traffic cars, as BeamMP lists them on this game.
+		getVehicles = function()
+			local list = {}
+			for sid, t in pairs(world.traffic) do
+				if t.owner ~= p and t.owner.connected then
+					list[sid] = {gameVehicleID = t.car.id, ownerName = t.owner.name, jbeam = t.car.JBeam}
+				end
+			end
+			return list
+		end,
 	}
+	p.trafficData = p.trafficData or {}
 	self:giveCar(p)
 	p.teleports = p.teleports or {}
 	p.be = {
 		getPlayerVehicleID = function() return p.inCar ~= false and p.car and p.car.id or -1 end,
-		getObjectByID = function(_, gid) return p.car and p.car.id == gid and p.car or nil end,
+		getObjectByID = function(_, gid)
+			if p.car and p.car.id == gid then return p.car end
+			for _, t in pairs(world.traffic) do
+				if t.car.id == gid and not t.gone then return t.car end
+			end
+			return nil
+		end,
 	}
 	p.globals.vec3 = function(x, y, z) return {x = x, y = y, z = z} end
 	p.globals.quatFromDir = function(dir, up) return {dir = dir, up = up} end
@@ -462,7 +558,30 @@ function World:loadGame(p)
 	p.globals.gameplay_missions_missionManager = {getForegroundMissionId = function() return p.mission end}
 	p.globals.MPCoreNetwork = {isMPSession = function() return true end}
 	p.globals.gameplay_drag_core = {getData = function() return p.dragData end}
-	p.globals.map = {getMap = function() return {nodes = world.roadNodes or {}} end}
+	p.globals.map = {
+		getMap = function() return {nodes = world.roadNodes or {}} end,
+		-- A road route from a point to a node: none to a node the test marks unreachable.
+		getPointNodePath = function(pos, node)
+			if (world.unreachable or {})[node] or not (world.roadNodes or {})[node] then return {} end
+			return {"from", node}
+		end,
+		getGraphpath = function()
+			return {getRandomPathG = function(_, node) return {node, node .. "+1", node .. "+2"} end}
+		end,
+	}
+	p.globals.gameplay_traffic = {getTrafficData = function() return p.trafficData end}
+	p.globals.mileageEnabler = {isRemoteTraffic = function(sid) return world.traffic[sid] ~= nil end}
+	p.globals.core_vehicles = {getModel = function(jbeam)
+		local models = {pessima = {Brand = "Ibishu", Name = "Pessima"}, pickup = {Brand = "Gavril", Name = "D-Series"}}
+		return models[jbeam] and {model = models[jbeam]} or {}
+	end}
+	p.globals.core_input_bindings = {getControlForAction = function(action)
+		return (world.boundKeys or {})[action]
+	end}
+	p.globals.core_input_actions = {
+		onFileChanged = function(path) world.actionReloads = (world.actionReloads or 0) + 1; world.actionFile = path end,
+		getActiveActions = function() return world.listedActions or {} end,
+	}
 	p.globals.spawn = {safeTeleport = function(veh, pos, rot)
 		table.insert(p.teleports, {pos = copy(pos), rot = copy(rot)})
 		veh.pos = {x = pos.x, y = pos.y, z = pos.z}
@@ -581,6 +700,7 @@ end
 function World:advance(seconds)
 	for _ = 1, math.floor(seconds + 0.5) do
 		self.now = self.now + 1
+		self:moveTraffic()
 		self:serverOutput(function() if _G.tick then tick() end end)
 		self:pump()
 		for _, p in pairs(self.players) do
@@ -649,7 +769,8 @@ World.realOpen = REAL_IO.open
 function World.new(opts)
 	opts = opts or {}
 	local self = setmetatable({players = {}, toServer = {}, toClients = {}, serverLog = {}, clientLog = {},
-		dropped = {}, notifications = {}, printed = {}, disk = {}, dirs = {}, now = 0, nextPlayerId = 0}, World)
+		dropped = {}, notifications = {}, printed = {}, disk = {}, dirs = {}, now = 0, nextPlayerId = 0, traffic = {}},
+		World)
 	-- Every test starts from the real io and os functions.
 	World.restoreIo()
 	function log() end

@@ -357,7 +357,7 @@ World.test("list prints every route; cancel ends the event and tells the players
 	same(countLines(lines, "1. service-dragway: Service station garage to Alder Dragway"), 1, "first route")
 	same(countLines(lines, "random:"), 1, "random")
 	world:console("Mileage Event 5 100 1")
-	same(countLines(world:console("CareerMP Event cancel"), "cancelled"), 1, "cancelled, old prefix too")
+	same(countLines(world:console("Mileage Event cancel"), "cancelled"), 1, "cancelled")
 	same(lastEvent(world, ann, "cancelled") ~= nil, true, "players told")
 	world:advance(301)
 	same(#ann.teleports, 0, "nothing started")

@@ -245,6 +245,189 @@ test("a refused join says why, an invitation that began without the player goes,
 	assert.strictEqual(scope.race, null, "race panel cleared");
 });
 
+//== racing the traffic car beside you ============================================
+
+const OWN = {phase: "available", own: true, car: "Ibishu Pessima", allowed: true, prize: 2000, prizeAgainIn: 0};
+
+test("the race card offers Race this car beside your own traffic, with the reward", () => {
+	const {scope, lua} = load();
+	scope.emit("MileageAiRace", OWN);
+	const v = scope.traffic.view;
+	assert.strictEqual(v.title, "Race this car");
+	assert.deepStrictEqual(rows(v), ["Car: Ibishu Pessima", "Finish: Random, 1.5 to 4 km",
+		"Race reward: $2,000, +50% for each player who joins"]);
+	assert.strictEqual(v.note, "Players within 300 m are invited. You can also set a key for this in Options › Controls.");
+	assert.strictEqual(v.raceOff, false, "the button is on");
+	scope.raceTraffic();
+	assert.ok(lua.includes("if mileage_aiRace then mileage_aiRace.press() end"));
+	scope.emit("MileageAiRace", Object.assign({}, OWN, {key: "J"}));
+	assert.strictEqual(scope.traffic.view.key, "J", "the bound key");
+	assert.strictEqual(scope.traffic.view.note, "Players within 300 m are invited.");
+	scope.emit("MileageAiRace", Object.assign({}, OWN, {prizeAgainIn: 330}));
+	assert.deepStrictEqual(rows(scope.traffic.view)[2], "Race reward: Again in 6 min; a win still counts on the leaderboard");
+	scope.emit("MileageAiRace", Object.assign({}, OWN, {prize: 0}));
+	assert.deepStrictEqual(rows(scope.traffic.view)[2], "Race reward: None on this server; a win counts on the leaderboard");
+	scope.emit("MileageAiRace", Object.assign({}, OWN, {note: "No reachable finish from here, try another road."}));
+	assert.deepStrictEqual(rows(scope.traffic.view), ["Car: Ibishu Pessima"]);
+	assert.strictEqual(scope.traffic.view.note, "No reachable finish from here, try another road.");
+	scope.emit("MileageAiRace", {phase: "none"});
+	assert.strictEqual(scope.traffic, null, "no car beside you");
+});
+
+test("next to another player's traffic, or with racing traffic off, the button is off and says why", () => {
+	const {scope} = load();
+	scope.emit("MileageAiRace", {phase: "available", own: false, car: "Gavril Grand Marshal", owner: "Alex", allowed: true});
+	assert.strictEqual(scope.traffic.view.raceOff, true);
+	assert.strictEqual(scope.traffic.view.note,
+		"This is Alex's traffic, so only Alex's game can race it. Pull alongside one of your own traffic cars.");
+	scope.emit("MileageAiRace", Object.assign({}, OWN, {allowed: false}));
+	assert.strictEqual(scope.traffic.view.raceOff, true);
+	assert.strictEqual(scope.traffic.view.note, "Racing traffic is off on this server.");
+	assert.ok(/ng-disabled="traffic\.view\.raceOff"/.test(TEMPLATE), "the button is disabled in the page");
+});
+
+test("the invite shows the host, the car, the reward and Join or Decline, and stays over the card", () => {
+	const {scope, lua, clock} = load();
+	scope.emit("MileageAiRace", {phase: "invite", race: "ai3-9", host: "Taylor", car: "Ibishu Pessima",
+		distance: 2900, prize: 3000, seconds: 5});
+	const v = scope.traffic.view;
+	assert.strictEqual(v.title, "Taylor started a race near you");
+	assert.deepStrictEqual(rows(v), ["Against: Ibishu Pessima", "Finish: 2.9 km from you",
+		"Race reward: $3,000 if you join, to the first player to beat the Ibishu Pessima"]);
+	assert.strictEqual(v.join, true);
+	clock.now += 2500;
+	assert.strictEqual(scope.barWidth(scope.traffic), "50%", "the time to join runs down");
+	scope.emit("MileageAiRace", OWN);
+	assert.strictEqual(scope.traffic.kind, "invite", "a car beside you does not hide the invite");
+	scope.joinTraffic();
+	assert.ok(lua.includes("if mileage_aiRace then mileage_aiRace.join(" + b64("ai3-9") + ") end"));
+	scope.emit("MileageAiRace", {phase: "inviteClosed", race: "other"});
+	assert.ok(scope.traffic, "another race's close changes nothing");
+	scope.emit("MileageAiRace", {phase: "inviteClosed", race: "ai3-9"});
+	assert.strictEqual(scope.traffic, null, "closed");
+	scope.emit("MileageAiRace", {phase: "invite", race: "ai4", host: "T", car: "C", distance: 1, prize: 0, seconds: 5});
+	scope.declineTraffic();
+	assert.strictEqual(scope.traffic, null, "declined");
+	assert.ok(lua.includes("if mileage_aiRace then mileage_aiRace.decline() end"));
+});
+
+test("the rolling countdown and race panel say keep driving and show the reward", () => {
+	const {scope} = load();
+	scope.emit("MileageRace", {phase: "countdown", race: "ai1", other: "the Ibishu Pessima and Sam", stake: 0, count: 4,
+		rolling: true, reward: 3000});
+	assert.strictEqual(scope.race.view.big, "4");
+	assert.strictEqual(scope.race.view.note, "Rolling start · keep driving · vs the Ibishu Pessima and Sam · race reward $3,000");
+	scope.emit("MileageRace", {phase: "racing", race: "ai1", other: "the Ibishu Pessima", stake: 0, elapsed: 72.4,
+		distance: 1300, rolling: true, reward: 3000});
+	assert.strictEqual(scope.race.view.title, "Racing the Ibishu Pessima");
+	assert.strictEqual(scope.race.view.note, "Finish 1.3 km · follow your map route · race reward $3,000");
+	assert.strictEqual(scope.race.view.giveUp, "Give up");
+	scope.emit("MileageRace", {phase: "finished", race: "ai1", other: "x", elapsed: 151.4, rolling: true});
+	assert.strictEqual(scope.race.view.note, "Waiting for the other racers...");
+});
+
+const PLACES = [{name: "norto22", seconds: 151.4}, {name: "Ibishu Pessima", seconds: 153, car: true},
+	{name: "Sam", seconds: 160.2}];
+
+test("the traffic race result lists every racer and the car by its model, and the reward", () => {
+	const {scope, lua} = load();
+	scope.emit("MileageAiRace", {phase: "result", race: "ai1", host: "norto22", car: "Ibishu Pessima", winner: "norto22",
+		aiWon: false, places: PLACES, prize: 3000, reward: 3000, prizeAgainIn: 600, why: "finished", you: "norto22"});
+	let v = scope.traffic.view;
+	assert.strictEqual(v.title, "You won");
+	assert.deepStrictEqual([...v.places].map((r) => r.place + " " + r.name + " " + r.value),
+		["1 You 2:31.4", "2 Ibishu Pessima 2:33.0", "3 Sam 2:40.2"]);
+	assert.deepStrictEqual(rows(v), ["You get: $3,000 race reward"]);
+	scope.emit("MileageAiRace", OWN);
+	assert.strictEqual(scope.traffic.kind, "result", "the result stays until closed");
+	scope.closeTraffic();
+	assert.strictEqual(scope.traffic, null);
+	assert.ok(lua.filter((c) => c === "if mileage_aiRace then mileage_aiRace.sendState() end").length >= 2,
+		"the card is asked for again");
+	scope.emit("MileageAiRace", {phase: "result", race: "ai2", host: "norto22", car: "Ibishu Pessima", aiWon: true,
+		places: [PLACES[1], PLACES[0]], prize: 0, reward: 2000, why: "finished", you: "norto22"});
+	v = scope.traffic.view;
+	assert.strictEqual(v.title, "The Ibishu Pessima won");
+	assert.strictEqual(v.note, "Nobody beat the Ibishu Pessima, so no race reward this time.");
+	scope.emit("MileageAiRace", {phase: "result", race: "ai3", host: "norto22", car: "Ibishu Pessima", places: [],
+		prize: 0, reward: 2000, why: "aiOut", you: "Sam"});
+	assert.deepStrictEqual(rows(scope.traffic.view), ["Ibishu Pessima: out: crashed or stuck for 15 s"]);
+	scope.emit("MileageAiRace", {phase: "result", race: "ai4", host: "norto22", car: "Ibishu Pessima", places: [],
+		prize: 0, reward: 2000, why: "hostGaveUp", you: "norto22"});
+	assert.strictEqual(scope.traffic.view.note,
+		"Your race ended for everyone, with no winner and no race reward. The Ibishu Pessima is back in traffic.");
+	scope.emit("MileageAiRace", {phase: "result", race: "ai5", host: "norto22", car: "Ibishu Pessima", out: true,
+		places: [], prize: 0, why: "gaveUp", you: "Sam"});
+	assert.strictEqual(scope.traffic.view.title, "You left the race");
+	scope.emit("MileageAiRace", {phase: "result", race: "ai6", host: "norto22", car: "Ibishu Pessima", winner: "norto22",
+		places: PLACES, prize: 0, reward: 2000, prizeAgainIn: 240, why: "finished", you: "norto22"});
+	assert.deepStrictEqual(rows(scope.traffic.view), ["Race reward: Again in 4 min; the win counts on the leaderboard"]);
+	scope.emit("MileageAiRace", {phase: "result", race: "ai7", host: "norto22", car: "Ibishu Pessima", winner: "norto22",
+		places: PLACES, prize: 0, reward: 2000, prizeAgainIn: 0, why: "finished", you: "norto22"});
+	assert.deepStrictEqual(rows(scope.traffic.view), ["Race reward: Not paid for this race; the win counts on the leaderboard"],
+		"a win the server could not pay never says again in 0 min");
+});
+
+test("an unpaid win's reward row: a wait under a minute reads 1 min, a bad wait reads not paid, no row with the reward off", () => {
+	const {scope} = load();
+	const won = (extra) => {
+		scope.emit("MileageAiRace", Object.assign({phase: "result", race: "ai8", host: "norto22", car: "Ibishu Pessima",
+			winner: "norto22", places: PLACES, prize: 0, reward: 2000, why: "finished", you: "norto22"}, extra));
+		return rows(scope.traffic.view);
+	};
+	assert.deepStrictEqual(won({prizeAgainIn: 30}), ["Race reward: Again in 1 min; the win counts on the leaderboard"],
+		"30 s left is rounded up, never shown as 0 min");
+	assert.deepStrictEqual(won({prizeAgainIn: 61}), ["Race reward: Again in 2 min; the win counts on the leaderboard"]);
+	assert.deepStrictEqual(won({prizeAgainIn: -5}), ["Race reward: Not paid for this race; the win counts on the leaderboard"],
+		"a negative wait is no wait");
+	assert.deepStrictEqual(won({prizeAgainIn: "soon"}), ["Race reward: Not paid for this race; the win counts on the leaderboard"],
+		"a wait that is not a number is no wait");
+	assert.deepStrictEqual(won({prizeAgainIn: undefined}),
+		["Race reward: Not paid for this race; the win counts on the leaderboard"], "no wait sent");
+	assert.deepStrictEqual(won({reward: 0, prizeAgainIn: 0}), [], "the reward is off: nothing to say about it");
+	assert.deepStrictEqual(won({reward: 0, prizeAgainIn: 300}), [], "off, even while a wait runs");
+});
+
+// Every text a view holds, for the check below.
+function texts(value) {
+	if (typeof value === "string") return [value];
+	if (!value || typeof value !== "object") return [];
+	return Object.keys(value).reduce((all, key) => all.concat(texts(value[key])), []);
+}
+
+test("no text the app shows for a traffic race says AI", () => {
+	const {scope} = load();
+	const shown = [];
+	const take = () => { if (scope.traffic) shown.push(...texts(scope.traffic.view)); };
+	const base = {race: "ai1", host: "Taylor", car: "Ibishu Pessima", places: PLACES, prize: 3000, reward: 3000,
+		prizeAgainIn: 300, you: "norto22"};
+	[OWN, Object.assign({}, OWN, {allowed: false}), Object.assign({}, OWN, {prize: 0}),
+		Object.assign({}, OWN, {prizeAgainIn: 90}), Object.assign({}, OWN, {key: "J"}),
+		{phase: "available", own: false, car: "Gavril", owner: "Alex", allowed: true}].forEach((m) => {
+		scope.traffic = null;
+		scope.emit("MileageAiRace", m);
+		take();
+	});
+	scope.emit("MileageAiRace", {phase: "invite", race: "ai1", host: "Taylor", car: "Ibishu Pessima", distance: 2900,
+		prize: 3000, seconds: 5});
+	take();
+	[{winner: "norto22"}, {winner: "Sam"}, {winner: "norto22", prize: 0}, {aiWon: true}, {why: "timeout", places: []},
+		{why: "aiOut"}, {why: "hostGaveUp", host: "norto22"}, {why: "hostLeft"}, {why: "failed"}, {out: true}]
+		.forEach((extra) => {
+			scope.emit("MileageAiRace", Object.assign({phase: "result", why: "finished"}, base, extra));
+			take();
+		});
+	["countdown", "go", "racing", "finished"].forEach((phase) => {
+		scope.emit("MileageRace", {phase, race: "ai1", other: "the Ibishu Pessima", count: 3, elapsed: 5, rolling: true,
+			reward: 3000});
+		shown.push(...texts(scope.race.view));
+	});
+	assert.ok(shown.length > 40, "views checked: " + shown.length);
+	const said = shown.filter((t) => /\bAI\b/.test(t));
+	assert.deepStrictEqual(said, []);
+	assert.ok(!/\bAI\b/.test(TEMPLATE.replace(/mileage_aiRace|aiRace/g, "")), "nor the page");
+});
+
 //== the template ================================================================
 
 test("the template binds every text as text, never as markup", () => {

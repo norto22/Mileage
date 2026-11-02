@@ -15,6 +15,29 @@
 		</div>
 	</div>
 
+	<div class="mo-card" ng-if="traffic">
+		<div class="mo-title" ng-bind="traffic.view.title"></div>
+		<div class="mo-row" ng-repeat="row in traffic.view.rows">
+			<span class="mo-label" ng-bind="row.label"></span>
+			<span class="mo-value" ng-bind="row.value"></span>
+		</div>
+		<table class="mo-table" ng-if="traffic.view.places">
+			<tr><th>#</th><th>Racer</th><th>Time</th></tr>
+			<tr ng-repeat="row in traffic.view.places">
+				<td ng-bind="row.place"></td><td ng-bind="row.name"></td><td ng-bind="row.value"></td>
+			</tr>
+		</table>
+		<div class="mo-bar" ng-if="traffic.view.join"><div class="mo-bar-fill" ng-style="{width: barWidth(traffic)}"></div></div>
+		<div class="mo-note" ng-if="traffic.view.note" ng-bind="traffic.view.note"></div>
+		<div class="mo-note" ng-if="traffic.view.key">Or press <span class="mo-key" ng-bind="traffic.view.key"></span>.</div>
+		<div class="mo-actions">
+			<button class="mo-accept" ng-if="traffic.view.race" ng-disabled="traffic.view.raceOff" ng-click="raceTraffic()">Race this car</button>
+			<button class="mo-accept" ng-if="traffic.view.join" ng-click="joinTraffic()">Join</button>
+			<button class="mo-decline" ng-if="traffic.view.join" ng-click="declineTraffic()">Decline</button>
+			<button ng-if="traffic.view.close" ng-click="closeTraffic()">Close</button>
+		</div>
+	</div>
+
 	<div class="mo-card" ng-if="event">
 		<div class="mo-title" ng-bind="event.view.title"></div>
 		<div class="mo-row" ng-repeat="row in event.view.rows">

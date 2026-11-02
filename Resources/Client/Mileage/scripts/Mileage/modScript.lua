@@ -49,6 +49,9 @@ loadPersistent('mileage/offers')
 loadPersistent('mileage/streetRace')
 loadPersistent('mileage/leaderboard')
 loadPersistent('mileage/raceEvents')
+-- Racing your own traffic cars: uses the street race's rolling start and the race
+-- events' road-point picker, so it loads after both.
+loadPersistent('mileage/aiRace')
 loadPersistent('mileagePrefabSync')
 loadPersistent('mileagePerPartPaint')
 

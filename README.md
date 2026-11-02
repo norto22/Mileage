@@ -7,7 +7,7 @@
 
 Mileage is a multiplayer career for [BeamNG.drive](https://beamng.com/game/) on [BeamMP](https://beammp.com/). You and your friends play the career in one shared world: the same roads, traffic and signals. Race each other, pay each other, and keep your progress in your own save.
 
-Mileage was called CareerMP until v0.3.0. CareerMP servers switch to Mileage on their own when they update.
+Mileage was called CareerMP until v0.3.0. A server still running CareerMP needs Mileage installed by hand, as below; copy `Resources/Server/CareerMP/config/config.json` to `Resources/Server/Mileage/config/config.json` to keep its settings, then delete `Resources/Server/CareerMP/` and `Resources/Client/CareerMP.zip`.
 
 ## What works
 - Joining a server and starting a career (BeamNG.drive 0.40.4.0)
@@ -27,6 +27,7 @@ Mileage was called CareerMP until v0.3.0. CareerMP servers switch to Mileage on 
 - Paying and asking other players for money (in progress, [#33](https://github.com/norto22/Mileage/issues/33))
 - Street races for money (in progress, [#105](https://github.com/norto22/Mileage/issues/105))
 - Race events run by the server owner (in progress, [#106](https://github.com/norto22/Mileage/issues/106))
+- Racing your traffic cars on the road (in progress, [#113](https://github.com/norto22/Mileage/issues/113))
 - A server leaderboard (in progress, [#107](https://github.com/norto22/Mileage/issues/107))
 - Three or more players at once (in progress, [#32](https://github.com/norto22/Mileage/issues/32))
 - Mod vehicles and longer render distance (in progress, [#100](https://github.com/norto22/Mileage/issues/100))

@@ -1,7 +1,7 @@
 # Every pull request into main is a release. Its title is the version (vX.X.X).
 #
-# check   runs on every change to the pull request: title, version files, a version
-#         higher than main's, a free tag and an up-to-date client archive. It uploads
+# check   runs on every change to the pull request: title, branch name, version files, a
+#         version higher than main's, a free tag and an up-to-date client archive. It uploads
 #         the release package so it can be tested before merging.
 # release runs when the pull request is merged and publishes that version with the
 #         package, using the pull request's description as the release notes.
@@ -34,11 +34,10 @@ jobs:
       - name: Title and version files
         env:
           TITLE: ${{ github.event.pull_request.title }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
           BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
-          # Before the rename the base kept its version under CareerMP.
-          git show "origin/$BASE_REF:Resources/Server/Mileage/versions/server.json" > "$RUNNER_TEMP/base-server.json" 2>/dev/null \
-            || git show "origin/$BASE_REF:Resources/Server/CareerMP/versions/server.json" > "$RUNNER_TEMP/base-server.json"
+          git show "origin/$BASE_REF:Resources/Server/Mileage/versions/server.json" > "$RUNNER_TEMP/base-server.json"
           python3 tools/release_check.py --base "$RUNNER_TEMP/base-server.json"
 
       - name: Tag is free
@@ -78,6 +77,7 @@ jobs:
       - name: Title and version files
         env:
           TITLE: ${{ github.event.pull_request.title }}
+          BRANCH: ${{ github.event.pull_request.head.ref }}
         run: python3 tools/release_check.py
 
       # gh release create would attach a release to an existing tag, so refuse one here.

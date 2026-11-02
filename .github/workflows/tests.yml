@@ -29,3 +29,16 @@ jobs:
         run: |
           node tests/player_list_test.js
           node tests/prompts_app_test.js
+
+      # A release branch is named for its version (v0.4.1), and everything that carries
+      # the version must say the same; tools/set_version.py writes them all.
+      - name: Version matches a release branch's name
+        if: github.event_name == 'push'
+        env:
+          BRANCH: ${{ github.ref_name }}
+        run: |
+          if [[ "$BRANCH" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            TITLE="$BRANCH" python3 tools/release_check.py
+          else
+            echo "not a release branch, nothing to check"
+          fi
