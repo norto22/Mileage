@@ -2561,8 +2561,9 @@ end
 -- joined. A racer with a counted time keeps it when they press Give up, and the traffic car
 -- dropping out after any player's counted time is only noted. The race belongs to its host:
 -- their leaving, or their Give up before their own counted time, ends it for everyone with
--- no winner, as does the traffic car dropping out before any player has a time. Nothing is kept across a server start. The games' window never
--- calls this AI; only the owner's settings and this console do.
+-- no winner, as does the traffic car dropping out before any player has a time. Nothing is
+-- kept across a server start. The games' window never calls this AI; only the owner's
+-- settings and this console do.
 --
 -- aiRaces[id] = {id, host, car, model, start, finish, phase = "countdown" | "racing",
 -- goAt, deadline, racers = {[name] = {start}}, invited = {[name] = true}, reward,
@@ -2989,7 +2990,10 @@ local function readCar(race, at, now)
 	if not race.firstFinishAt or now <= race.firstFinishAt then
 		race.carDriven = race.carDriven + metres
 		if jumped then race.carJumped = true end
-	elseif now <= race.firstFinishAt + AI_LATE_SECONDS and not jumped then
+	elseif jumped then
+		-- A reset or a throw after a player's finish: no distance, and no time at the line.
+		return
+	elseif now <= race.firstFinishAt + AI_LATE_SECONDS then
 		race.carDriven = race.carDriven + metres
 	end
 	local s = enteringAt(last, at, race.finish, AI_FINISH_RADIUS)
