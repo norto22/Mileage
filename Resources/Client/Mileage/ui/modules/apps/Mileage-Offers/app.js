@@ -88,7 +88,32 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 
 	$scope.race = null;
 
+	// A race against a traffic car starts rolling: nobody stops, and it carries the race reward.
+	function rollingView(data) {
+		var other = String(data.other || "");
+		var reward = Number(data.reward) || 0;
+		var rewardText = reward > 0 ? " · race reward " + moDollars(reward) : "";
+		switch (data.phase) {
+		case "countdown":
+			return {big: String(data.count), note: "Rolling start · keep driving · vs " + other + rewardText};
+		case "go":
+			return {big: "GO", note: "vs " + other + rewardText};
+		case "racing":
+			return {
+				title: "Racing " + other,
+				big: moTime(data.elapsed),
+				note: (typeof data.distance === "number" ? "Finish " + moKm(data.distance) + " · " : "") +
+					"follow your map route" + rewardText,
+				giveUp: "Give up",
+			};
+		case "finished":
+			return {title: "Finished in " + moTime(data.elapsed), note: "Waiting for the other racers..."};
+		}
+		return null;
+	}
+
 	function raceView(data) {
+		if (data.rolling) return rollingView(data);
 		var other = String(data.other || "");
 		var stake = Number(data.stake) || 0;
 		var stakeText = stake > 0 ? moDollars(stake) + " stake" : "no stake";
@@ -169,6 +194,161 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 
 	$scope.closeRace = function () {
 		$scope.race = null;
+	};
+
+	//== racing the traffic car beside you =========================================
+	// mileage/aiRace.lua sends MileageAiRace: "available" while a traffic car drives beside
+	// the player ("none" when none is, "racing" once the race panel takes over), "invite"
+	// for a race started near them, "inviteClosed", and the "result". The opponent is named
+	// by its model; the money is the race reward.
+
+	$scope.traffic = null;
+
+	function rewardRow(data) {
+		var prize = Number(data.prize) || 0;
+		var again = Number(data.prizeAgainIn) || 0;
+		if (prize <= 0) return {label: "Race reward", value: "None on this server; a win counts on the leaderboard"};
+		if (again > 0) {
+			return {label: "Race reward", value: "Again in " + Math.ceil(again / 60) +
+				" min; a win still counts on the leaderboard"};
+		}
+		return {label: "Race reward", value: moDollars(prize) + ", +50% for each player who joins"};
+	}
+
+	function availableView(data) {
+		var car = String(data.car || "");
+		var view = {title: "Race this car", rows: [{label: "Car", value: car}], race: true, raceOff: true};
+		if (data.own !== true) {
+			var owner = String(data.owner || "another player");
+			view.note = "This is " + owner + "'s traffic, so only " + owner + "'s game can race it. " +
+				"Pull alongside one of your own traffic cars.";
+			return view;
+		}
+		if (data.allowed !== true) {
+			view.note = "Racing traffic is off on this server.";
+			return view;
+		}
+		view.raceOff = false;
+		if (data.note) {
+			view.note = String(data.note);
+			return view;
+		}
+		view.rows.push({label: "Finish", value: "Random, 1.5 to 4 km"});
+		view.rows.push(rewardRow(data));
+		view.note = "Players within 300 m are invited." +
+			(data.key ? "" : " You can also set a key for this in Options › Controls.");
+		if (data.key) view.key = String(data.key);
+		return view;
+	}
+
+	function inviteView(data) {
+		var car = String(data.car || "");
+		var prize = Number(data.prize) || 0;
+		var rows = [{label: "Against", value: car}, {label: "Finish", value: moKm(data.distance) + " from you"}];
+		if (prize > 0) {
+			rows.push({label: "Race reward", value: moDollars(prize) + " if you join, to the first player to beat the " + car});
+		}
+		return {
+			title: String(data.host || "") + " started a race near you",
+			rows: rows,
+			note: data.note ? String(data.note) : "Join to race from where you are, rolling, from the same start.",
+			join: true,
+		};
+	}
+
+	function trafficResultView(data) {
+		var you = String(data.you || ""), car = String(data.car || "");
+		var prize = Number(data.prize) || 0;
+		var places = (Array.isArray(data.places) ? data.places : []).map(function (p, i) {
+			return {place: i + 1, name: p.car ? car : (p.name === you ? "You" : String(p.name)), value: moTime(p.seconds)};
+		});
+		if (data.out) {
+			return {title: "You left the race", rows: [{label: "Your time", value: "did not finish: you gave up"}],
+				note: "The others race on. No race reward for you this time.", close: true};
+		}
+		var hostEnded = data.why === "hostGaveUp" || data.why === "hostLeft" || data.why === "failed";
+		if (hostEnded) {
+			if (data.host === you) {
+				return {title: "Race over", rows: [{label: "Your time", value: "did not finish: you gave up"}], close: true,
+					note: "Your race ended for everyone, with no winner and no race reward. The " + car + " is back in traffic."};
+			}
+			return {title: "Race over", close: true,
+				note: String(data.host || "") + (data.why === "hostLeft" ? " left" : " gave up") +
+					", so the race ended with no winner and no race reward."};
+		}
+		if (data.why === "aiOut") {
+			return {title: "Race over", rows: [{label: car, value: "out: crashed or stuck for 15 s"}], close: true,
+				note: "The race ended with no winner, so nobody is paid, including players who were ahead. " +
+					"The car is back in traffic."};
+		}
+		if (data.aiWon) {
+			return {title: "The " + car + " won", places: places, close: true,
+				note: "Nobody beat the " + car + ", so no race reward this time."};
+		}
+		if (!data.winner) {
+			return {title: "Race over", places: places.length > 0 ? places : null, close: true,
+				note: "Nobody reached the finish in time."};
+		}
+		if (data.winner === you) {
+			var rows = [];
+			if (prize > 0) {
+				rows.push({label: "You get", value: moDollars(prize) + " race reward"});
+			} else if ((Number(data.reward) || 0) > 0) {
+				rows.push({label: "Race reward", value: "Again in " + Math.ceil((Number(data.prizeAgainIn) || 0) / 60) +
+					" min; the win counts on the leaderboard"});
+			}
+			return {title: "You won", places: places, rows: rows, close: true};
+		}
+		return {title: String(data.winner) + " won", places: places, close: true};
+	}
+
+	$scope.$on('MileageAiRace', function (event, data) {
+		if (!data) return;
+		$scope.$evalAsync(function () {
+			var kind = $scope.traffic ? $scope.traffic.kind : null;
+			switch (data.phase) {
+			case "available":
+				// An invite or a result stays until it is answered or closed.
+				if (kind === "invite" || kind === "result") return;
+				$scope.traffic = {kind: "available", view: availableView(data)};
+				return;
+			case "none":
+			case "racing":
+				if (kind === "available") $scope.traffic = null;
+				return;
+			case "invite":
+				if (typeof data.race !== "string") return;
+				$scope.traffic = {kind: "invite", id: data.race, seconds: Number(data.seconds) || 5,
+					shownAt: Date.now(), view: inviteView(data)};
+				return;
+			case "inviteClosed":
+				if (kind === "invite" && $scope.traffic.id === data.race) $scope.traffic = null;
+				return;
+			case "result":
+				$scope.traffic = {kind: "result", id: data.race, view: trafficResultView(data)};
+				return;
+			}
+		});
+	});
+
+	$scope.raceTraffic = function () {
+		bngApi.engineLua('if mileage_aiRace then mileage_aiRace.press() end');
+	};
+
+	$scope.joinTraffic = function () {
+		if (!$scope.traffic || $scope.traffic.kind !== "invite") return;
+		bngApi.engineLua('if mileage_aiRace then mileage_aiRace.join(' + moLuaString($scope.traffic.id) + ') end');
+	};
+
+	$scope.declineTraffic = function () {
+		$scope.traffic = null;
+		bngApi.engineLua('if mileage_aiRace then mileage_aiRace.decline() end');
+	};
+
+	// The card for a car still beside the player comes back.
+	$scope.closeTraffic = function () {
+		$scope.traffic = null;
+		bngApi.engineLua('if mileage_aiRace then mileage_aiRace.sendState() end');
 	};
 
 	//== the server leaderboard =================================================
@@ -281,13 +461,16 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 
 	// Redraws the time bars.
 	var ticker = setInterval(function () {
-		if ($scope.offers.length > 0) $scope.$evalAsync(function () {});
+		if ($scope.offers.length > 0 || ($scope.traffic && $scope.traffic.kind === "invite")) {
+			$scope.$evalAsync(function () {});
+		}
 	}, 500);
 	$scope.$on('$destroy', function () { clearInterval(ticker); });
 
 	bngApi.engineLua('if mileage_offers then mileage_offers.sendState() end');
 	bngApi.engineLua('if mileage_streetRace then mileage_streetRace.sendState() end');
 	bngApi.engineLua('if mileage_raceEvents then mileage_raceEvents.sendState() end');
+	bngApi.engineLua('if mileage_aiRace then mileage_aiRace.sendState() end');
 }]);
 
 // Seconds as m:ss.s.

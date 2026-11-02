@@ -68,6 +68,20 @@
 .mo-accept {
 	background: #2e7d32 !important;
 }
+.mo-card button[disabled] {
+	background: #555 !important;
+	color: #999;
+	cursor: default;
+}
+.mo-key {
+	display: inline-block;
+	min-width: 1.4em;
+	padding: 0 4px;
+	border: 1px solid rgba(255, 255, 255, 0.4);
+	border-radius: 3px;
+	text-align: center;
+	color: white;
+}
 .mo-decline, .mo-danger {
 	background: #b71c1c !important;
 }
