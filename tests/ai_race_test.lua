@@ -125,6 +125,39 @@ World.test("pickRoadPoint gives a road node in range that accept takes, and nil 
 	end)
 end)
 
+-- The game gives each road node's position as its own vector (an FFI struct under LuaJIT),
+-- not a plain table. Lua 5.4 cannot make one, so there only the broken nodes are checked.
+local hasFfi, ffi = pcall(require, "ffi")
+local GameVec = hasFfi and ffi.typeof("struct { double x, y, z; }") or nil
+
+World.test("pickRoadPoint picks from road positions given as game vectors and skips broken ones", function(world)
+	roads(world)
+	local ann = world:join("Ann", 1000, 0)
+	world:as(ann, function()
+		local from = {x = 0, y = 0, z = 0}
+		local broken = {
+			none = {},
+			text = {pos = {x = 0, y = "2500", z = 0}},
+			short = {pos = {x = 0, y = 2500}},
+			flat = {pos = 2500},
+		}
+		world.roadNodes = broken
+		same(mileage_raceEvents.pickRoadPoint(from, 1500, 4000), nil, "a node with a missing or broken position is skipped")
+		if not GameVec then return end
+		local nodes = {}
+		for name, node in pairs(broken) do nodes[name] = node end
+		for i = 1, 20 do nodes["n" .. i] = {pos = GameVec(i * 10, 2000 + i * 50, 3)} end
+		world.roadNodes = nodes
+		local picked = mileage_raceEvents.pickRoadPoint(from, 1500, 4000)
+		expect(picked, "a road node picked from game vectors")
+		expect(picked.node:match("^n%d+$"), "a game vector node, not a broken one")
+		same(type(picked.pos), "table", "the finish is sent on as a plain table")
+		same(picked.pos.x, nodes[picked.node].pos.x, "its x")
+		same(picked.pos.y, nodes[picked.node].pos.y, "its y")
+		same(picked.pos.z, 3, "its z")
+	end)
+end)
+
 World.test("the finish is a reachable road point 1.5 to 4 km away and changes between races", function(world)
 	roads(world)
 	local ann = world:join("Ann", 1000, 0)
