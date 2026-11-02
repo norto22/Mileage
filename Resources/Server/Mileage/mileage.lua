@@ -2695,7 +2695,9 @@ local function endAiRace(race, winner, aiWon, why, places)
 	local paid = 0
 	if winner then
 		if Money.leaderboardWin then Money.leaderboardWin(winner) end
-		if (race.reward or 0) > 0 and prizeAgainIn(winner) == 0 then
+		-- The reward needs the traffic car seen by the server: where it cannot be read, only the
+		-- host's game says how it raced.
+		if (race.reward or 0) > 0 and race.carSeen and prizeAgainIn(winner) == 0 then
 			paid = race.reward
 			aiPrizeEarnedAt[winner] = os.time()
 			startTransfer({kind = "prize", from = SERVER_PARTY, to = winner, amount = paid, giveLabel = "Race reward"})
@@ -2899,6 +2901,7 @@ local function watchTrafficCar(race, now)
 	if race.phase ~= "racing" or race.aiSeconds then return false end
 	local at = Money.vehiclePosition(race.car)
 	if not at then return false end
+	race.carSeen = true
 	if Money.metresBetween(at, race.finish) <= AI_SEEN_METRES then
 		race.aiSeconds = now - race.goAt
 		race.firstReportAt = race.firstReportAt or now
@@ -2919,10 +2922,18 @@ local function aiRacesTick()
 		goIfDue(race, now)
 		if watchTrafficCar(race, now) then
 			-- Ended: the traffic car stopped.
-		elseif race.firstReportAt and now - race.firstReportAt >= AI_DECIDE_SECONDS then
+		elseif race.firstReportAt and now - race.firstReportAt >= AI_DECIDE_SECONDS
+				and (race.aiSeconds or not race.carSeen) then
+			-- A player ahead of a car the server can see waits for it to finish: only then is
+			-- it known that they beat it.
 			decideAiRace(race)
 		elseif race.phase == "racing" and now >= race.deadline then
-			if race.firstReportAt then decideAiRace(race, "timeout") else endAiRace(race, nil, false, "timeout") end
+			-- A car the server sees that never finished: nobody is known to have beaten it.
+			if race.firstReportAt and (race.aiSeconds or not race.carSeen) then
+				decideAiRace(race, "timeout")
+			else
+				endAiRace(race, nil, false, "timeout")
+			end
 		end
 	end
 end

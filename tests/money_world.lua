@@ -252,7 +252,8 @@ function World:startServer()
 			local p = world.players[id]
 			-- A traffic car, by its server vehicle id.
 			local t = world.traffic[tostring(id) .. "-" .. tostring(vid)]
-			if t and not world.hidePositions and not t.gone then
+			-- world.hideTraffic: the server cannot read traffic cars, only players' own.
+			if t and not world.hidePositions and not world.hideTraffic and not t.gone then
 				return {pos = {t.car.pos.x, t.car.pos.y, t.car.pos.z}}
 			end
 			if not world.hidePositions and p and p.parkedCar and vid == 9 then

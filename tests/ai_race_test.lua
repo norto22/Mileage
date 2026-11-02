@@ -79,6 +79,16 @@ local function wins(world, name)
 	return board and board.wins and board.wins[name] or 0
 end
 
+-- Advances until the server sent p a result (a player ahead of the traffic car waits for
+-- it to finish), at most limit seconds.
+local function untilResult(world, p, limit)
+	local before = #heard(world, p, "result")
+	for _ = 1, limit or 200 do
+		world:advance(1)
+		if #heard(world, p, "result") > before then return end
+	end
+end
+
 -- Ann presses, the countdown runs out, the traffic car races at speed m/s, and Ann reaches
 -- the finish after annAfter seconds of racing. Returns the race id.
 local function raceAnn(world, ann, t, speed, annAfter)
@@ -88,7 +98,8 @@ local function raceAnn(world, ann, t, speed, annAfter)
 	world:advance(5)
 	world:advance(annAfter)
 	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
-	world:advance(8)
+	untilResult(world, ann)
+	world:advance(2)
 	return id
 end
 
@@ -380,7 +391,7 @@ World.test("a traffic car time that could not have been driven is ignored", func
 	world:serverOutput(function() mileageRaceReport(ann.id, World.encode({race = id, aiFinished = 3})) end)
 	world:advance(30)
 	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
-	world:advance(8)
+	untilResult(world, ann)
 	same(card(world, ann, "result").winner, "Ann", "the impossible time did not win")
 	same(ann.money, 3000, "paid")
 end)
@@ -589,7 +600,7 @@ World.test("a traffic car time is ignored while the server sees the car far from
 	world:advance(30)
 	world:serverOutput(function() mileageRaceReport(ann.id, World.encode({race = id, aiFinished = 25})) end)
 	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
-	world:advance(8)
+	untilResult(world, ann)
 	same(card(world, ann, "result").winner, "Ann", "the claimed time did not count")
 	same(ann.money, 3000, "paid")
 end)
@@ -607,7 +618,7 @@ end)
 World.test("a traffic car that arrives after the host is timed after the host, on the running clock", function(world)
 	local ann, t = annAndCar(world, 2000)
 	-- Only the host's game can time the car here.
-	world.hidePositions = true
+	world.hideTraffic = true
 	press(world, ann)
 	t.car.speed = 66
 	world:advance(5)
@@ -620,7 +631,30 @@ World.test("a traffic car that arrives after the host is timed after the host, o
 	same(result.places[2].car, true, "the car second")
 	same(result.places[2].seconds, 38, "the car's own time, not hers")
 	same(result.winner, "Ann", "she beat it")
-	same(ann.money, 3000, "paid")
+	same(wins(world, "Ann"), 1, "the win counts")
+	same(ann.money, 1000, "no reward for a car the server never saw")
+	same(result.prize, 0, "and the result says none was paid")
+end)
+
+World.test("a player ahead waits for the traffic car, and a car that never finishes pays nothing", function(world)
+	local ann, t = annAndCar(world, 2000)
+	world:setConfig("server", "raceTimeLimitMinutes", "1")
+	-- A modified host game that says nothing of its car, creeping along so the server never
+	-- sees it stand still.
+	silenceTrafficCar(world)
+	press(world, ann)
+	t.car.speed = 1
+	world:advance(5)
+	world:advance(30)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	world:advance(10)
+	same(card(world, ann, "result"), nil, "no result while the car is still on its way")
+	untilResult(world, ann, 40)
+	local result = card(world, ann, "result")
+	same(result.why, "timeout", "the time limit")
+	same(result.winner, nil, "nobody is known to have beaten it")
+	same(ann.money, 1000, "nothing paid")
+	same(wins(world, "Ann"), 0, "no win")
 end)
 
 World.test("a parked car far away does not move the race's start or who is invited", function(world)
@@ -773,7 +807,7 @@ World.test("an invited player who gives up drops out and the others race on", fu
 	world:as(bob, function() same(mileage_streetRace.current(), nil, "Bob's panel is gone") end)
 	world:advance(25)
 	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
-	world:advance(8)
+	untilResult(world, ann)
 	same(card(world, ann, "result").winner, "Ann", "Ann raced on and won")
 	same(ann.money, 4000, "the reward counted Bob at zero: 150%")
 	same(bob.money, 1000, "Bob nothing")
