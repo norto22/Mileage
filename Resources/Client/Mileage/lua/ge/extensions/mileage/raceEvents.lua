@@ -32,6 +32,16 @@ local function isPoint(p)
 	return type(p) == "table" and type(p.x) == "number" and type(p.y) == "number" and type(p.z) == "number"
 end
 
+-- A road node's position as a plain {x, y, z}, or nil. The game gives each one as its own
+-- vector (cdata), not a table, and reading a field an FFI value lacks raises, hence pcall.
+local function nodePoint(pos)
+	local kind = type(pos)
+	if kind ~= "table" and kind ~= "cdata" and kind ~= "userdata" then return nil end
+	local ok, x, y, z = pcall(function() return pos.x, pos.y, pos.z end)
+	if not ok or type(x) ~= "number" or type(y) ~= "number" or type(z) ~= "number" then return nil end
+	return {x = x, y = y, z = z}
+end
+
 local function report(fields)
 	TriggerServerEvent("mileageRaceReport", jsonEncode(fields))
 end
@@ -50,12 +60,12 @@ function M.pickRoadPoint(from, min, max, accept)
 	local low, high = tonumber(min) or 1500, tonumber(max) or 4000
 	local candidates = {}
 	for name, node in pairs(nodes) do
-		local pos = type(node) == "table" and node.pos
-		if isPoint(pos) then
+		local pos = type(node) == "table" and nodePoint(node.pos)
+		if pos then
 			local dx, dy = pos.x - from.x, pos.y - from.y
 			local metres = math.sqrt(dx * dx + dy * dy)
 			if metres >= low and metres <= high then
-				table.insert(candidates, {pos = {x = pos.x, y = pos.y, z = pos.z}, node = name})
+				table.insert(candidates, {pos = pos, node = name})
 			end
 		end
 	end
