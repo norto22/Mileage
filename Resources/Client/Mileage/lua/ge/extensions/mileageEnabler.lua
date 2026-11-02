@@ -126,10 +126,20 @@ local function parkingChallengeActive()
 	return type(parking) == "table" and type(parking.isActive) == "function" and parking.isActive() == true
 end
 
+-- Another player's traffic far from this game's camera is held hidden on this game only
+-- (mileage/farTraffic.lua), by server vehicle id.
+local FAR_TRAFFIC = "mileage_farTraffic"
+
+local function farTrafficHidden(serverVehicleID)
+	local far = type(extensions) == "table" and rawget(extensions, FAR_TRAFFIC) or rawget(_G, FAR_TRAFFIC)
+	return type(far) == "table" and type(far.isHidden) == "function" and far.isHidden(serverVehicleID) == true
+end
+
 -- Whether another player's car should be showing on this game, from the server's state.
-local function shownHere(state)
+local function shownHere(state, serverVehicleID)
 	if not state.active then return false end
-	return not (state.traffic == true and parkingChallengeActive())
+	if state.traffic ~= true then return true end
+	return not (parkingChallengeActive() or farTrafficHidden(serverVehicleID))
 end
 
 -- Puts the server's last state on another player's car on this game; false when the
@@ -143,7 +153,7 @@ local function applyKnownState(serverVehicleID)
 	if not veh then return false end
 	-- Only a change is applied: switching an already active car on again disturbs its
 	-- physics on this screen, and a full list arrives every time a car spawns anywhere.
-	local active = shownHere(state)
+	local active = shownHere(state, serverVehicleID)
 	if veh:getActive() ~= active then
 		veh:setActive(active and 1 or 0)
 	end
@@ -193,7 +203,7 @@ local function rxCareerVehSync(data)
 end
 
 -- Puts every kept state on this game again, for a change that is not the server's, such
--- as a parking challenge starting or ending here.
+-- as a parking challenge starting or ending here, or far-away traffic hidden or shown.
 local function reapplyRemoteStates()
 	for serverVehicleID in pairs(knownStates) do
 		applyKnownState(serverVehicleID)
@@ -278,12 +288,12 @@ local function onVehicleActiveChanged(gameVehicleID, active)
 			}))
 		end
 	else
-		-- Another player's car changed here. Applying the server's own update, or a parking
-		-- challenge's hide, needs no answer; any other change is put right from the
-		-- server's full map.
+		-- Another player's car changed here. Applying the server's own update, a parking
+		-- challenge's hide or a far-away car's hide needs no answer; any other change is
+		-- put right from the server's full map.
 		local serverVehicleID = MPVehicleGE.getServerVehicleID(gameVehicleID)
 		local known = serverVehicleID and knownStates[serverVehicleID]
-		if known and shownHere(known) == (active and true or false) then return end
+		if known and shownHere(known, serverVehicleID) == (active and true or false) then return end
 		requestVehicleStates()
 	end
 end

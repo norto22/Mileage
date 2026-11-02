@@ -125,6 +125,105 @@ World.test("pickRoadPoint gives a road node in range that accept takes, and nil 
 	end)
 end)
 
+-- The game gives each road node's position as its own vector (an FFI struct under LuaJIT),
+-- not a plain table. Lua 5.4 cannot make one, so there only the broken nodes are checked.
+local hasFfi, ffi = pcall(require, "ffi")
+local GameVec = hasFfi and ffi.typeof("struct { double x, y, z; }") or nil
+
+World.test("pickRoadPoint picks from road positions given as game vectors and skips broken ones", function(world)
+	roads(world)
+	local ann = world:join("Ann", 1000, 0)
+	world:as(ann, function()
+		local from = {x = 0, y = 0, z = 0}
+		local broken = {
+			none = {},
+			text = {pos = {x = 0, y = "2500", z = 0}},
+			short = {pos = {x = 0, y = 2500}},
+			flat = {pos = 2500},
+		}
+		world.roadNodes = broken
+		same(mileage_raceEvents.pickRoadPoint(from, 1500, 4000), nil, "a node with a missing or broken position is skipped")
+		if not GameVec then return end
+		local nodes = {}
+		for name, node in pairs(broken) do nodes[name] = node end
+		for i = 1, 20 do nodes["n" .. i] = {pos = GameVec(i * 10, 2000 + i * 50, 3)} end
+		world.roadNodes = nodes
+		local picked = mileage_raceEvents.pickRoadPoint(from, 1500, 4000)
+		expect(picked, "a road node picked from game vectors")
+		expect(picked.node:match("^n%d+$"), "a game vector node, not a broken one")
+		same(type(picked.pos), "table", "the finish is sent on as a plain table")
+		same(picked.pos.x, nodes[picked.node].pos.x, "its x")
+		same(picked.pos.y, nodes[picked.node].pos.y, "its y")
+		same(picked.pos.z, 3, "its z")
+	end)
+end)
+
+-- The race tests only catch this fault if the test world's road map hands out game vectors.
+World.test("the test world's road map gives positions as game vectors under LuaJIT and leaves the test's nodes as tables", function(world)
+	roads(world)
+	local ann = world:join("Ann", 1000, 0)
+	world:as(ann, function()
+		local given = map.getMap().nodes
+		same(type(given.finish.pos), GameVec and "cdata" or "table", "the road map's position type")
+		same(given.finish.pos.y, FINISH.y, "the same position")
+		same(type(world.roadNodes.finish.pos), "table", "the test's own node is still a table")
+	end)
+end)
+
+-- A game value whose x, y or z cannot be read raises when indexed; that node is skipped.
+World.test("pickRoadPoint skips a game vector whose fields cannot be read, without raising", function(world)
+	if not GameVec then return end
+	roads(world)
+	local ann = world:join("Ann", 1000, 0)
+	local Flat = ffi.typeof("struct { double x, y; }")
+	world.roadNodes = {
+		flat = {pos = Flat(0, 2500)},
+		good = {pos = GameVec(0, 3000, 7)},
+	}
+	world:as(ann, function()
+		for _ = 1, 10 do
+			local ok, picked = pcall(mileage_raceEvents.pickRoadPoint, {x = 0, y = 0, z = 0}, 1500, 4000)
+			expect(ok, "no error: " .. tostring(picked))
+			same(picked and picked.node, "good", "only the readable node")
+		end
+	end)
+end)
+
+-- Some game builds hand positions as userdata with x, y and z.
+World.test("pickRoadPoint reads a userdata road position with number x, y and z", function(world)
+	if type(newproxy) ~= "function" then return end
+	roads(world)
+	local ann = world:join("Ann", 1000, 0)
+	local pos = newproxy(true)
+	getmetatable(pos).__index = {x = 0, y = 2500, z = 4}
+	world.roadNodes = {u = {pos = pos}}
+	world:as(ann, function()
+		local picked = mileage_raceEvents.pickRoadPoint({x = 0, y = 0, z = 0}, 1500, 4000)
+		same(picked and picked.node, "u", "the userdata node")
+		same(type(picked.pos), "table", "sent on as a plain table")
+		same(picked.pos.z, 4, "its z")
+	end)
+end)
+
+-- 1.5 and 4 km are in range, flat distance only, with the game's vectors.
+World.test("pickRoadPoint keeps game vectors at exactly 1.5 and 4 km flat and drops ones just outside", function(world)
+	if not GameVec then return end
+	roads(world)
+	local ann = world:join("Ann", 1000, 0)
+	world:as(ann, function()
+		local function only(y, z)
+			world.roadNodes = {one = {pos = GameVec(0, y, z)}}
+			local picked = mileage_raceEvents.pickRoadPoint({x = 0, y = 0, z = 0}, 1500, 4000)
+			return picked and picked.node
+		end
+		same(only(1500, 0), "one", "exactly 1500 m")
+		same(only(4000, 0), "one", "exactly 4000 m")
+		same(only(1499.5, 0), nil, "1499.5 m")
+		same(only(4000.5, 0), nil, "4000.5 m")
+		same(only(4000, 900), "one", "height does not count")
+	end)
+end)
+
 World.test("the finish is a reachable road point 1.5 to 4 km away and changes between races", function(world)
 	roads(world)
 	local ann = world:join("Ann", 1000, 0)

@@ -19,6 +19,18 @@ local CLIENT = "Resources/Client/Mileage/lua/ge/extensions/"
 local World = {}
 World.__index = World
 
+-- The game gives each road node's position as its own vector, an FFI struct of three
+-- doubles. Under LuaJIT the road map hands out positions that way; Lua 5.4 cannot make
+-- one, so there they stay plain tables. Anything not a plain point is passed on as is.
+local hasFfi, ffi = pcall(require, "ffi")
+local GameVec = hasFfi and ffi.typeof("struct { double x, y, z; }") or nil
+
+local function gameVec(pos)
+	if not GameVec or type(pos) ~= "table" then return pos end
+	if type(pos.x) ~= "number" or type(pos.y) ~= "number" or type(pos.z) ~= "number" then return pos end
+	return GameVec(pos.x, pos.y, pos.z)
+end
+
 --== JSON =====================================================================
 
 local function isArray(t)
@@ -559,7 +571,17 @@ function World:loadGame(p)
 	p.globals.MPCoreNetwork = {isMPSession = function() return true end}
 	p.globals.gameplay_drag_core = {getData = function() return p.dragData end}
 	p.globals.map = {
-		getMap = function() return {nodes = world.roadNodes or {}} end,
+		-- Positions as the game gives them: its own vectors under LuaJIT, plain tables elsewhere.
+		getMap = function()
+			local nodes = {}
+			for name, node in pairs(world.roadNodes or {}) do
+				local copy = {}
+				for k, v in pairs(node) do copy[k] = v end
+				copy.pos = gameVec(node.pos)
+				nodes[name] = copy
+			end
+			return {nodes = nodes}
+		end,
 		-- A road route from a point to a node: none to a node the test marks unreachable.
 		getPointNodePath = function(pos, node)
 			if (world.unreachable or {})[node] or not (world.roadNodes or {})[node] then return {} end

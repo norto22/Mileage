@@ -30,6 +30,7 @@ Mileage was called CareerMP until v0.3.0. A server still running CareerMP needs 
 - Racing your traffic cars on the road (in progress, [#113](https://github.com/norto22/Mileage/issues/113))
 - A server leaderboard (in progress, [#107](https://github.com/norto22/Mileage/issues/107))
 - Three or more players at once (in progress, [#32](https://github.com/norto22/Mileage/issues/32))
+- Other players' traffic more than 1 km away hidden on your game, for smoother play when spread out (in progress, [#118](https://github.com/norto22/Mileage/issues/118))
 - Mod vehicles and longer render distance (in progress, [#100](https://github.com/norto22/Mileage/issues/100))
 - Co-op jobs with split pay ([#89](https://github.com/norto22/Mileage/issues/89))
 - Paying a player to tow or repair your car ([#91](https://github.com/norto22/Mileage/issues/91))
