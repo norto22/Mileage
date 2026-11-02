@@ -420,6 +420,30 @@ test("a traffic race result lists racers and the car without a time, and says wh
 		"The car is back in traffic.");
 });
 
+test("a traffic race result skips broken not-finished entries and never reads a withheld reason off the prototype", () => {
+	const {scope} = load();
+	const shown = (extra) => {
+		scope.emit("MileageAiRace", Object.assign({phase: "result", race: "ai11", host: "norto22", car: "Ibishu Pessima",
+			winner: "norto22", aiWon: false, places: [{name: "norto22", seconds: 40.2}], prize: 0, reward: 3000,
+			prizeAgainIn: 0, why: "finished", you: "norto22"}, extra));
+		return scope.traffic.view;
+	};
+	const placeRows = (v) => [...(v.places || [])].map((r) => r.place + " " + r.name + " " + r.value);
+	let v = shown({notFinished: [null, "Sam", 5, {name: "Bob"}]});
+	assert.deepStrictEqual(placeRows(v), ["1 You 0:40.2", "- Bob did not finish"], "only the entry that is one");
+	for (const why of ["toString", "constructor", "__proto__", "made up"]) {
+		v = shown({rewardWithheld: why});
+		assert.deepStrictEqual(rows(v), ["Race reward: Not paid for this race; the win counts on the leaderboard"], why);
+	}
+	v = shown({prize: 3000, rewardWithheld: "slow"});
+	assert.deepStrictEqual(rows(v), ["You get: $3,000 race reward"], "a paid reward wins over a stray reason");
+	v = shown({reward: 0, rewardWithheld: "slow"});
+	assert.deepStrictEqual(rows(v), [], "no reward row with the reward off");
+	v = shown({winner: null, aiWon: true, places: [{name: "Ibishu Pessima", seconds: 38, car: true}],
+		notFinished: [{name: "norto22"}]});
+	assert.deepStrictEqual(placeRows(v), ["1 Ibishu Pessima 0:38.0", "- You did not finish"], "the car's win lists her too");
+});
+
 // Every text a view holds, for the check below.
 function texts(value) {
 	if (typeof value === "string") return [value];
