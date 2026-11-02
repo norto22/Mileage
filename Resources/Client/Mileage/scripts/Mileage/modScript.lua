@@ -11,12 +11,14 @@
 --                      traffic setup
 --   5. parkingChallenge - holds other players' traffic and parked cars hidden here
 --                      while a parking challenge runs (mileageEnabler reads it)
---   6. insuranceRestore - loads the game's insurance records when a join's career
+--   6. farTraffic    - holds other players' traffic more than 1 km away hidden here
+--                      (mileageEnabler reads it)
+--   7. insuranceRestore - loads the game's insurance records when a join's career
 --                      start leaves them empty
---   7. purchaseInsurance - gives the purchase screen a safe insurance choice when the
+--   8. purchaseInsurance - gives the purchase screen a safe insurance choice when the
 --                      insurance records are missing (patches wraps the game's purchase
 --                      menu and looks this extension up when it is used)
---   8. features
+--   9. features
 --
 -- 'manual' unload mode keeps these alive across level switches, which career
 -- does constantly.
@@ -32,6 +34,7 @@ loadPersistent('mileage/patches')
 loadPersistent('mileage/careerPatches')
 loadPersistent('mileage/traffic')
 loadPersistent('mileage/parkingChallenge')
+loadPersistent('mileage/farTraffic')
 loadPersistent('mileage/insuranceRestore')
 loadPersistent('mileage/purchaseInsurance')
 
