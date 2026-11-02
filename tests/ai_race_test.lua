@@ -384,3 +384,160 @@ World.test("a traffic car time that could not have been driven is ignored", func
 	same(card(world, ann, "result").winner, "Ann", "the impossible time did not win")
 	same(ann.money, 3000, "paid")
 end)
+
+--== every ending hands the car back (T8, T9) =====================================
+
+local function givenBack(t)
+	return t.entry.roleName == "standard" and t.entry.enableRespawn == true and t.entry.enableAutoPooling == true
+end
+
+World.test("a result hands the traffic car back to traffic", function(world)
+	local ann, t = annAndCar(world, 2000)
+	t.entry.enableAutoPooling = "kept"
+	raceAnn(world, ann, t, 40, 40)
+	same(card(world, ann, "result").winner, "Ann", "a result")
+	same(t.entry.roleName, "standard", "its own role")
+	same(t.entry.enableRespawn, true, "respawning again")
+	same(t.entry.enableAutoPooling, "kept", "its own pooling")
+	same(t.car.commands[#t.car.commands], "ai.setRacing(false)", "no longer racing")
+	same(#t.entry.roles, 2, "taken once and given back once")
+	world:as(ann, function() same(mileage_streetRace.current(), nil, "the race panel is gone") end)
+	world:advance(3)
+	same(card(world, ann, "available").own, true, "the card is offered again")
+end)
+
+World.test("the host giving up or leaving ends the race with no winner and hands the car back", function(world)
+	local ann, t = annAndCar(world, 2000)
+	press(world, ann)
+	world:advance(2)
+	world:as(ann, function() mileage_streetRace.giveUp() end)
+	world:pump()
+	local result = card(world, ann, "result")
+	same(result.winner, nil, "no winner")
+	same(result.why, "hostGaveUp", "she gave up")
+	expect(givenBack(t), "given back after giving up in the countdown")
+	same(#t.car.commands, 0, "never sent a route")
+	world:advance(1)
+	press(world, ann)
+	t.car.speed = 30
+	world:advance(10)
+	world:as(ann, function() mileage_streetRace.giveUp() end)
+	world:pump()
+	same(card(world, ann, "result").why, "hostGaveUp", "gave up while racing")
+	expect(givenBack(t), "given back after giving up in the race")
+	same(ann.money, 1000, "no reward")
+	same(world:printedMatching("no winner (hostGaveUp)"), 2, "the console says so")
+	-- Leaving the server: her game gives the car back, and the server ends the race.
+	t.car.pos, t.car.racing = {x = 4, y = 3, z = 0}, false
+	world:drive(ann, 0, 0)
+	world:advance(2)
+	press(world, ann)
+	world:advance(7)
+	same(t.entry.roleName, "empty", "racing again")
+	world:hook(ann, "onBeamMPServerLeave")
+	expect(givenBack(t), "given back on leaving")
+	world:leave(ann)
+	same(world:printedMatching("no winner (hostLeft)"), 1, "the race ended on the server")
+end)
+
+World.test("a stuck traffic car ends the race with no winner", function(world)
+	local ann, t = annAndCar(world, 2000)
+	press(world, ann)
+	t.car.speed = 0.5
+	world:advance(5)
+	world:advance(14)
+	same(card(world, ann, "result"), nil, "still racing after 14 s")
+	world:advance(2)
+	local result = card(world, ann, "result")
+	same(result.why, "aiOut", "the car dropped out")
+	same(result.winner, nil, "no winner")
+	expect(givenBack(t), "given back")
+	-- Players ahead are not paid either.
+	t.car.pos, t.car.racing = {x = 4, y = 3, z = 0}, false
+	world:advance(2)
+	press(world, ann)
+	t.car.speed = 30
+	world:advance(30)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	world:advance(1)
+	t.gone = true
+	world:advance(2)
+	same(card(world, ann, "result").why, "aiOut", "a car that is gone drops out")
+	same(ann.money, 1000, "nobody paid, even ahead of it")
+end)
+
+World.test("a race nobody finishes ends at the time limit and hands the car back", function(world)
+	local ann, t = annAndCar(world, 2000)
+	world:setConfig("server", "raceTimeLimitMinutes", "1")
+	press(world, ann)
+	t.car.speed = 1.5
+	world:advance(66)
+	local result = card(world, ann, "result")
+	same(result.why, "timeout", "the time limit")
+	same(result.winner, nil, "no winner")
+	expect(givenBack(t), "given back")
+end)
+
+World.test("a car taken out of traffic during the race is left alone at the end", function(world)
+	local ann, t = annAndCar(world, 2000)
+	press(world, ann)
+	ann.trafficData[t.car.id] = nil
+	world:advance(6)
+	same(card(world, ann, "result").why, "aiOut", "the race ended")
+	same(t.entry.roleName, "empty", "the old entry is not touched")
+end)
+
+World.test("a player in a traffic race is busy for challenges and events, and a street racer cannot start one", function(world)
+	roads(world)
+	local ann = world:join("Ann", 1000, 0)
+	local bob = world:join("Bob", 1000, 1)
+	world:giveTraffic(ann, {x = 4, y = 3})
+	world:advance(1)
+	press(world, ann)
+	world:serverOutput(function()
+		mileageOffer(bob.id, World.encode({kind = "race", to = ann.id, amount = 0, start = {x = 50, y = 0, z = 0},
+			finish = FINISH}))
+	end)
+	world:pump()
+	local closed = world:received(bob, "rxMileageOfferClosed")
+	same(closed[#closed].why, "busy", "a challenge to her is refused")
+	world:console("Mileage Event 5 100 random")
+	local announced = nil
+	for _, m in ipairs(world:received(ann, "rxMileageEvent")) do announced = m end
+	world:as(ann, function() mileage_raceEvents.join(announced.id) end)
+	world:pump()
+	local refused = nil
+	for _, m in ipairs(world:received(ann, "rxMileageEvent")) do if m.phase == "refused" then refused = m end end
+	same(refused.why, "Finish your race first, then join.", "an event join is refused")
+	world:as(ann, function() mileage_streetRace.giveUp() end)
+	world:pump()
+	-- Bob in a street race cannot start a traffic race.
+	local bobs = world:giveTraffic(bob, {x = 54, y = 3})
+	world:serverOutput(function()
+		mileageOffer(ann.id, World.encode({kind = "race", to = bob.id, amount = 0, start = {x = 0, y = 0, z = 0},
+			finish = FINISH}))
+	end)
+	world:pump()
+	local offer = world:received(bob, "rxMileageOffer")[1]
+	world:serverOutput(function() mileageOfferAnswer(bob.id, World.encode({id = offer.id, accept = true})) end)
+	world:pump()
+	world:serverOutput(function()
+		mileageAiRace(bob.id, World.encode({request = {car = bobs.sid, start = {x = 50, y = 0, z = 0}, finish = FINISH}}))
+	end)
+	world:pump()
+	same(heard(world, bob, "refused")[1].why, "You are already in a race.", "busy in a street race")
+end)
+
+World.test("a report about an ended race changes nothing", function(world)
+	local ann, t = annAndCar(world, 2000)
+	local id = raceAnn(world, ann, t, 40, 40)
+	same(ann.money, 3000, "paid once")
+	world:serverOutput(function()
+		mileageRaceReport(ann.id, World.encode({race = id, finished = 41}))
+		mileageRaceReport(ann.id, World.encode({race = id, aiOut = "stuck"}))
+		mileageRaceReport(ann.id, World.encode({race = id, gaveUp = true}))
+	end)
+	world:advance(8)
+	same(ann.money, 3000, "nothing more")
+	same(#heard(world, ann, "result"), 1, "one result")
+end)
