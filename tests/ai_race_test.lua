@@ -1554,3 +1554,125 @@ World.test("a creeping traffic car thrown ahead just after the winner's finish s
 	same(result.rewardWithheld, "slow", "the throw adds no distance")
 	same(ann.money, 1000, "not paid")
 end)
+
+--== review: the line in height, the jump allowance, the late window, an unseen car ======
+
+-- The car drives at 20 m/s on a road 15 m below the finish, from y = 3 at zero. It comes
+-- within 20 m of the finish when it is sqrt(20^2 - 15^2) = 13.23 m short of it on the flat,
+-- at y = 2486.77: 124.19 s. On the flat alone it would be 123.85 s, before Ann's 124 s.
+World.test("a traffic car 15 m below the finish is timed where it comes within 20 m of it", function(world)
+	local ann, t = annAndCar(world, 2000)
+	silenceTrafficCar(world)
+	press(world, ann)
+	t.car.speed = 20
+	world:advance(5)
+	t.car.pos = {x = 0, y = t.car.pos.y, z = -15}
+	t.car.target = {x = 0, y = 9000, z = -15}
+	world:advance(123)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	untilResult(world, ann, 10)
+	local result = card(world, ann, "result")
+	same(result.places[1].name, "Ann", "Ann first, at 124 s")
+	same(result.places[1].seconds, 124, "her time")
+	same(result.places[2] and result.places[2].car, true, "the car second")
+	expect(math.abs(result.places[2].seconds - 124.19) < 0.02,
+		"timed at the 20 m sphere: " .. tostring(result.places[2].seconds))
+	same(result.winner, "Ann", "she won")
+end)
+
+-- A step may be at most 100 m/s x (1 s since the last new reading + 2 s) = 300 m before the
+-- winner's finish. The car drives 20 m/s and is moved on once; Ann's time is 41 s.
+World.test("a traffic car step of 290 m in one second keeps the reward and one of 310 m does not", function(world)
+	local function race(extra)
+		local w = World.new()
+		local ann, t = annAndCar(w, 2000)
+		silenceTrafficCar(w)
+		press(w, ann)
+		t.car.speed = 20
+		w:advance(5)
+		w:advance(20)
+		-- With the tick's own 20 m, the server sees a step of 20 + extra metres.
+		t.car.pos = {x = t.car.pos.x, y = t.car.pos.y + extra, z = 0}
+		w:advance(20)
+		w:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+		untilResult(w, ann, 10)
+		return card(w, ann, "result"), ann, w
+	end
+	local result, ann = race(270)
+	same(result.winner, "Ann", "Ann won after a 290 m step")
+	same(result.rewardWithheld, nil, "inside the 300 m allowance")
+	same(ann.money, 3000, "paid")
+	local w
+	result, ann, w = race(290)
+	same(result.winner, "Ann", "Ann won after a 310 m step")
+	same(wins(w, "Ann"), 1, "the win counts")
+	same(result.rewardWithheld, "jumped", "past the 300 m allowance")
+	same(result.prizeAgainIn, 0, "no wait")
+	same(ann.money, 1000, "not paid")
+end)
+
+-- Ann's time is 41 s, so the bar is 328 m. The car drives 8.5 m/s, 348.5 m by her time, but
+-- the server's view of it is held for the 4 ticks before her finish (314.5 m seen) and
+-- catches up on the first reading after it.
+World.test("an honest traffic car whose positions catch up just after the winner's finish keeps the reward", function(world)
+	local ann, t = annAndCar(world, 2000)
+	silenceTrafficCar(world)
+	press(world, ann)
+	t.car.speed = 8.5
+	world:advance(5)
+	world:advance(37)
+	world:holdTraffic(t, 4)
+	world:advance(3)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	untilResult(world, ann, 10)
+	local result = card(world, ann, "result")
+	same(result.winner, "Ann", "she won")
+	same(result.places[1].seconds, 41, "her time")
+	same(result.rewardWithheld, nil, "the late readings count")
+	same(ann.money, 3000, "paid")
+end)
+
+-- Ann's time is 31 s, so the bar is 248 m. The car crept 1 m/s, then drives a drivable
+-- 90 m/s once her time is in: the 2 readings in the late window add 180 m (about 211 m in
+-- all), the 3 after it before the decision would add 270 m more.
+World.test("a creeping traffic car sped up after the winner's finish gains only the late window's distance", function(world)
+	local ann, t = annAndCar(world, 2000)
+	silenceTrafficCar(world)
+	press(world, ann)
+	t.car.speed = 1
+	world:advance(5)
+	world:advance(30)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	world:advance(1)
+	t.car.speed = 90
+	untilResult(world, ann, 10)
+	local result = card(world, ann, "result")
+	same(result.winner, "Ann", "she won")
+	same(result.places[1].seconds, 31, "her time")
+	same(result.rewardWithheld, "slow", "distance after the late window does not count")
+	same(ann.money, 1000, "not paid")
+end)
+
+-- The server cannot read the car from 120 s to 126 s; it crossed the 20 m line (y = 2480)
+-- at 123.85 s on its straight 20 m/s path past the finish, between the readings at 119 s
+-- and 127 s.
+World.test("a traffic car the server could not read for a while is timed between its last reading and the next", function(world)
+	local ann, t = annAndCar(world, 2000)
+	silenceTrafficCar(world)
+	press(world, ann)
+	t.car.speed = 20
+	world:advance(5)
+	t.car.pos = {x = 0, y = t.car.pos.y, z = 0}
+	t.car.target = {x = 0, y = 9000, z = 0}
+	world:advance(119)
+	world.hideTraffic = true
+	world:advance(7)
+	world.hideTraffic = false
+	untilResult(world, ann, 10)
+	local result = card(world, ann, "result")
+	same(result.aiWon, true, "the car won")
+	same(result.places[1].car, true, "the car first")
+	expect(math.abs(result.places[1].seconds - 123.85) < 0.02,
+		"timed where its path crossed the line: " .. tostring(result.places[1].seconds))
+	same(ann.money, 1000, "nobody paid")
+end)
