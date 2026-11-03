@@ -220,7 +220,7 @@ end
 
 --== called by the send checks and spawn pacing ==============================
 
--- One update BeamMP asked to send: update is "pos", "elec" or "inp"; isTraffic for a car
+-- One update BeamMP asked to send: update is "pos", "elec", "inp" or "eng"; isTraffic for a car
 -- under a send rule; through when it went on to BeamMP.
 function M.sent(update, isTraffic, through)
 	if not window then return end
@@ -230,7 +230,8 @@ function M.sent(update, isTraffic, through)
 	if through then counts[2] = counts[2] + 1 end
 end
 
--- One merged set of a traffic car's lights or inputs sent later, between BeamMP's calls.
+-- One merged set of a traffic car's lights, inputs or engine sent later, between BeamMP's
+-- calls.
 function M.flushed(update)
 	if not window then return end
 	local counts = window.sent.traffic[update]

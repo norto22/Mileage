@@ -309,3 +309,37 @@ test("a destroyed car's ghost setting is forgotten, so a new car under that id g
 	same(ghostCommands(objects[9]), 2, "setGhost commands on car 9")
 	same(ghostCommands(objects[10]), 1, "setGhost commands on car 10")
 end)
+
+--== this player's new car and the setting for other players' cars ==========
+
+-- BeamMP registers this player's new car (one they spawn, or their traffic and parked
+-- cars) only when the server confirms its spawn, so in the frame the game builds it
+-- MPVehicleGE.isOwn says false and getServerVehicleID says nil.
+test("this player's new car, built before BeamMP knows it is theirs, is not left with the setting for other players' cars", function()
+	local enabler, objects, vehicles = startedEnabler()
+	local i = 1
+	while true do
+		local n, v = debug.getupvalue(enabler.onUpdate, i)
+		if n == nil then error("clientConfig not found") end
+		if n == "clientConfig" then v.remoteVehicleGhost = true; break end
+		i = i + 1
+	end
+	enabler.onUpdate(1 / 60)
+	local veh = newVehicle(objects, 12, "pickup")
+	local registered = false
+	local realIsOwn, realServerId = MPVehicleGE.isOwn, MPVehicleGE.getServerVehicleID
+	MPVehicleGE.isOwn = function(id) if id == 12 then return registered end return realIsOwn(id) end
+	MPVehicleGE.getServerVehicleID = function(id)
+		if id == 12 then return registered and "0-2" or nil end
+		return realServerId(id)
+	end
+	enabler.onVehicleSpawned(12)
+	enabler.onVehicleReady(12)
+	enabler.onUpdate(1 / 60)
+	-- The server confirms the spawn a few frames later.
+	registered = true
+	vehicles["0-2"] = {gameVehicleID = 12}
+	for _ = 1, 120 do enabler.onUpdate(1 / 60) end
+	same(ghostCommands(veh), 0, "setGhost commands on this player's own car")
+	same(objects[9].queued[1], "mileageEnabler.setGhost(true)", "another player's car follows the setting")
+end)

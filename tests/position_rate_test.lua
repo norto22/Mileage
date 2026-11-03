@@ -691,3 +691,32 @@ test("without MPPowertrainGE the log says so once and lights and inputs are stil
 	same(countLines(logs, "MPPowertrainGE.sendEngineData missing"), 1, "warnings")
 	expect(MPInputsGE.sendInputs ~= game.originalInp, "inputs still wrapped")
 end)
+
+--== gaps between positions =================================================
+
+-- Rejects a limiter that keeps the count but bunches the sends (say 20 at the start of
+-- each second, then nothing): another game stops steering a car 0.1 s after its last
+-- position, so the count alone does not keep near traffic smooth. BeamMP's 50-a-second
+-- tick calls the send at most once a frame, so at 30 frames a second it comes every
+-- 1/30 s; no gap may be longer than the 0.05 s spacing plus one frame.
+test("a near traffic car's positions are never further apart than the spacing plus one frame, at 50 or 30 frames a second", function()
+	for _, frame in ipairs({0.02, 1 / 30}) do
+		local module = busyGame()
+		run(module, 1)
+		local clock, last, worst, count = 0, nil, 0, 0
+		for _ = 1, math.floor(5 / frame + 0.5) do
+			clock = clock + frame
+			module.onUpdate(frame)
+			local before = forwarded(20)
+			positionGE.sendVehiclePosRot('{"pos":[0,0,0]}', 20)
+			if forwarded(20) > before then
+				if last then worst = math.max(worst, clock - last) end
+				last, count = clock, count + 1
+			end
+		end
+		local fps = math.floor(1 / frame + 0.5)
+		expect(worst <= 0.05 + frame + 1e-9, fps .. " frames a second: longest gap " .. worst)
+		expect(worst < 0.1, fps .. " frames a second: a gap reached BeamMP's 0.1 s limit: " .. worst)
+		expect(count >= 98 and count <= 102, fps .. " frames a second: positions in 5 s: " .. count)
+	end
+end)

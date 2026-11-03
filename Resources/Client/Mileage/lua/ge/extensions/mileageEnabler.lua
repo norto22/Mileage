@@ -318,6 +318,10 @@ local function applyGhost(gameVehicleID)
 	if worldReadyState ~= 2 or not clientConfig then return end
 	local veh = gameVehicleID and be:getObjectByID(gameVehicleID)
 	if not veh then return end
+	-- This player's new car has no server id until the server confirms its spawn, and
+	-- until then BeamMP's isOwn says false: it would get the setting for other players'
+	-- cars. The once-a-second check gives it its own setting once it is registered.
+	if not MPVehicleGE.getServerVehicleID(gameVehicleID) then return end
 	local ghost = nil
 	if not MPVehicleGE.isOwn(gameVehicleID) then
 		if veh.JBeam == "unicycle" then
@@ -374,8 +378,8 @@ local function onVehicleReady(gameVehicleID)
 		-- player's car, so spectating this car never hands it to this game's traffic and
 		-- police (gameplay/traffic.lua checkPlayer).
 		veh:setDynDataFieldbyName("ignoreTraffic", 0, "true")
-		-- Ghosting is not queued here: the vehicle side only has setGhost, and it is
-		-- applied in onUpdate against the server's ghost config keys.
+		-- Ghosting was queued by forgetGhost above (applyGhost), against the server's
+		-- ghost config keys.
 		local vehicles = MPVehicleGE.getVehicles()
 		if vehicles[serverVehicleID] then
 			vehicles[serverVehicleID].hideNametag = nametagHidden(veh.JBeam, knownStates[serverVehicleID])

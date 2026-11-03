@@ -491,3 +491,79 @@ test("a report exactly 90 s old is still printed", function()
 	server.now = 90
 	expect(costLine(statsLines(), 1), "a 90 s old report was left out")
 end)
+
+--== the real meter's report, end to end =====================================
+
+-- Rejects a meter and a server that drift apart: a field the meter names one way and the
+-- server reads another (say the engine updates or the received counts), or a report that
+-- grows past the server's 2048 bytes, would leave Stats printing dashes or nothing. The
+-- real client meter (mileage/perfMeter.lua) runs a busy 30 s on a stand-in game, and its
+-- report text goes to the real server's handler.
+test("the real meter's report after a busy 30 s fits the server's limit and Stats prints its numbers", function()
+	local CLIENT = "Resources/Client/Mileage/lua/ge/extensions/mileage/"
+	local names = {"log", "setExtensionUnloadMode", "TriggerServerEvent", "jsonEncode", "MPCoreNetwork", "extensions",
+		"MPVehicleGE", "be", "mileageEnabler", "positionGE", "MPElectricsGE", "MPInputsGE"}
+	local saved = {}
+	for _, name in ipairs(names) do saved[name] = rawget(_G, name) end
+	local ok, err = pcall(function()
+		local toServer, objects, vehicles = {}, {}, {}
+		function log() end
+		function setExtensionUnloadMode() end
+		function TriggerServerEvent(name, data) table.insert(toServer, {name = name, data = data}) end
+		jsonEncode = json
+		MPCoreNetwork = {isMPSession = function() return true end}
+		extensions = {mileage_compat = dofile(CLIENT .. "compat.lua")}
+		local function car(gid, sid, own, x, fields)
+			local veh = {own = own, pos = {x = x, y = 0, z = 0}}
+			for k, v in pairs(fields or {}) do veh[k] = v end
+			function veh:getActive() return true end
+			function veh:getPosition() return self.pos end
+			objects[gid], vehicles[sid] = veh, {gameVehicleID = gid}
+		end
+		car(1, "0-1", true, 0)
+		for i = 0, 5 do car(10 + i, "0-" .. (10 + i), true, 100 + i, {isTraffic = "true"}) end
+		for i = 0, 7 do car(20 + i, "0-" .. (20 + i), true, 50 + i, {isParked = "true"}) end
+		car(30, "1-30", false, 300)
+		MPVehicleGE = {
+			getVehicles = function() return vehicles end,
+			isOwn = function(gid) return objects[gid] ~= nil and objects[gid].own end,
+		}
+		be = {getObjectByID = function(_, gid) return objects[gid] end, getPlayerVehicleID = function() return 1 end}
+		mileageEnabler = {
+			isTrafficCar = function(gid, veh) return gid ~= 1 and (veh.isTraffic == "true" or veh.isParked == "true") end,
+			isRemoteTraffic = function() return false end,
+		}
+		positionGE = {handle = function() end}
+		MPElectricsGE = {handle = function() end}
+		MPInputsGE = {handle = function() end}
+		local meter = dofile(CLIENT .. "perfMeter.lua")
+		meter.onCareerActive(true)
+		local function many(n, fn) for _ = 1, n do fn() end end
+		many(3000, function() meter.sent("pos", false, true) end)
+		many(27000, function() meter.sent("pos", true, false) end)
+		many(18000, function() meter.sent("pos", true, true) end)
+		many(5250, function() meter.sent("elec", true, false) end)
+		many(1500, function() meter.sent("elec", true, true) end)
+		many(150, function() meter.sent("eng", true, false) end)
+		many(50, function() meter.sent("eng", true, true) end)
+		many(6, function() meter.built() end)
+		many(1500, function() positionGE.handle("Zp:1-30:{}") end)
+		many(900, function() MPInputsGE.handle("Vi:1-30:{}") end)
+		for frame = 1, 1799 do meter.onUpdate(frame == 600 and 0.25 or (30 - 0.25) / 1798) end
+		same(#toServer, 1, "reports sent")
+		local data = toServer[1].data
+		expect(#data <= 2048, "report of " .. #data .. " bytes is over the server's limit")
+
+		newServer({0, 1})
+		mileagePerfReport(1, data)
+		local line = costLine(statsLines(), 1)
+		expect(line, "no cost line for the real meter's report: " .. data)
+		for _, part in ipairs({"30 s", "worst 250 ms", "1 over 100 ms", "own pos 3000/3000",
+			"traffic pos 18000/45000 elec 1500/6750 inp 0/0 eng 50/200", "received pos 1500 elec 0 inp 900",
+			"built 6", "players near 1-1", "cars own 1, driving traffic 6, parked 8, others' 1, others' traffic 0, hidden 0"}) do
+			expect(line:find(part, 1, true), "missing '" .. part .. "' in: " .. line)
+		end
+	end)
+	for _, name in ipairs(names) do rawset(_G, name, saved[name]) end
+	if not ok then error(err, 0) end
+end)
