@@ -79,8 +79,8 @@ local function wins(world, name)
 	return board and board.wins and board.wins[name] or 0
 end
 
--- Advances until the server sent p a result (a player ahead of the traffic car waits for
--- it to finish), at most limit seconds.
+-- Advances until the server sent p a result (the race is decided about 5 s after the first
+-- counted time, or at the time limit), at most limit seconds.
 local function untilResult(world, p, limit)
 	local before = #heard(world, p, "result")
 	for _ = 1, limit or 200 do
@@ -562,7 +562,8 @@ World.test("a stuck traffic car ends the race with no winner", function(world)
 	same(result.why, "aiOut", "the car dropped out")
 	same(result.winner, nil, "no winner")
 	expect(givenBack(t), "given back")
-	-- Players ahead are not paid either.
+	same(ann.money, 1000, "nobody paid")
+	-- A player ahead of it when it drops out still wins.
 	t.car.pos, t.car.racing = {x = 4, y = 3, z = 0}, false
 	world:advance(2)
 	press(world, ann)
@@ -571,9 +572,12 @@ World.test("a stuck traffic car ends the race with no winner", function(world)
 	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
 	world:advance(1)
 	t.gone = true
-	world:advance(2)
-	same(card(world, ann, "result").why, "aiOut", "a car that is gone drops out")
-	same(ann.money, 1000, "nobody paid, even ahead of it")
+	world:advance(5)
+	same(#heard(world, ann, "result"), 2, "the second race decided")
+	local second = card(world, ann, "result")
+	same(second.why, "finished", "decided on her finish, not ended by the car")
+	same(second.winner, "Ann", "she won")
+	same(ann.money, 3000, "paid")
 end)
 
 World.test("a race nobody finishes ends at the time limit and hands the car back", function(world)
@@ -671,7 +675,9 @@ World.test("a host's game that hides the traffic car's time cannot win when the 
 	local result = card(world, ann, "result")
 	same(result.aiWon, true, "the server saw the car finish first")
 	same(result.places[1].car, true, "the car first")
-	same(result.places[1].seconds, 36, "on the server's clock")
+	local carSeconds = result.places[1].seconds
+	expect(carSeconds > 35 and carSeconds < 36,
+		"on the server's clock, where it crossed the line between its readings at 35 and 36 s: " .. carSeconds)
 	same(ann.money, 1000, "not paid")
 	same(wins(world, "Ann"), 0, "no win")
 end)
@@ -735,7 +741,7 @@ World.test("a traffic car that arrives after the host is timed after the host, o
 	same(result.prize, 0, "and the result says none was paid")
 end)
 
-World.test("a player ahead waits for the traffic car, and a car that never finishes pays nothing", function(world)
+World.test("a player ahead of a creeping traffic car is decided the winner without waiting for it", function(world)
 	local ann, t = annAndCar(world, 2000)
 	world:setConfig("server", "raceTimeLimitMinutes", "1")
 	-- A modified host game that says nothing of its car, creeping along so the server never
@@ -746,14 +752,18 @@ World.test("a player ahead waits for the traffic car, and a car that never finis
 	world:advance(5)
 	world:advance(30)
 	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
-	world:advance(10)
-	same(card(world, ann, "result"), nil, "no result while the car is still on its way")
-	untilResult(world, ann, 40)
+	world:advance(6)
 	local result = card(world, ann, "result")
-	same(result.why, "timeout", "the time limit")
-	same(result.winner, nil, "nobody is known to have beaten it")
-	same(ann.money, 1000, "nothing paid")
-	same(wins(world, "Ann"), 0, "no win")
+	expect(result ~= nil, "decided while the car is still on its way")
+	same(result.why, "finished", "on her finish, not the time limit")
+	same(result.winner, "Ann", "she beat it")
+	same(wins(world, "Ann"), 1, "the win counts")
+	-- About 31 m driven in 31 s, far under a racing pace.
+	same(result.rewardWithheld, "slow", "the result says why")
+	same(result.prize, 0, "no reward for a car that did not race")
+	same(result.prizeAgainIn, 0, "and no wait")
+	same(ann.money, 1000, "not paid")
+	same(world:printedMatching("reward withheld: the car was too slow"), 1, "the console says why")
 end)
 
 World.test("a parked car far away does not move the race's start or who is invited", function(world)
@@ -1116,4 +1126,582 @@ World.test("a win the server could not pay says so and starts no wait, so the ne
 	same(results[#results].prize, 2000, "the next win, with the car seen, is paid at once")
 	same(ann.money, 3000, "Ann's career gains $2,000")
 	same(wins(world, "Ann"), 2, "both wins count")
+end)
+
+--== decided at the first player's finish (#122, #123, #116) ===================
+
+-- The entry of a result's notFinished list named name, or the car's when name is nil.
+local function notFinished(result, name)
+	for _, entry in ipairs(result and result.notFinished or {}) do
+		if (name == nil and entry.car == true) or (name ~= nil and entry.name == name and not entry.car) then
+			return entry
+		end
+	end
+	return nil
+end
+
+World.test("a player who beats the traffic car gets the result within 6 s of finishing", function(world)
+	local ann, t = annAndCar(world, 2000)
+	press(world, ann)
+	-- About 83 s to the finish: still more than 1 km out when Ann arrives.
+	t.car.speed = 30
+	world:advance(5)
+	world:advance(40)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	world:advance(6)
+	local result = card(world, ann, "result")
+	expect(result ~= nil, "no result 6 s after Ann finished")
+	same(result.winner, "Ann", "she won")
+	same(result.why, "finished", "decided on her finish")
+	same(ann.money, 3000, "the race reward")
+	same(wins(world, "Ann"), 1, "a leaderboard win")
+	same(#result.places, 1, "only Ann has a time")
+	local car = notFinished(result)
+	expect(car ~= nil, "the car is listed as not finished")
+	same(car.name, "Ibishu Pessima", "by its model")
+	same(car.out, nil, "still on its way")
+	expect(givenBack(t), "the car is back in traffic")
+end)
+
+World.test("the traffic car gone after the player finished still leaves her the winner, paid", function(world)
+	local ann, t = annAndCar(world, 2000)
+	press(world, ann)
+	t.car.speed = 30
+	world:advance(5)
+	world:advance(30)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	world:advance(1)
+	t.gone = true
+	world:advance(5)
+	local result = card(world, ann, "result")
+	expect(result ~= nil, "a result")
+	same(result.winner, "Ann", "she won")
+	same(result.why, "finished", "not ended by the car")
+	same(ann.money, 3000, "paid")
+	same(wins(world, "Ann"), 1, "the win counts")
+	same(notFinished(result).out, "gone", "the car is listed as out")
+	same(#heard(world, ann, "result"), 1, "one result")
+end)
+
+World.test("the traffic car stalling after the player finished still leaves her the winner", function(world)
+	local ann, t = annAndCar(world, 2000)
+	-- The host's game says nothing; the server's own stand-still check sees the car stop.
+	silenceTrafficCar(world)
+	press(world, ann)
+	t.car.speed = 30
+	world:advance(5)
+	world:advance(30)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	world:advance(1)
+	t.car.speed = 0
+	world:advance(25)
+	local result = card(world, ann, "result")
+	same(result and result.winner, "Ann", "she won")
+	same(ann.money, 3000, "paid")
+	same(#heard(world, ann, "result"), 1, "one result")
+end)
+
+World.test("a player who finished is free for a race event once the result is in", function(world)
+	local ann, t = annAndCar(world, 2000)
+	press(world, ann)
+	t.car.speed = 20
+	world:advance(5)
+	world:advance(40)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	world:advance(10)
+	world:console("Mileage Event 5 100 random")
+	local announced = nil
+	for _, m in ipairs(world:received(ann, "rxMileageEvent")) do announced = m end
+	world:as(ann, function() mileage_raceEvents.join(announced.id) end)
+	world:pump()
+	local refused = nil
+	for _, m in ipairs(world:received(ann, "rxMileageEvent")) do if m.phase == "refused" then refused = m end end
+	same(refused and refused.why, nil, "the event join is taken")
+end)
+
+World.test("a joined player still driving when the race is decided is listed as not finished", function(world)
+	local ann, t, bob = threeNear(world, 2000)
+	press(world, ann)
+	world:as(bob, function() mileage_aiRace.press() end)
+	world:pump()
+	t.car.speed = 30
+	world:advance(5)
+	world:advance(30)
+	world:drive(bob, FINISH.x, FINISH.y, FINISH.z)
+	world:advance(6)
+	local result = card(world, ann, "result")
+	expect(result ~= nil, "decided about 5 s after Bob's finish")
+	same(result.winner, "Bob", "Bob won")
+	same(bob.money, 4000, "Bob gets 150%")
+	same(#result.places, 1, "only Bob has a time")
+	expect(notFinished(result, "Ann") ~= nil, "Ann is listed as not finished")
+	expect(notFinished(result) ~= nil, "and the car")
+	world:as(ann, function() same(mileage_streetRace.current(), nil, "Ann's race panel is gone") end)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	world:advance(5)
+	same(#heard(world, ann, "result"), 1, "her later arrival changes nothing")
+	same(ann.money, 1000, "Ann nothing")
+end)
+
+World.test("the host giving up after her own finish keeps her time", function(world)
+	local ann, t = annAndCar(world, 2000)
+	press(world, ann)
+	local id = heard(world, ann, "countdown")[1].race
+	t.car.speed = 30
+	world:advance(5)
+	world:advance(30)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	world:advance(1)
+	world:serverOutput(function() mileageRaceReport(ann.id, World.encode({race = id, gaveUp = true})) end)
+	world:pump()
+	world:advance(5)
+	local result = card(world, ann, "result")
+	same(result and result.why, "finished", "the race was not ended by her Give up")
+	same(result.winner, "Ann", "she won")
+	same(ann.money, 3000, "paid")
+end)
+
+--== the car timed at the line, and checked before the reward (#115, #114) =======
+
+-- Where the server reads traffic car t now, as {x, y}.
+local function serverSees(t)
+	local owner, vehicle = t.sid:match("^(%d+)%-(%d+)$")
+	local raw = MP.GetPositionRaw(tonumber(owner), tonumber(vehicle))
+	return raw and {x = raw.pos[1], y = raw.pos[2]}
+end
+
+World.test("the test world can hold the server's view of a traffic car while it drives on", function(world)
+	local ann, t = annAndCar(world, 2000)
+	press(world, ann)
+	t.car.speed = 50
+	world:advance(8)
+	local before = serverSees(t).y
+	world:holdTraffic(t, 2)
+	world:advance(1)
+	same(serverSees(t).y, before, "held")
+	expect(t.car.pos.y > before, "the car drove on")
+	world:advance(1)
+	same(serverSees(t).y, t.car.pos.y, "caught up after 2 ticks")
+end)
+
+World.test("an honest 90 m/s traffic car seen through late and bunched-up positions keeps the reward", function(world)
+	local ann, t = annAndCar(world, 2000)
+	press(world, ann)
+	t.car.speed = 90
+	world:advance(5)
+	world:advance(8)
+	-- Three ticks with no new position, then 360 m at once; then a single late one.
+	world:holdTraffic(t, 3)
+	world:advance(8)
+	world:holdTraffic(t, 1)
+	world:advance(9)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	untilResult(world, ann, 10)
+	local result = card(world, ann, "result")
+	same(result.winner, "Ann", "she beat it")
+	same(result.rewardWithheld, nil, "the car raced")
+	same(result.prize, 2000, "paid")
+	same(ann.money, 3000, "her career gains it")
+end)
+
+World.test("a traffic car driving 20 m/s on a road leading away from the finish keeps the reward", function(world)
+	local ann, t = annAndCar(world, 2000)
+	press(world, ann)
+	t.car.speed = 20
+	world:advance(5)
+	-- Its route first leads south, away from the finish.
+	t.car.target = {x = 0, y = -5000, z = 0}
+	world:advance(30)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	untilResult(world, ann, 10)
+	local result = card(world, ann, "result")
+	same(result.winner, "Ann", "she beat it")
+	same(result.rewardWithheld, nil, "a detour still counts as driving")
+	same(ann.money, 3000, "paid")
+end)
+
+-- The car at 20 m/s is read at y = 20 s + 3 after s seconds of racing, so it crosses the
+-- 20 m line (y = 2480) at 123.85 s, and is first seen within 40 m at 123 s.
+World.test("a close finish times the traffic car where it crossed the 20 m line", function(world)
+	local function race(annAt)
+		local w = World.new()
+		local ann, t = annAndCar(w, 2000)
+		press(w, ann)
+		t.car.speed = 20
+		w:advance(5)
+		w:advance(annAt)
+		w:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+		untilResult(w, ann, 10)
+		return card(w, ann, "result"), ann
+	end
+	-- Ann's game reports the second after she arrives: 123 s, ahead of the car.
+	local result, ann = race(122)
+	same(result.winner, "Ann", "Ann reached the line before the car")
+	same(result.places[1].name, "Ann", "Ann first")
+	same(result.places[1].seconds, 123, "her time")
+	same(result.places[2].car, true, "the car second")
+	expect(math.abs(result.places[2].seconds - 123.85) < 0.01,
+		"the car's time where it crossed the line: " .. tostring(result.places[2].seconds))
+	same(ann.money, 3000, "paid")
+	-- 124 s: the car crossed first and still wins.
+	result, ann = race(123)
+	same(result.aiWon, true, "the car wins a close finish it led")
+	expect(math.abs(result.places[1].seconds - 123.85) < 0.01, "the car first at 123.85 s")
+	same(ann.money, 1000, "nobody paid")
+end)
+
+World.test("a traffic car moved 2.4 km in one second pays no reward and starts no wait", function(world)
+	local ann, t = annAndCar(world, 2000)
+	-- A modified host game: says nothing of its car, creeps it, then puts it near the finish.
+	silenceTrafficCar(world)
+	press(world, ann)
+	t.car.speed = 1
+	world:advance(5)
+	world:advance(20)
+	t.car.pos, t.car.speed = {x = 0, y = 2400, z = 0}, 0
+	world:advance(10)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	untilResult(world, ann, 10)
+	local result = card(world, ann, "result")
+	same(result.winner, "Ann", "the win stands")
+	same(wins(world, "Ann"), 1, "on the leaderboard")
+	same(result.rewardWithheld, "jumped", "the result says why")
+	same(result.prize, 0, "no reward")
+	same(result.prizeAgainIn, 0, "no wait")
+	same(ann.money, 1000, "not paid")
+	same(world:printedMatching("reward withheld: the car jumped"), 1, "the console says why")
+end)
+
+--== edges of the line, the pace bar, the late window and the host's out report ==
+
+-- The car at 90 m/s on a road past the finish is read at y = 2433 (67 m out) and y = 2523
+-- (23 m beyond): neither reading is within 20 m, but the path between them crosses the
+-- line, at y = 2480, 27.52 s after zero.
+World.test("a fast traffic car that drives through the finish between two readings is timed at the line", function(world)
+	local ann, t = annAndCar(world, 2000)
+	press(world, ann)
+	t.car.speed = 90
+	world:advance(5)
+	t.car.target = {x = 0, y = 9000, z = 0}
+	world:advance(28)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	untilResult(world, ann, 10)
+	local result = card(world, ann, "result")
+	same(result.aiWon, true, "the car crossed the line before Ann")
+	same(result.places[1].car, true, "the car first")
+	expect(math.abs(result.places[1].seconds - 27.52) < 0.05,
+		"timed where its path crossed the 20 m line: " .. tostring(result.places[1].seconds))
+	same(ann.money, 1000, "nobody paid")
+	same(wins(world, "Ann"), 0, "no win")
+end)
+
+-- A car that passes about 30 m beside the finish never came within the players' 20 m line.
+World.test("a traffic car that passes 30 m beside the finish is not timed, and the player who arrives wins", function(world)
+	local ann, t = annAndCar(world, 2000)
+	press(world, ann)
+	t.car.speed = 90
+	world:advance(5)
+	t.car.target = {x = 100, y = 9000, z = 0}
+	world:advance(35)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	untilResult(world, ann, 10)
+	local result = card(world, ann, "result")
+	same(result.winner, "Ann", "the car never crossed the line")
+	same(#result.places, 1, "only Ann has a time")
+	same(ann.money, 3000, "paid: the car raced")
+end)
+
+-- Ann's time is 41 s; the bar is 8 m/s x 41 s = 328 m of driving.
+World.test("a traffic car at 9 m/s keeps the reward and one at 7 m/s does not", function(world)
+	local function race(speed)
+		local w = World.new()
+		local ann, t = annAndCar(w, 2000)
+		silenceTrafficCar(w)
+		press(w, ann)
+		t.car.speed = speed
+		w:advance(5)
+		w:advance(40)
+		w:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+		untilResult(w, ann, 10)
+		return card(w, ann, "result"), ann, w
+	end
+	local result, ann = race(9)
+	same(result.winner, "Ann", "Ann won at 9 m/s")
+	same(result.places[1].seconds, 41, "her time")
+	same(result.rewardWithheld, nil, "above the bar")
+	same(ann.money, 3000, "paid")
+	local w
+	result, ann, w = race(7)
+	same(result.winner, "Ann", "Ann won at 7 m/s")
+	same(wins(w, "Ann"), 1, "the win counts")
+	same(result.rewardWithheld, "slow", "under the bar")
+	same(ann.money, 1000, "not paid")
+end)
+
+-- A crash or reset well after the winner's finish is not the car's race.
+World.test("the traffic car thrown 3 km 4 s after the winner's finish does not cost her the reward", function(world)
+	local ann, t = annAndCar(world, 2000)
+	press(world, ann)
+	t.car.speed = 30
+	world:advance(5)
+	world:advance(40)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	world:advance(4)
+	same(card(world, ann, "result"), nil, "not decided yet when the car is thrown")
+	t.car.pos = {x = 0, y = -3000, z = 0}
+	untilResult(world, ann, 10)
+	local result = card(world, ann, "result")
+	same(result.winner, "Ann", "she won")
+	same(result.rewardWithheld, nil, "not marked jumped")
+	same(ann.money, 3000, "paid")
+end)
+
+-- The host's game says why its car is out; anything but gone or stuck is shown as out.
+World.test("a host's out report with an unknown reason after the player's finish is noted as out", function(world)
+	local ann, t = annAndCar(world, 2000)
+	press(world, ann)
+	local id = heard(world, ann, "countdown")[1].race
+	t.car.speed = 30
+	world:advance(5)
+	world:advance(30)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	world:advance(1)
+	world:serverOutput(function() mileageRaceReport(ann.id, World.encode({race = id, aiOut = "<b>made up</b>"})) end)
+	world:pump()
+	world:advance(5)
+	local result = card(world, ann, "result")
+	same(result and result.why, "finished", "decided on her finish")
+	same(result.winner, "Ann", "she won")
+	same(notFinished(result).out, "out", "the host's text is not passed on")
+	same(ann.money, 3000, "paid")
+end)
+
+--== second opinion: a stop before the line, height, a reset after the finish =====
+
+-- Bob's game clock runs 3 s ahead of the server's, which the server allows; the host's
+-- game then throws the traffic car through the finish in one tick.
+World.test("a traffic car thrown through the finish after a joined player's finish does not take the win", function(world)
+	local ann, t, bob = threeNear(world, 2000)
+	press(world, ann)
+	local id = heard(world, ann, "countdown")[1].race
+	world:as(bob, function() mileage_aiRace.press() end)
+	world:pump()
+	world.filter = function(m)
+		if m.way == "toServer" and m.name == "mileageRaceReport" and (m.data:find("finished", 1, true)
+				or m.data:find("aiOut", 1, true)) then
+			return "drop"
+		end
+	end
+	t.car.speed = 30
+	world:advance(5)
+	world:advance(35)
+	world:drive(bob, FINISH.x, FINISH.y, FINISH.z)
+	world:serverOutput(function() mileageRaceReport(bob.id, World.encode({race = id, finished = 38})) end)
+	world:pump()
+	-- From about 1 km out to 100 m past the finish in one tick.
+	t.car.pos, t.car.speed = {x = 0, y = 2600, z = 0}, 0
+	untilResult(world, bob, 10)
+	local result = card(world, bob, "result")
+	same(result.winner, "Bob", "the throw gives the car no time")
+	same(result.aiWon, false, "the car did not win")
+	same(bob.money, 4000, "Bob gets 150%")
+end)
+
+-- Ann reaches the line while the car stands 37 m from the finish; it drives on after her
+-- time is in and crosses on its first reading after the stop.
+World.test("a traffic car that stood still before the line is timed from its last reading, not before the stop", function(world)
+	local ann, t = annAndCar(world, 2000)
+	-- Only the server's reading times the car here.
+	silenceTrafficCar(world)
+	press(world, ann)
+	t.car.speed = 20
+	world:advance(5)
+	world:advance(123)
+	t.car.speed = 0
+	world:advance(8)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	world:advance(1)
+	t.car.speed = 20
+	untilResult(world, ann, 10)
+	local result = card(world, ann, "result")
+	same(result.places[1].name, "Ann", "Ann reached the line first, at 132 s")
+	same(result.places[1].seconds, 132, "her time")
+	same(result.places[2].car, true, "the car second")
+	expect(result.places[2].seconds > 132, "the car's time after hers: " .. tostring(result.places[2].seconds))
+	same(result.winner, "Ann", "she won")
+end)
+
+World.test("a traffic car passing 50 m below the finish is not timed at it", function(world)
+	local ann, t = annAndCar(world, 2000)
+	silenceTrafficCar(world)
+	press(world, ann)
+	t.car.speed = 70
+	world:advance(5)
+	-- An underpass: its road runs 50 m below the finish.
+	t.car.pos = {x = t.car.pos.x, y = t.car.pos.y, z = -50}
+	t.car.target = {x = 0, y = 9000, z = -50}
+	world:advance(40)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	untilResult(world, ann, 10)
+	local result = card(world, ann, "result")
+	same(result.winner, "Ann", "the car never reached the finish")
+	same(#result.places, 1, "only Ann has a time")
+end)
+
+World.test("a traffic car reset within 2 s after the winner's finish does not cost her the reward", function(world)
+	local ann, t = annAndCar(world, 2000)
+	silenceTrafficCar(world)
+	press(world, ann)
+	t.car.speed = 30
+	world:advance(5)
+	world:advance(30)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	world:advance(1)
+	-- Reset to where it started, the tick after her finish is in.
+	t.car.pos, t.car.speed = {x = 4, y = 3, z = 0}, 0
+	untilResult(world, ann, 10)
+	local result = card(world, ann, "result")
+	same(result.winner, "Ann", "she won")
+	same(result.rewardWithheld, nil, "the reset is not a jump in the race")
+	same(ann.money, 3000, "paid")
+end)
+
+World.test("a creeping traffic car thrown ahead just after the winner's finish still pays nothing", function(world)
+	local ann, t = annAndCar(world, 2000)
+	silenceTrafficCar(world)
+	press(world, ann)
+	t.car.speed = 1
+	world:advance(5)
+	world:advance(30)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	world:advance(1)
+	-- 2.4 km in one tick after her finish: neither a jump in the race nor distance driven.
+	t.car.pos, t.car.speed = {x = 0, y = 2400, z = 0}, 0
+	untilResult(world, ann, 10)
+	local result = card(world, ann, "result")
+	same(result.winner, "Ann", "she won")
+	same(result.rewardWithheld, "slow", "the throw adds no distance")
+	same(ann.money, 1000, "not paid")
+end)
+
+--== review: the line in height, the jump allowance, the late window, an unseen car ======
+
+-- The car drives at 20 m/s on a road 15 m below the finish, from y = 3 at zero. It comes
+-- within 20 m of the finish when it is sqrt(20^2 - 15^2) = 13.23 m short of it on the flat,
+-- at y = 2486.77: 124.19 s. On the flat alone it would be 123.85 s, before Ann's 124 s.
+World.test("a traffic car 15 m below the finish is timed where it comes within 20 m of it", function(world)
+	local ann, t = annAndCar(world, 2000)
+	silenceTrafficCar(world)
+	press(world, ann)
+	t.car.speed = 20
+	world:advance(5)
+	t.car.pos = {x = 0, y = t.car.pos.y, z = -15}
+	t.car.target = {x = 0, y = 9000, z = -15}
+	world:advance(123)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	untilResult(world, ann, 10)
+	local result = card(world, ann, "result")
+	same(result.places[1].name, "Ann", "Ann first, at 124 s")
+	same(result.places[1].seconds, 124, "her time")
+	same(result.places[2] and result.places[2].car, true, "the car second")
+	expect(math.abs(result.places[2].seconds - 124.19) < 0.02,
+		"timed at the 20 m sphere: " .. tostring(result.places[2].seconds))
+	same(result.winner, "Ann", "she won")
+end)
+
+-- A step may be at most 100 m/s x (1 s since the last new reading + 2 s) = 300 m before the
+-- winner's finish. The car drives 20 m/s and is moved on once; Ann's time is 41 s.
+World.test("a traffic car step of 290 m in one second keeps the reward and one of 310 m does not", function(world)
+	local function race(extra)
+		local w = World.new()
+		local ann, t = annAndCar(w, 2000)
+		silenceTrafficCar(w)
+		press(w, ann)
+		t.car.speed = 20
+		w:advance(5)
+		w:advance(20)
+		-- With the tick's own 20 m, the server sees a step of 20 + extra metres.
+		t.car.pos = {x = t.car.pos.x, y = t.car.pos.y + extra, z = 0}
+		w:advance(20)
+		w:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+		untilResult(w, ann, 10)
+		return card(w, ann, "result"), ann, w
+	end
+	local result, ann = race(270)
+	same(result.winner, "Ann", "Ann won after a 290 m step")
+	same(result.rewardWithheld, nil, "inside the 300 m allowance")
+	same(ann.money, 3000, "paid")
+	local w
+	result, ann, w = race(290)
+	same(result.winner, "Ann", "Ann won after a 310 m step")
+	same(wins(w, "Ann"), 1, "the win counts")
+	same(result.rewardWithheld, "jumped", "past the 300 m allowance")
+	same(result.prizeAgainIn, 0, "no wait")
+	same(ann.money, 1000, "not paid")
+end)
+
+-- Ann's time is 41 s, so the bar is 328 m. The car drives 8.5 m/s, 348.5 m by her time, but
+-- the server's view of it is held for the 4 ticks before her finish (314.5 m seen) and
+-- catches up on the first reading after it.
+World.test("an honest traffic car whose positions catch up just after the winner's finish keeps the reward", function(world)
+	local ann, t = annAndCar(world, 2000)
+	silenceTrafficCar(world)
+	press(world, ann)
+	t.car.speed = 8.5
+	world:advance(5)
+	world:advance(37)
+	world:holdTraffic(t, 4)
+	world:advance(3)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	untilResult(world, ann, 10)
+	local result = card(world, ann, "result")
+	same(result.winner, "Ann", "she won")
+	same(result.places[1].seconds, 41, "her time")
+	same(result.rewardWithheld, nil, "the late readings count")
+	same(ann.money, 3000, "paid")
+end)
+
+-- Ann's time is 31 s, so the bar is 248 m. The car crept 1 m/s, then drives a drivable
+-- 90 m/s once her time is in: the 2 readings in the late window add 180 m (about 211 m in
+-- all), the 3 after it before the decision would add 270 m more.
+World.test("a creeping traffic car sped up after the winner's finish gains only the late window's distance", function(world)
+	local ann, t = annAndCar(world, 2000)
+	silenceTrafficCar(world)
+	press(world, ann)
+	t.car.speed = 1
+	world:advance(5)
+	world:advance(30)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	world:advance(1)
+	t.car.speed = 90
+	untilResult(world, ann, 10)
+	local result = card(world, ann, "result")
+	same(result.winner, "Ann", "she won")
+	same(result.places[1].seconds, 31, "her time")
+	same(result.rewardWithheld, "slow", "distance after the late window does not count")
+	same(ann.money, 1000, "not paid")
+end)
+
+-- The server cannot read the car from 120 s to 126 s; it crossed the 20 m line (y = 2480)
+-- at 123.85 s on its straight 20 m/s path past the finish, between the readings at 119 s
+-- and 127 s.
+World.test("a traffic car the server could not read for a while is timed between its last reading and the next", function(world)
+	local ann, t = annAndCar(world, 2000)
+	silenceTrafficCar(world)
+	press(world, ann)
+	t.car.speed = 20
+	world:advance(5)
+	t.car.pos = {x = 0, y = t.car.pos.y, z = 0}
+	t.car.target = {x = 0, y = 9000, z = 0}
+	world:advance(119)
+	world.hideTraffic = true
+	world:advance(7)
+	world.hideTraffic = false
+	untilResult(world, ann, 10)
+	local result = card(world, ann, "result")
+	same(result.aiWon, true, "the car won")
+	same(result.places[1].car, true, "the car first")
+	expect(math.abs(result.places[1].seconds - 123.85) < 0.02,
+		"timed where its path crossed the line: " .. tostring(result.places[1].seconds))
+	same(ann.money, 1000, "nobody paid")
 end)

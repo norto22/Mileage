@@ -256,11 +256,20 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 		};
 	}
 
+	// Why the server withheld a traffic race reward: the car did not race like a racing car.
+	var WITHHELD = {slow: "was too slow to count as racing", jumped: "jumped farther than a car can drive"};
+
 	function trafficResultView(data) {
 		var you = String(data.you || ""), car = String(data.car || "");
 		var prize = Number(data.prize) || 0;
+		var nameOf = function (p) { return p.car ? car : (p.name === you ? "You" : String(p.name)); };
 		var places = (Array.isArray(data.places) ? data.places : []).map(function (p, i) {
-			return {place: i + 1, name: p.car ? car : (p.name === you ? "You" : String(p.name)), value: moTime(p.seconds)};
+			return {place: i + 1, name: nameOf(p), value: moTime(p.seconds)};
+		});
+		(Array.isArray(data.notFinished) ? data.notFinished : []).forEach(function (p) {
+			if (!p || typeof p !== "object") return;
+			places.push({place: "-", name: nameOf(p),
+				value: !p.car ? "did not finish" : (p.out ? "out: crashed or stuck" : "still on its way")});
 		});
 		if (data.out) {
 			return {title: "You left the race", rows: [{label: "Your time", value: "did not finish: you gave up"}],
@@ -278,8 +287,8 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 		}
 		if (data.why === "aiOut") {
 			return {title: "Race over", rows: [{label: car, value: "out: crashed or stuck for 15 s"}], close: true,
-				note: "The race ended with no winner, so nobody is paid, including players who were ahead. " +
-					"The car is back in traffic."};
+				note: "The " + car + " dropped out before anyone finished, so the race ended with no winner and no " +
+					"race reward. The car is back in traffic."};
 		}
 		if (data.aiWon) {
 			return {title: "The " + car + " won", places: places, close: true,
@@ -293,6 +302,9 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 			var rows = [];
 			if (prize > 0) {
 				rows.push({label: "You get", value: moDollars(prize) + " race reward"});
+			} else if ((Number(data.reward) || 0) > 0 && Object.prototype.hasOwnProperty.call(WITHHELD, data.rewardWithheld)) {
+				rows.push({label: "Race reward", value: "Not paid: the " + car + " " + WITHHELD[data.rewardWithheld] +
+					"; the win counts on the leaderboard"});
 			} else if ((Number(data.reward) || 0) > 0 && (Number(data.prizeAgainIn) || 0) > 0) {
 				rows.push({label: "Race reward", value: "Again in " + Math.ceil(Number(data.prizeAgainIn) / 60) +
 					" min; the win counts on the leaderboard"});

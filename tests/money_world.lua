@@ -266,7 +266,10 @@ function World:startServer()
 			local t = world.traffic[tostring(id) .. "-" .. tostring(vid)]
 			-- world.hideTraffic: the server cannot read traffic cars, only players' own.
 			if t and not world.hidePositions and not world.hideTraffic and not t.gone then
-				return {pos = {t.car.pos.x, t.car.pos.y, t.car.pos.z}}
+				-- World:holdTraffic: the server keeps reading where the car was, as BeamMP does
+				-- while a far car's positions arrive late.
+				local at = t.held and t.held.pos or t.car.pos
+				return {pos = {at.x, at.y, at.z}}
 			end
 			if not world.hidePositions and p and p.parkedCar and vid == 9 then
 				local at = p.parkedCar.pos
@@ -491,6 +494,12 @@ function World:moveTraffic()
 			end
 		end
 	end
+end
+
+-- The server reads traffic car t where it is now for the next ticks server ticks, while the
+-- car drives on, then sees where it has got to.
+function World:holdTraffic(t, ticks)
+	t.held = {pos = {x = t.car.pos.x, y = t.car.pos.y, z = t.car.pos.z}, ticks = ticks}
 end
 
 -- Moves p's car to x, y, z (z 0 unless given); a frozen car does not move.
@@ -725,6 +734,12 @@ function World:advance(seconds)
 		self:moveTraffic()
 		self:serverOutput(function() if _G.tick then tick() end end)
 		self:pump()
+		for _, t in pairs(self.traffic) do
+			if t.held then
+				t.held.ticks = t.held.ticks - 1
+				if t.held.ticks <= 0 then t.held = nil end
+			end
+		end
 		for _, p in pairs(self.players) do
 			if p.connected then
 				self:as(p, function()
