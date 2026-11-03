@@ -1072,3 +1072,79 @@ test("a performance test takes the strip mid-run: the leader change that follows
 	same(activeRunId(), nil, "the multiplayer run id kept")
 	career_modules_vehiclePerformance = nil
 end)
+
+--== a false start: the out notice, and the leader keeping the strip ===========
+
+test("a disqualified racer still on the strip tells the leader they are out once, not every frame", function()
+	newWorld({leader = 2})
+	runTo(1)
+	runFromLeader("A-5", {{1, 1}, {2, 2}})
+	stageAll()
+	world.drag.advanceOutOfStaging()
+	racerOf(1).isDisqualified = true
+	runTo(6)
+	same(#wireNamed("mileageDragOut"), 1, "out notices over 5 s on the strip")
+end)
+
+test("a racer who finished cleanly and drives off sends no out notice", function()
+	newWorld({leader = 2})
+	runTo(1)
+	runFromLeader("A-5", {{1, 1}, {2, 2}})
+	stageAll()
+	world.drag.advanceOutOfStaging()
+	racerOf(1).isFinished = true
+	world.pos = {0, 300, 0}
+	runTo(4)
+	same(#wireNamed("mileageDragOut"), 0, "out notices")
+end)
+
+test("a false start in the next run is reported again, naming that run", function()
+	newWorld({leader = 2})
+	runTo(1)
+	runFromLeader("A-5", {{1, 1}, {2, 2}})
+	stageAll()
+	world.drag.advanceOutOfStaging()
+	racerOf(1).isDisqualified = true
+	runTo(2)
+	same(#wireNamed("mileageDragOut"), 1, "out notices in the first run")
+	fromPlayer(2, "mileageDragCancel", {stripId = "A", raceId = "A-5"})
+	runFromLeader("A-6", {{1, 1}, {2, 2}})
+	stageAll()
+	world.drag.advanceOutOfStaging()
+	racerOf(1).isDisqualified = true
+	runTo(3)
+	local outs = wireNamed("mileageDragOut")
+	same(#outs, 2, "out notices after the second run")
+	same(outs[2] and outs[2].data.raceId, "A-6", "the second notice's run")
+end)
+
+test("the leader 400 m down the strip keeps it while their result is on screen, then leaves", function()
+	twoPlayersRunning()
+	local raceId = world.lobby.getRun("A").raceId
+	racerOf(1).isFinished = true
+	world.pos = {0, 400, 0}
+	runTo(10)
+	gameplay_drag_core.getRaceState(raceId).finishTimes = {[1] = 11.2, [2] = 11.9}
+	world.drag.onDragMpTimeslipRequested()
+	same(world.drag.isRaceFinalized(), true, "result built")
+	runTo(10.5)
+	same(world.lobby.getRun("A").step, "result", "step once both are in")
+	runTo(21)
+	same(#wireNamed("mileageDragLeave"), 0, "leave messages while the result is on screen")
+	runTo(23)
+	same(world.lobby.getRun("A"), nil, "run after the result")
+	same(#wireNamed("mileageDragLeave"), 1, "leave messages once the run is over")
+end)
+
+test("the other player jumps the start: the leader's own finish moves the run to its result", function()
+	twoPlayersRunning()
+	world.others[2] = nil
+	local raceId = world.lobby.getRun("A").raceId
+	fromPlayer(2, "mileageDragOut", {stripId = "A", raceId = raceId})
+	fromPlayer(2, "mileageDragLeave", {stripId = "A"})
+	runTo(5)
+	racerOf(1).isFinished = true
+	gameplay_drag_core.getRaceState(raceId).finishTimes = {[1] = 11.2}
+	runTo(5.5)
+	same(world.lobby.getRun("A").step, "result", "step after the clean car's finish")
+end)
