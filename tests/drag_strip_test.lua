@@ -780,3 +780,64 @@ test("a wait notice from the strip's leader shows; from anyone else, or for anot
 	fromPlayer(2, "mileageDragWait", {stripId = "A", secondsLeft = 7})
 	same(waitMessages(), "7", "wait messages")
 end)
+
+--== a marker on each lane's line ==============================================
+
+local function places(level)
+	local list = {}
+	world.lobby.onGetRawPoiListForLevel(level or "west_coast_usa", list)
+	return list
+end
+
+test("each lane's stage line has a mission marker facing down the lane, with no big-map entry or prompt row", function()
+	newWorld()
+	local list = places()
+	same(#list, 2, "places")
+	local seen = {}
+	for i, place in ipairs(list) do
+		same(place.clusterType, "missionMarker", "cluster type")
+		local marker = place.markerInfo.missionMarker
+		expect(marker ~= nil, "a mission marker")
+		same(place.markerInfo.bigmapMarker, nil, "big-map entry")
+		same(marker.pos.x, i == 1 and 0 or 4, "marker " .. i .. " x")
+		same(marker.pos.y, 0, "marker " .. i .. " y")
+		expect(marker.rot.dir.y > 0 and marker.rot.dir.x == 0, "marker " .. i .. " faces down the lane")
+		expect(not seen[place.id], "ids are unique")
+		seen[place.id] = true
+	end
+	same(world.lobby.onActivityAcceptGatherData, nil, "a prompt row")
+end)
+
+test("no markers with multiplayer drag off, during a mission or the performance test, on another level, or in a run", function()
+	newWorld()
+	same(#places("italy"), 0, "places on another level")
+	local isMultiplayer = world.drag.isMultiplayer
+	world.drag.isMultiplayer = function() return false end
+	same(#places(), 0, "places while a mission owns the strip")
+	world.drag.isMultiplayer = isMultiplayer
+	world.drag.setEnabled(false)
+	same(#places(), 0, "places with multiplayer drag off")
+	world.drag.setEnabled(true)
+	runTo(11)
+	expect(activeRunId() ~= nil, "a run is up")
+	same(#places(), 0, "places during a run")
+end)
+
+test("the game's place caches are cleared once each time the markers come or go, not every frame", function()
+	newWorld()
+	runTo(5)
+	same(world.poiClears, 1, "clears once the markers are shown")
+	runTo(11.5)
+	same(world.poiClears, 2, "clears once the run is up")
+	stageAll()
+	runTo(12)
+	racerOf(1).isFinished = true
+	runTo(20)
+	same(world.poiClears, 2, "clears during the run")
+	gameplay_drag_core.getRaceState(activeRunId()).finishTimes = {[1] = 11.1}
+	world.drag.onDragMpTimeslipRequested()
+	-- The result lingers 12 s; the next run forms 10 s after this player re-joins.
+	runTo(33)
+	same(activeRunId(), nil, "the run is over")
+	same(world.poiClears, 3, "clears once the run is over")
+end)

@@ -1289,9 +1289,77 @@ function M.getRun(stripId)
 	return runs[stripId]
 end
 
+--== a marker on each lane's line =============================================
+
+-- The race spots' look (mileage/raceSpots.lua): a mission marker on the road.
+local MARKER_TYPE = "mileageDragLane"
+local MARKER_ICON = "mission_cup_triangle"
+-- Half a lane wide, so the two lanes' rings stay apart.
+local MARKER_RADIUS = 2
+
+--- Whether the markers were last built shown, to clear the game's caches on a change.
+local markersWereShown = false
+
+--- Shown while multiplayer drag is on (not while a mission or the performance test owns
+--- the strip) and this player is not in a run.
+local function markersShown()
+	if not isEnabled() then return false end
+	local t = transport()
+	return not (t and t.getLocalClientActiveRace and t.getLocalClientActiveRace())
+end
+
+--- The way down the lane, from its stage line to its end line.
+local function laneRotation(stripData, laneIndex, stagePos)
+	if type(quatFromDir) ~= "function" then return nil end
+	local lane = stripData.strip.lanes[laneIndex]
+	local finish = lane.waypoints.endLine
+	local pos = finish and finish.transform and finish.transform.position
+	local dir = pos and (vec3(pos) - stagePos) or vec3(0, 1, 0)
+	return quatFromDir(dir, vec3(0, 0, 1))
+end
+
+--- The game's places on a level: one marker per lane, at its stage line. No big-map entry
+--- (the game's own drag strip place is on the big map) and no prompt row, so stopping in
+--- the ring opens nothing: the game opens its prompt only when some extension adds a row.
+function M.onGetRawPoiListForLevel(levelIdentifier, elements)
+	if type(elements) ~= "table" or not markersShown() then return end
+	if levelIdentifier ~= (getCurrentLevelIdentifier and getCurrentLevelIdentifier()) then return end
+	for _, data in ipairs(allStrips()) do
+		local stripId = data.id or data._fnWithoutExt
+		local lanes = data.strip and data.strip.lanes
+		for laneIndex = 1, (lanes and #lanes or 0) do
+			local pos = stagePositionOf(data, laneIndex)
+			if pos then
+				local id = string.format("mileageDragLane_%s_%d", tostring(stripId), laneIndex)
+				table.insert(elements, {
+					id = id,
+					data = {type = MARKER_TYPE, id = id},
+					clusterType = "missionMarker",
+					markerInfo = {missionMarker = {pos = pos, rot = laneRotation(data, laneIndex, pos),
+						radius = MARKER_RADIUS, icon = MARKER_ICON}},
+				})
+			end
+		end
+	end
+end
+
+--- The game keeps its places and markers until told to build them again, so clear them
+--- once each time the markers come or go.
+local function updateMarkers()
+	local shown = markersShown()
+	if shown == markersWereShown then return end
+	markersWereShown = shown
+	if gameplay_rawPois and type(gameplay_rawPois.clear) == "function" then pcall(gameplay_rawPois.clear) end
+	if gameplay_markerInteraction and type(gameplay_markerInteraction.clearCache) == "function" then
+		pcall(gameplay_markerInteraction.clearCache)
+	end
+end
+
 --== lifecycle ================================================================
 
 local function onUpdate(dtReal)
+	updateMarkers()
+
 	-- A mission or performance test took over the strip while we were standing on it. Let
 	-- go of it on its first frame rather than holding a lane the mission is trying to use,
 	-- and tell the strip's leader. This comes before the enabled check below, which is
@@ -1340,6 +1408,7 @@ function M.reset()
 	stripListLevel = nil
 	localContext = nil
 	lastScan = 0
+	markersWereShown = false
 end
 
 --- Lobby messages ride the same relay as the BeamNG protocol; the transport routes
