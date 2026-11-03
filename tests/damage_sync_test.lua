@@ -1650,3 +1650,22 @@ test("an answer still finishes while the car is dented every half second", funct
 	same(missing, 0, "beams of the answer not sent after 5 s of dents")
 	for k = 0, 9 do expect(dentsSent[1600 + k], "dent on beam " .. (1600 + k) .. " sent for everyone") end
 end)
+
+--== a still car's copy is put right, whatever it differs by =================
+
+test("a wheel lost on the copy of a still car (8 beams broken) is put right", function()
+	local owner, copy = syncedGames()
+	phantomBreaks(copy, 30, 8)
+	step(30)
+	same(copy.broken[30], nil, "the lost wheel's beam 30 on the copy after 30 s")
+	same(copy.restLen[7], 0.8, "the owner's dent on the copy again")
+end)
+
+test("a single 3 cm dent only the copy has is put right", function()
+	local owner, copy = syncedGames()
+	copy.restLen[40] = 0.97
+	copy.beamstate.damage = copy.beamstate.damage + 50
+	step(30)
+	same(copy.restLen[40], 1, "the copy's beam 40 after 30 s")
+	same(copy.restLen[7], 0.8, "the owner's dent on the copy again")
+end)
