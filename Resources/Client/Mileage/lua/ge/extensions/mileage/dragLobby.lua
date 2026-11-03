@@ -380,7 +380,7 @@ end
 --- (core.lua:953, :1028, :1260 all gate on isServerHost). The race is not over when the
 --- first car finishes; it is over when it is reset, which is when treeStarted and
 --- currentPhase go back to their staging values on every client.
-function inLiveRace()
+inLiveRace = function()
 	-- The result is built: not racing, whatever the racer state still says.
 	local gm = gamemode()
 	if gm and gm.isRaceFinalized and gm.isRaceFinalized() then return false end
@@ -877,7 +877,7 @@ local function startRace(stripId, players)
 
 	-- And the id types, which is the one question the audit could not settle from logs.
 	--
-	-- core.lua:1134 does `players[drag.getLocalPlayerId()]`, and that is the only gate on
+	-- core.lua:1200 (0.40.4.0) does `players[drag.getLocalMPPlayerId()]`, the only gate on
 	-- creating a real (non-stub) racer for our own car. A number key against a string id --
 	-- or the reverse -- misses silently and leaves us as a stub that can never stage.
 	-- Printing both sides makes the mismatch, if there is one, impossible to miss.
