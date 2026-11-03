@@ -47,6 +47,8 @@ loadPersistent('mileage/damageSync')
 loadPersistent('mileage/positionRate')
 -- The cost meter: the send checks above and spawn pacing tell it what they let through.
 loadPersistent('mileage/perfMeter')
+-- Join pacing: another player's cars are built one at a time, a quarter second apart.
+loadPersistent('mileage/spawnPacing')
 loadPersistent('mileageUIApps')
 loadPersistent('mileage/transfers')
 loadPersistent('mileagePlayerPayments')

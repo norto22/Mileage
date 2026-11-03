@@ -30,6 +30,8 @@ local files = {
 	"tests/traffic_share_test.lua",
 	"tests/position_rate_test.lua",
 	"tests/perf_meter_test.lua",
+	"tests/spawn_pacing_test.lua",
+	"tests/prefab_sync_test.lua",
 	"tests/load_session_test.lua",
 	"tests/ui_apps_layout_test.lua",
 	"tests/transfers_test.lua",
