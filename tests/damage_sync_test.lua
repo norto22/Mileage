@@ -2192,3 +2192,63 @@ test("a point of a whole shape up to 1000 m away, a part torn off and flung, is 
 	expect(math.abs(y + 999) < 1e-6, "point 5 placed 999 m away")
 	same(countLines(copy.game.geQueue, "shapeApplied"), 1, "waits ended")
 end)
+
+--== found in the independent review ==========================================
+
+test("a whole set with a deformation, broken flag or rest length the copy cannot use applies nothing", function()
+	for _, beams in ipairs({
+		{7, 0.8, 0, 0.3, 8, 0.8, 0, 11},   -- deformation past 10
+		{7, 0.8, 0, 0.3, 8, 0.8, 2, 0.3},  -- broken flag neither 0 nor 1
+		{7, 0.8, 0, 0.3, 8, 0, 0, 0.3},    -- rest length 0
+	}) do
+		local copy = copyCar()
+		inVehicle(copy, copy.ext.applyDamage, 0, beams, {1, 0, 0, 0}, 1, 1)
+		same(#copy.applyLog, 0, "changes to the copy")
+		same(copy.commits, 0, "commits")
+		same(countLines(copy.game.geQueue, "shapeApplied"), 0, "waits ended")
+	end
+end)
+
+test("a point of a whole shape exactly 1000 m away is placed, and the set applied", function()
+	local copy = copyCar()
+	inVehicle(copy, copy.ext.applyDamage, 0, {7, 0.8, 0, 0.3}, {4, 1000, 0, -1000}, 1, 1)
+	same(copy.commits, 1, "commits")
+	local x, _, z = toCarFrame(copy, copy.nodePos[4])
+	expect(math.abs(x - 1000) < 1e-6 and math.abs(z + 1000) < 1e-6, "point 4 placed 1000 m away")
+end)
+
+test("dents held for an incomplete set go on when the set is dropped after 5 s", function()
+	local parts, copy = wholeAnswerAndCopy()
+	applyPart(copy, parts[1])
+	inVehicle(copy, copy.ext.applyDamage, 0, {3, 0.75, 0, 0.3}, {})
+	same(copy.restLen[3], 1, "the dent held while the set is incomplete")
+	tick(copy, 5)
+	same(copy.restLen[3], 0.75, "the held dent once the set is dropped")
+	same(copy.commits, 0, "commits of the dropped set")
+	same(countLines(copy.game.geQueue, "shapeApplied"), 0, "waits ended")
+end)
+
+test("a new owner whose direction cannot be read sends its whole shape once it can", function()
+	local car = bigDentedOwner()
+	local fwd = car.fwd
+	car.fwd = {x = 0, y = 0, z = 0}
+	inVehicle(car, car.ext.setRole, "owner")
+	tick(car, 2)
+	same(#rawMessages(car), 0, "messages without a frame")
+	car.fwd = fwd
+	tick(car, 2)
+	local sent = rawMessages(car)
+	same(#sent, 2, "parts of the full send once the frame is back")
+	same(sent[1]:sub(1, 20), '{"c":0,"p":1,"t":2,"', "the first part")
+	same(sent[2]:sub(1, 20), '{"c":0,"p":2,"t":2,"', "the second part")
+end)
+
+test("a numbered part for this game's own car is dropped and opens no wait", function()
+	local owner, copy, owners, copies = twoGames()
+	step(2)
+	local before = #sentToServer("careerDamageRequest", 0)
+	deliver(owners, '{"v":"0-0","c":0,"p":1,"t":2,"b":[7,0.5,0,0.3],"n":[]}')
+	step(12)
+	same(owner.restLen[7], 1, "the owner's own beam 7")
+	same(#sentToServer("careerDamageRequest", 0) - before, 0, "requests from the owner's game")
+end)
