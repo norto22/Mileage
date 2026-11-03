@@ -605,7 +605,6 @@ local function checkOwnCar(dt)
 	local checkpoints = race.route.checkpoints
 	if passCheckpoints(race, pos, myName()) then
 		race.ended = "finished"
-		ownRaceOver()
 		ui({phase = "finished", id = race.id, routeName = routeName(), elapsed = race.elapsed})
 		return
 	end
@@ -615,7 +614,6 @@ local function checkOwnCar(dt)
 	if away > OFF_ROUTE_METRES then race.offFor = race.offFor + dt else race.offFor = 0 end
 	if race.offFor >= OFF_ROUTE_SECONDS then
 		race.ended = "left"
-		ownRaceOver()
 		send({out = {race = race.id, racer = myName(), why = "left"}})
 		ui({phase = "out", id = race.id, routeName = routeName(), why = "left"})
 		return
