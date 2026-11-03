@@ -189,7 +189,11 @@ local function addCar(game, owner, vid, opts)
 		end
 		car.restLen[cid] = 1
 	end
-	car.v = {data = {beams = beams, nodes = nodes, refNodes = {[0] = {ref = 0}}}}
+	-- opts.hydros: steering hydraulics' beams; opts.settling: beams that settle after spawn.
+	local hydros = {}
+	for _, cid in ipairs(opts.hydros or {}) do table.insert(hydros, {beamCID = cid}) end
+	for _, cid in ipairs(opts.settling or {}) do beams[cid].beamPrecompressionTime = 0.5 end
+	car.v = {data = {beams = beams, nodes = nodes, refNodes = {[0] = {ref = 0}}, hydros = hydros}}
 	car.beamstate = {damage = 0, deformedBeams = {}}
 	function car.beamstate.onBeamDeformed(cid, ratio)
 		car.deformCalls = car.deformCalls + 1
@@ -311,7 +315,8 @@ local function twoGames(opts)
 	newWorld()
 	local owners, copies = addGame(0), addGame(1)
 	local owner = addCar(owners, 0, 0, opts)
-	local copy = addCar(copies, 0, 0, {nodes = opts.nodes, beams = opts.beams, fwd = {x = 1, y = 0, z = 0}})
+	local copy = addCar(copies, 0, 0, {nodes = opts.nodes, beams = opts.beams, hydros = opts.hydros,
+		settling = opts.settling, fwd = {x = 1, y = 0, z = 0}})
 	owners.playerVehicle = owner.gid
 	return owner, copy, owners, copies
 end
@@ -1069,12 +1074,29 @@ local function phantomDents(copy, first, last, len)
 	copy.beamstate.damage = copy.beamstate.damage + 1000
 end
 
-test("lengths within 2 cm, or only 20 disagreeing beams, start no resync", function()
+test("one beam more than 5 mm off the owner's report starts a resync, one under 5 mm does not", function()
 	local copy = heardCopy(30)
-	for cid = 0, 29 do copy.restLen[cid] = 0.9 - 0.015 end
-	phantomDents(copy, 50, 69)
+	for cid = 0, 29 do copy.restLen[cid] = 0.9 - 0.004 end
+	copy.restLen[50] = 1.004
+	copy.beamstate.damage = copy.beamstate.damage + 10
 	tick(copy, 5)
-	same(resetRequests(copy).resync, 0, "resyncs")
+	same(resetRequests(copy).resync, 0, "resyncs with every beam within 5 mm")
+	copy.restLen[60] = 1 - 0.006
+	copy.beamstate.damage = copy.beamstate.damage + 10
+	tick(copy, 1)
+	same(resetRequests(copy).resync, 0, "resyncs after one check")
+	tick(copy, 1)
+	same(resetRequests(copy).resync, 1, "resyncs after two checks")
+end)
+
+test("one beam broken on the copy while reported whole starts a resync after two checks", function()
+	local copy = heardCopy(30)
+	copy.broken[55] = true
+	copy.beamstate.damage = copy.beamstate.damage + 10
+	tick(copy, 1)
+	same(resetRequests(copy).resync, 0, "resyncs after one check")
+	tick(copy, 1)
+	same(resetRequests(copy).resync, 1, "resyncs after two checks")
 end)
 
 test("25 plain dents the owner never reported start a resync", function()
@@ -1668,4 +1690,60 @@ test("a single 3 cm dent only the copy has is put right", function()
 	step(30)
 	same(copy.restLen[40], 1, "the copy's beam 40 after 30 s")
 	same(copy.restLen[7], 0.8, "the owner's dent on the copy again")
+end)
+
+--== beams the game lengthens on its own =====================================
+
+-- A copy that heard from its owner, with beam 70 a steering hydraulic and 71 a beam
+-- that settles after spawn.
+local function heardCopyWithHydros()
+	local copy = copyCar({beams = 100, hydros = {70}, settling = {71}})
+	inVehicle(copy, copy.ext.applyDamage, 0, {7, 0.9, 0, 0.2}, {})
+	return copy
+end
+
+test("a steering hydraulic's length, or a settling beam's, never starts a resync", function()
+	local copy = heardCopyWithHydros()
+	copy.restLen[70] = 1.03
+	copy.restLen[71] = 0.96
+	copy.beamstate.damage = copy.beamstate.damage + 10
+	tick(copy, 5)
+	same(resetRequests(copy).resync, 0, "resyncs")
+end)
+
+test("a hydraulic beam broken on the copy while whole on the owner starts a resync", function()
+	local copy = heardCopyWithHydros()
+	copy.broken[70] = true
+	copy.beamstate.damage = copy.beamstate.damage + 10
+	tick(copy, 2)
+	same(resetRequests(copy).resync, 1, "resyncs")
+end)
+
+test("an owner never sends a hydraulic's or settling beam's length, and sends their breaks", function()
+	local car = ownerCar({hydros = {5}, settling = {6}})
+	tick(car)
+	takeMessages(car)
+	car.restLen[5] = 1.05
+	car.restLen[6] = 0.9
+	dent(car, 7, 0.8)
+	tick(car)
+	same(table.concat(beamIds(takeMessages(car)[1]), ","), "7", "beams sent for a dent while steering")
+	car.broken[5], car.broken[6] = true, true
+	car.beamstate.damage = car.beamstate.damage + 50
+	tick(car)
+	local m = takeMessages(car)[1]
+	same(table.concat(beamIds(m), ","), "5,6", "beams sent once they break")
+	same(m.b[3], 1, "beam 5 broken")
+	same(m.b[7], 1, "beam 6 broken")
+end)
+
+test("a hydraulic beam broken on the owner reaches the copy broken, its length left to the copy", function()
+	local owner, copy = twoGames({hydros = {5}})
+	step(2.5)
+	owner.restLen[5] = 1.04
+	owner.broken[5] = true
+	owner.beamstate.damage = owner.beamstate.damage + 100
+	step(1.5)
+	same(copy.broken[5], true, "the copy's hydraulic beam 5 broken")
+	same(copy.restLen[5], 1, "the copy's hydraulic beam 5 length")
 end)

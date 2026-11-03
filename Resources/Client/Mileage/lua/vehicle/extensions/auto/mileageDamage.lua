@@ -13,9 +13,9 @@
 --     a saved damaged car (beamstate.load): points moved into place, rest lengths set,
 --     broken beams broken, deformation recorded.
 --
--- The owner wins: a copy that disagrees with what its owner reported on more than 20
--- beams for two checks in a row (damage only this game simulated) is reset in place and
--- given the owner's full damage. An owner's reset or repair sends a cleared notice, and
+-- The owner wins: a copy that disagrees with what its owner reported on any beam (broken,
+-- or more than 5 mm off) for two checks in a row (damage only this game simulated) is
+-- reset in place and given the owner's full damage. An owner's reset or repair sends a cleared notice, and
 -- an owner answers a request for its full damage (a copy built late, or one resynced)
 -- with flagged messages the server passes only to the players who asked.
 --
@@ -32,11 +32,12 @@ local MAX_OFFSET = 20            -- metres from the reference node; further is r
 local MAX_DEFORM = 10            -- deformation ratio; larger is refused
 
 -- Owner wins: once a second a copy counts beams that disagree with what the owner
--- reported; above RESYNC_BEAMS on two checks in a row it is reset in place and given
--- the owner's full damage, at most once every RESYNC_COOLDOWN seconds.
+-- reported; with any beam off on two checks in a row it is reset in place and given
+-- the owner's full damage, at most once every RESYNC_COOLDOWN seconds. A copy's
+-- physics jitters by a few millimetres, so a beam counts from RESYNC_LENGTH off.
 local CHECK_EVERY_SECONDS = 1
-local RESYNC_BEAMS = 20
-local RESYNC_LENGTH = 0.02       -- metres off the reported rest length
+local RESYNC_BEAMS = 0
+local RESYNC_LENGTH = 0.005      -- metres off the reported rest length
 local RESYNC_CHECKS = 2
 local RESYNC_COOLDOWN = 10
 
@@ -48,6 +49,10 @@ local role = nil                 -- "owner", "copy" or nil
 -- Owner: rest length of each beam as built, what was last sent for each beam
 -- ({len, broken}), and what is still to send.
 local baseline = {}
+-- Beams whose rest length the game changes on its own: hydraulics (steering and the
+-- like) and beams that settle just after spawn. Only their breaks are sent, compared and
+-- applied; their lengths are left to each game.
+local lengthIgnored = {}
 local sent = {}
 local lastDamage = nil
 local sinceSend = 0
@@ -114,10 +119,23 @@ local function isBroken(cid)
 end
 
 local function captureBaseline()
-	baseline = {}
+	baseline, lengthIgnored = {}, {}
 	for _, beam in pairs(v.data.beams or {}) do
-		if beam.cid then baseline[beam.cid] = obj:getBeamRestLength(beam.cid) end
+		if beam.cid then
+			baseline[beam.cid] = obj:getBeamRestLength(beam.cid)
+			if type(beam.beamPrecompressionTime) == "number" and beam.beamPrecompressionTime > 0 then
+				lengthIgnored[beam.cid] = true
+			end
+		end
 	end
+	for _, hydro in pairs(v.data.hydros or {}) do
+		if hydro.beamCID then lengthIgnored[hydro.beamCID] = true end
+	end
+end
+
+-- true when a beam's rest length is more than `tolerance` off refLen and counts.
+local function lengthOff(cid, len, refLen, tolerance)
+	return not lengthIgnored[cid] and abs(len - refLen) > tolerance
 end
 
 local function sentState(cid)
@@ -138,7 +156,7 @@ local function changedBeams(against)
 		if cid then
 			local len = obj:getBeamRestLength(cid)
 			local refLen, refBroken = against(cid)
-			if len and refLen and (abs(len - refLen) > LENGTH_CHANGED or isBroken(cid) ~= refBroken) then
+			if len and refLen and (lengthOff(cid, len, refLen, LENGTH_CHANGED) or isBroken(cid) ~= refBroken) then
 				table.insert(list, cid)
 			end
 		end
@@ -262,7 +280,7 @@ end
 -- for a beam it never reported, with the car as built): broken here while reported whole,
 -- or more than RESYNC_LENGTH off the rest length. Every beam is read, because the game's
 -- damage tracker lists only beams with deform triggers. Stops counting past `limit`.
--- `tolerance` defaults to RESYNC_LENGTH, which lets a light scrape between players stand.
+-- `tolerance` defaults to RESYNC_LENGTH.
 local function disagreeingBeams(limit, tolerance)
 	tolerance = tolerance or RESYNC_LENGTH
 	local count = 0
@@ -276,7 +294,7 @@ local function disagreeingBeams(limit, tolerance)
 				if not refBroken then count = count + 1 end
 			else
 				local len = obj:getBeamRestLength(cid)
-				if len and abs(len - refLen) > tolerance then count = count + 1 end
+				if len and lengthOff(cid, len, refLen, tolerance) then count = count + 1 end
 			end
 			if limit and count > limit then return count end
 		end
@@ -344,7 +362,7 @@ local function applyDamage(cleared, beams, nodes)
 		elseif not (isNumber(deform) and deform >= 0 and deform <= MAX_DEFORM) then
 			refused("deformation out of range")
 		else
-			obj:setBeamLength(cid, len)
+			if not lengthIgnored[cid] then obj:setBeamLength(cid, len) end
 			if broken == 1 and not obj:beamIsBroken(cid) then obj:breakBeam(cid) end
 			if deform > 0 and not beamstate.deformedBeams[cid] then beamstate.onBeamDeformed(cid, deform) end
 			reported[cid] = {len = len, broken = broken == 1}
