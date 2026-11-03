@@ -186,6 +186,12 @@ local function isRemoteTraffic(serverVehicleID)
 	return type(state) == "table" and state.traffic == true
 end
 
+-- true once the server's state of another player's car has arrived, so isRemoteTraffic's
+-- answer for it is the server's and not just "not heard yet".
+local function hasRemoteState(serverVehicleID)
+	return type(knownStates[serverVehicleID]) == "table"
+end
+
 -- Career constantly hides/shows vehicles (garage, shopping, missions). A vehicle
 -- hidden locally must be hidden for everyone, so the server keeps the
 -- authoritative active-state map and we apply it to everything we do not own. The
@@ -959,6 +965,7 @@ end
 M.getClientConfig = getClientConfig
 M.isTrafficCar = isTrafficCar
 M.isRemoteTraffic = isRemoteTraffic
+M.hasRemoteState = hasRemoteState
 M.reapplyRemoteStates = reapplyRemoteStates
 
 M.onCareerActive = onCareerActive

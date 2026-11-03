@@ -284,3 +284,75 @@ test("#87: a car that becomes ready before its mark is asked for paint only once
 	paint.onUpdate()
 	same(requestedFor(), "2-1", "requests later on")
 end)
+
+test("#87: a car whose state is already known is asked at once, or not at all for traffic", function()
+	local paint = setup()
+	withStates()
+	game.states["2-5"] = {traffic = true}
+	game.states["2-1"] = {active = true}
+	ready(paint, "2-5", 25)
+	ready(paint, "2-1", 21)
+	same(requestedFor(), "2-1", "requests on the frame the cars became ready")
+end)
+
+test("#87: a car with no state after 5 s is asked anyway, once; at 4.9 s it is not", function()
+	local paint = setup()
+	withStates()
+	ready(paint, "2-1", 21)
+	game.now = 4.9
+	paint.onUpdate()
+	same(requestedFor(), "", "requests at 4.9 s")
+	game.now = 5
+	paint.onUpdate()
+	same(requestedFor(), "2-1", "requests at 5 s")
+	game.now = 20
+	paint.onUpdate()
+	same(requestedFor(), "2-1", "requests later on")
+end)
+
+test("#87: the 5 s wait counts from the first ready, and a car ready twice is asked once", function()
+	local paint = setup()
+	withStates()
+	ready(paint, "2-1", 21)
+	game.now = 3
+	paint.onVehicleReady(21)
+	game.now = 5
+	paint.onUpdate()
+	same(requestedFor(), "2-1", "requests 5 s after the first ready")
+end)
+
+test("#87: a car removed while its request waits is never asked", function()
+	local paint = setup()
+	withStates()
+	ready(paint, "2-1", 21)
+	ready(paint, "2-2", 22)
+	game.listed["2-1"] = nil -- gone from BeamMP's list
+	paint.onVehicleDestroyed(22) -- destroyed on this game
+	game.states["2-1"] = {active = true}
+	game.states["2-2"] = {active = true}
+	game.now = 10
+	paint.onUpdate()
+	same(requestedFor(), "", "requests for removed cars")
+end)
+
+test("#87: leaving the server forgets every waiting request", function()
+	local paint = setup()
+	withStates()
+	ready(paint, "2-1", 21)
+	paint.onBeamMPServerLeave()
+	game.states["2-1"] = {active = true}
+	game.now = 10
+	paint.onUpdate()
+	same(requestedFor(), "", "requests after leaving")
+end)
+
+test("#87: a waiting request goes out while the world is still loading", function()
+	local paint = setup()
+	withStates()
+	worldReadyState = 1
+	ready(paint, "2-1", 21)
+	game.states["2-1"] = {active = true}
+	paint.onUpdate()
+	same(requestedFor(), "2-1", "requests while joining")
+	worldReadyState = 2
+end)
