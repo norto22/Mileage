@@ -376,6 +376,37 @@ test("the menu has no fixed pay buttons and sets every text as text", () => {
 	assert.ok(!/innerHTML/.test(menu), "no markup from names or reasons");
 });
 
+// The declarations of the first rule whose selector list is exactly `selector`.
+function cssRule(css, selector) {
+	const re = /([^{}]+)\{([^}]*)\}/g;
+	let m;
+	while ((m = re.exec(css)) !== null) {
+		if (m[1].replace(/\/\*[\s\S]*?\*\//g, "").trim() === selector) {
+			const props = {};
+			m[2].split(";").forEach((d) => {
+				const i = d.indexOf(":");
+				if (i > 0) props[d.slice(0, i).trim()] = d.slice(i + 1).trim();
+			});
+			return props;
+		}
+	}
+	throw new Error("no rule " + selector);
+}
+
+test("both looks of the player list use the compact rows, cells and buttons", () => {
+	for (const sheet of ["app.css", "redesign.css"]) {
+		const css = fs.readFileSync("Resources/Client/Mileage/ui/modules/apps/Mileage-PlayerList/" + sheet, "utf8");
+		assert.strictEqual(cssRule(css, "#players-table")["font-size"], "0.9em", sheet + ": rows");
+		assert.strictEqual(cssRule(css, "#players-table td").padding, "0 4px", sheet + ": cells");
+		const direction = cssRule(css, ".direction-buttons");
+		assert.strictEqual(direction.width, "26px", sheet + ": direction button width");
+		assert.strictEqual(direction.height, "21px", sheet + ": direction button height");
+		assert.strictEqual(cssRule(css, ".tp-button").width, "56px !important", sheet + ": ping column");
+		assert.strictEqual(cssRule(css, ".playerslist-col-3").width, "56px", sheet + ": its header column");
+		assert.strictEqual(cssRule(css, "#playerlist-contextmenu > button").padding, "4px 8px", sheet + ": menu buttons");
+	}
+});
+
 test("every function in the app script is declared once", () => {
 	const source = fs.readFileSync(SOURCE, "utf8");
 	const counts = {};
