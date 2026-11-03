@@ -574,3 +574,55 @@ test("#22: a mission whose type cannot be read still takes the strip, as before"
 	same(dragState(drag), "false false", "a mission lookup that raises")
 	noMission()
 end)
+
+--== #21: the drag senders stay quiet while a mission owns the strip ===========
+
+-- Calls each of the four senders once for race A-1 at strip A, with player 2 there too.
+-- Returns the names of what went out, in order, with where each went.
+local function callSenders(drag)
+	sent = {}
+	drag.syncStageLightState("A-1", 1, true)
+	drag.syncTreeLightState("A-1", 1, {stageLights = {stageLight = true}})
+	drag.updateTimerValue("A-1", 7, "time_60", 2.1)
+	drag.notifyRaceStart("A-1")
+	local out = {}
+	for _, m in ipairs(sent) do table.insert(out, m.msg .. ">" .. idList(m.to)) end
+	return table.concat(out, " ")
+end
+
+local ALL_SENT = "dragRaceTreeLightUpdate>host dragRaceTreeLightUpdate>host dragRaceTimerUpdateRequest>host "
+	.. "dragRaceStart>2 dragRaceStart>local"
+
+test("#21: no drag light, timer or race start goes out while a drag mission owns the strip", function()
+	local lobby = newGame({"A"})
+	arrive(lobby, 2, "A")
+	noMission()
+	local drag = realDragMode()
+	foregroundMission("dragRace")
+	same(callSenders(drag), "", "messages during a drag mission")
+	noMission()
+	career_modules_vehiclePerformance = {isTestInProgress = function() return true end}
+	same(callSenders(drag), "", "messages during the performance test")
+	noMission()
+end)
+
+test("#21: once the mission ends the race start for the same race still goes out", function()
+	local lobby = newGame({"A"})
+	arrive(lobby, 2, "A")
+	noMission()
+	local drag = realDragMode()
+	foregroundMission("dragRace")
+	callSenders(drag)
+	noMission()
+	same(callSenders(drag), ALL_SENT, "messages after the mission")
+end)
+
+test("#21: a non-drag mission does not hold the senders back", function()
+	local lobby = newGame({"A"})
+	arrive(lobby, 2, "A")
+	noMission()
+	local drag = realDragMode()
+	foregroundMission("timeTrial")
+	same(callSenders(drag), ALL_SENT, "messages during a time trial")
+	noMission()
+end)
