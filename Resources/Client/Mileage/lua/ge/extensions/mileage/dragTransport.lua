@@ -344,6 +344,16 @@ local function onDragMessage(payload)
 	if not ok then
 		log("E", logTag, string.format("handler for %s failed: %s", tostring(envelope.msg), tostring(err)))
 	end
+
+	-- A run just started here: the lobby checks the game registered our real car.
+	local lobby = mileage_dragLobby
+	if envelope.msg == "dragRaceStarted" and type(envelope.data) == "table"
+		and lobby and lobby.checkRunStart then
+		local checked, checkErr = pcall(lobby.checkRunStart, envelope.data.raceId)
+		if not checked then
+			log("E", logTag, "checking the run start failed: " .. tostring(checkErr))
+		end
+	end
 end
 
 local function onDragAuthority(payload)

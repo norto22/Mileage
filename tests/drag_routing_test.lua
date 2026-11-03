@@ -443,9 +443,9 @@ test("#20: releasing the strip for a mission leaves the mission's race on screen
 	local lobby = newGame({"A"})
 	lobby.setLocalContext(stripData("A"), 1)
 	local tornDown = 0
-	-- The last multiplayer race still counts as over, and the mission's racers are in the
+	-- The last multiplayer race's result is built, and the mission's racers are in the
 	-- drag core's data.
-	multiplayer_gamemodes_drag_drag.isRaceOver = function() return true end
+	multiplayer_gamemodes_drag_drag.isRaceFinalized = function() return true end
 	multiplayer_gamemodes_drag_drag.tearDownRaceUI = function() tornDown = tornDown + 1 end
 	gameplay_drag_core.getData = function() return {racers = {[7] = {}}} end
 	game.mission = true
@@ -572,7 +572,7 @@ test("#20: driving away from the strip after a finished race still takes the rac
 	local lobby = newGame({"A"})
 	lobby.setLocalContext(stripData("A"), 1)
 	local tornDown = 0
-	multiplayer_gamemodes_drag_drag.isRaceOver = function() return true end
+	multiplayer_gamemodes_drag_drag.isRaceFinalized = function() return true end
 	multiplayer_gamemodes_drag_drag.tearDownRaceUI = function() tornDown = tornDown + 1 end
 	gameplay_drag_core.getData = function() return {racers = {[7] = {}}} end
 	local far = {getPosition = function() return newVec(500, 0, 0) end}
@@ -800,19 +800,19 @@ test("two players at the strip: a join through the server's relay forms a race f
 	end)
 end)
 
-test("one player at the strip: the leader's own join comes back through the relay and a solo run starts after 45 s", function()
+test("one player at the strip: the leader's own join comes back through the relay and a solo run starts after 10 s", function()
 	finally(function()
 		local _, tick = leaderOnServer()
 		local t = 0.5
-		while t < 45 do
+		while t < 10 do
 			tick(t)
 			t = t + 0.5
 		end
-		same(#sentNamed("dragSessionStarted"), 0, "races started before 45 s")
-		while t <= 47 do
+		same(#sentNamed("dragSessionStarted"), 0, "races started before 10 s")
+		while t <= 12 do
 			tick(t)
 			t = t + 0.5
 		end
-		same(#sentNamed("dragSessionStarted"), 1, "solo runs started by 47 s")
+		same(#sentNamed("dragSessionStarted"), 1, "solo runs started by 12 s")
 	end)
 end)

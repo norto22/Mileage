@@ -618,16 +618,6 @@ function M.isRaceFinalized()
 	return raceFinalized
 end
 
---- Is a run still genuinely in progress?
----
---- Distinct from isRaceFinalized: this also covers a run that was disqualified and is
---- going nowhere. A false-started race sits in phase 3 with dragData.isStarted still true,
---- so a purely state-based test keeps reporting "racing" and the lobby's distance checks
---- stay suspended -- which is why driving out of the strip stopped clearing anything.
-function M.isRaceOver()
-	return raceFinalized or dqAt ~= nil
-end
-
 --- os.clockhp() at the moment the result screen was produced, or nil.
 function M.getFinalizedAt()
 	return raceFinalized and finalizedAt or nil
@@ -733,6 +723,8 @@ function M.tearDownRaceUI()
 	raceFinalized = false
 	finalizedAt = nil
 	treeRepairs = {}
+	-- Forget the run too, so a later light or timer message cannot name a run that is gone.
+	M.clearLocalClientActiveRace()
 	log("I", logTag, "race over - drag UI reset")
 end
 

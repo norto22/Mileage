@@ -155,6 +155,7 @@ local function newHandlers()
 		local core = gameplay_drag_core
 		if msgName == "dragSessionStarted" then
 			local r = data.race
+			table.insert(world.sessions, {raceId = data.raceId, race = r})
 			core.setRaceState(data.raceId, {
 				players = r.players, queue = r.queue, currentPairIndex = r.currentPairIndex or 1,
 				poiData = r.poiData, lobbyId = data.lobbyId, finishTimes = {},
@@ -191,7 +192,7 @@ local function newWorld(opts)
 	opts = opts or {}
 	world = {
 		now = 0, pos = {0, 0, 0}, renamed = false, cleared = 0, finalized = 0,
-		strips = {stripData("A")}, logs = {}, wire = {}, applied = {}, flashes = {}, apps = {},
+		strips = {stripData("A")}, logs = {}, wire = {}, applied = {}, flashes = {}, apps = {}, sessions = {},
 		queued = {}, handlers = {}, loaded = {},
 	}
 
@@ -277,27 +278,38 @@ function setLeader(playerId)
 	pump()
 end
 
--- Run the clock to `untilSeconds` in half-second frames.
-local function runTo(untilSeconds)
-	while world.now < untilSeconds - 1e-9 do
-		world.now = world.now + 0.5
-		pump()
-		world.lobby.onUpdate(0.5)
-		world.drag.onUpdate()
-		pump()
-	end
-end
-
 -- Another player's lobby message, as the relay delivers it to this player.
 local function fromPlayer(playerId, msgName, data)
 	world.handlers.rxDragMP({msg = msgName, from = playerId, data = data})
 	pump()
 end
 
--- Another player standing on lane `lane`'s line, heart-beating as their client does.
+-- Another player standing on lane `lane`'s line. They keep heart-beating every 5 s, as their
+-- client does, until otherLeaves.
 local function otherAt(playerId, lane)
+	world.others = world.others or {}
+	world.others[playerId] = lane
 	fromPlayer(playerId, "mileageDragJoin", {stripId = "A", lane = lane, vehicleId = 55,
 		pos = lane == 2 and {4, 0, 0} or {0, 0, 0}})
+end
+
+local function otherLeaves(playerId)
+	world.others[playerId] = nil
+	fromPlayer(playerId, "mileageDragLeave", {stripId = "A"})
+end
+
+-- Run the clock to `untilSeconds` in half-second frames.
+local function runTo(untilSeconds)
+	while world.now < untilSeconds - 1e-9 do
+		world.now = world.now + 0.5
+		if world.leader == ME and world.now % 5 == 0 then
+			for playerId, lane in pairs(world.others or {}) do otherAt(playerId, lane) end
+		end
+		pump()
+		world.lobby.onUpdate(0.5)
+		world.drag.onUpdate()
+		pump()
+	end
 end
 
 local function wireNamed(name)
@@ -354,4 +366,366 @@ test("the game's local-player question answers the server id under both names, o
 	MPConfig = nil
 	same(world.drag.getLocalMPPlayerId and world.drag.getLocalMPPlayerId(), nil, "drag mode with no server id")
 	same(world.transport.bridge.getLocalMPPlayerId and world.transport.bridge.getLocalMPPlayerId(), nil, "bridge with no server id")
+end)
+
+--== one sequence per strip on the leader ======================================
+
+-- The heat a run was started with, as "lane:player" pairs in lane order.
+local function heatOf(session)
+	local slot = session.race.queue[1] or {}
+	local parts = {}
+	for lane, playerId in pairs(slot) do table.insert(parts, tostring(lane) .. ":" .. tostring(playerId)) end
+	table.sort(parts)
+	return table.concat(parts, " ")
+end
+
+local function lastSession() return world.sessions[#world.sessions] end
+
+-- The players a message on the wire went to, as "2,3".
+local function recipients(m)
+	if type(m.to) ~= "table" then return tostring(m.to) end
+	local ids = {}
+	for _, id in ipairs(m.to) do table.insert(ids, tostring(id)) end
+	table.sort(ids)
+	return table.concat(ids, ",")
+end
+
+-- The real car on this machine, and another player's stand-in, by player id.
+local function racerOf(playerId)
+	local data = gameplay_drag_core.getData()
+	if not data then return nil end
+	return data.racers[playerId == ME and CAR or -(playerId + 2)]
+end
+
+test("alone at the strip: no run before 10 s, one run by 11 s", function()
+	newWorld()
+	runTo(10)
+	same(#world.sessions, 0, "runs started by 10 s")
+	runTo(11)
+	same(#world.sessions, 1, "runs started by 11 s")
+	same(heatOf(lastSession()), "1:1", "heat")
+end)
+
+test("two players at the strip: a run at once, each in their own lane", function()
+	newWorld()
+	runTo(1)
+	otherAt(2, 2)
+	runTo(1.5)
+	same(#world.sessions, 1, "runs started")
+	same(heatOf(lastSession()), "1:1 2:2", "heat")
+	local sessions = wireNamed("dragSessionStarted")
+	same(#sessions, 1, "run sent to the other player")
+	same(recipients(sessions[1]), "2", "recipients")
+end)
+
+test("a second player who arrives during staging races in the other lane", function()
+	newWorld()
+	runTo(11)
+	same(heatOf(lastSession()), "1:1", "solo heat")
+	otherAt(2, 2)
+	runTo(11.5)
+	same(#world.sessions, 2, "runs started")
+	same(heatOf(lastSession()), "1:1 2:2", "rebuilt heat")
+	same(racerKeys(), "-4:lane2:remote 7:lane1:local", "racers registered")
+end)
+
+test("a player who leaves before the countdown: the run is rebuilt without them", function()
+	newWorld()
+	runTo(1)
+	otherAt(2, 2)
+	runTo(2)
+	same(heatOf(lastSession()), "1:1 2:2", "first heat")
+	otherLeaves(2)
+	runTo(2.5)
+	same(world.lobby.getRun("A"), nil, "run while one player waits again")
+	runTo(13)
+	same(#world.sessions, 2, "runs started")
+	same(heatOf(lastSession()), "1:1", "heat without the player who left")
+end)
+
+test("not staged in 30 s: the run ends and the parked leader sits out until they move 5 m", function()
+	newWorld()
+	runTo(11)
+	local started = world.now
+	runTo(started + 29.5)
+	expect(world.lobby.getRun("A") ~= nil, "run still staging at 29.5 s")
+	runTo(started + 30.5)
+	same(world.lobby.getRun("A"), nil, "run after 30 s")
+	runTo(started + 60)
+	same(#world.sessions, 1, "runs while the leader sits out on the line")
+	world.pos = {0, 6, 0}
+	runTo(started + 80)
+	same(#world.sessions, 2, "runs once the leader moved")
+end)
+
+test("an idle leader sits out and still runs the other lane's run", function()
+	newWorld()
+	runTo(1)
+	otherAt(2, 2)
+	runTo(2)
+	racerOf(2).phases[1].completed = true
+	runTo(33)
+	same(world.transport.isAuthorityFor("A"), true, "the idle leader still leads the strip")
+	runTo(45)
+	same(#world.sessions, 2, "runs started")
+	same(heatOf(lastSession()), "2:2", "the other lane's solo heat")
+	same(recipients(wireNamed("dragSessionStarted")[2]), "2", "sent to the other player")
+end)
+
+test("a racer in the run with no racer in the game's race counts as not staged", function()
+	newWorld()
+	runTo(1)
+	otherAt(2, 2)
+	runTo(2)
+	gameplay_drag_core.getData().racers[-4] = nil
+	racerOf(1).phases[1].completed = true
+	runTo(32.5)
+	same(world.lobby.getRun("A"), nil, "run after 30 s")
+	same(appliedCount("dragRaceCountdownStart"), 0, "countdowns")
+end)
+
+test("a staged run counts down once; a finish shows the result, and 12 s later the strip resets", function()
+	newWorld()
+	runTo(11)
+	stageAll()
+	runTo(12)
+	same(appliedCount("dragRaceCountdownStart"), 1, "countdowns")
+	same(world.lobby.getRun("A").step, "running", "step")
+	runTo(15)
+	same(appliedCount("dragRaceCountdownStart"), 1, "countdowns after more frames")
+	racerOf(1).isFinished = true
+	runTo(15.5)
+	same(world.lobby.getRun("A").step, "result", "step after the finish")
+	runTo(27)
+	same(appliedCount("dragRaceReset"), 0, "resets before 12 s")
+	runTo(28)
+	same(appliedCount("dragRaceReset"), 1, "resets after 12 s")
+	same(world.lobby.getRun("A"), nil, "run after the result")
+end)
+
+test("back on the line after the result: another run, as many times as you like", function()
+	newWorld()
+	for n = 1, 3 do
+		untilRun(30)
+		same(#world.sessions, n, "runs started")
+		stageAll()
+		runTo(world.now + 1)
+		racerOf(1).isFinished = true
+		runTo(world.now + 13)
+		same(world.lobby.getRun("A"), nil, "run after result " .. n)
+		world.applied = {}
+	end
+end)
+
+test("nobody finishes in 60 s after the countdown: the result step starts anyway", function()
+	newWorld()
+	runTo(11)
+	stageAll()
+	runTo(12)
+	local green = world.lobby.getRun("A").since
+	runTo(green + 59.5)
+	same(world.lobby.getRun("A").step, "running", "step at 59.5 s")
+	runTo(green + 60.5)
+	same(world.lobby.getRun("A").step, "result", "step after 60 s")
+end)
+
+test("a disqualified racer counts as done, so a solo false start goes to the result", function()
+	newWorld()
+	runTo(11)
+	stageAll()
+	runTo(12)
+	racerOf(1).isDisqualified = true
+	runTo(12.5)
+	same(world.lobby.getRun("A").step, "result", "step")
+end)
+
+--== every way out takes the lights down =======================================
+
+-- A run the strip's leader (player 2) sends this player, as their messages arrive here.
+-- players: {{playerId, lane}, ...}, all in heat 1.
+local function runFromLeader(raceId, players)
+	local list, heat = {}, {}
+	for _, p in ipairs(players) do
+		table.insert(list, {playerId = p[1], lane = p[2], vehicleId = -(p[1] + 2), persona = "P" .. p[1]})
+		table.insert(heat, {lane = p[2], playerId = p[1]})
+	end
+	fromPlayer(world.leader, "dragSessionStarted", {raceId = raceId, lobbyId = "A",
+		race = {id = raceId, poiKey = "A", players = list, queue = {heat}, currentPairIndex = 1}})
+	fromPlayer(world.leader, "dragRaceStarted", {raceId = raceId})
+end
+
+local function activeRunId()
+	local active = world.transport.getLocalClientActiveRace()
+	return active and active.id
+end
+
+-- Two players racing: staged, and the tree gone.
+local function twoPlayersRunning()
+	newWorld()
+	runTo(1)
+	otherAt(2, 2)
+	runTo(2)
+	stageAll()
+	runTo(2.5)
+	same(world.lobby.getRun("A").step, "running", "step")
+end
+
+test("not staged in 30 s: the leader's display comes down and the other player gets one cancel", function()
+	newWorld()
+	runTo(1)
+	otherAt(2, 2)
+	runTo(2)
+	world.cleared = 0
+	runTo(33)
+	local cancels = wireNamed("mileageDragCancel")
+	same(#cancels, 1, "cancels sent")
+	same(recipients(cancels[1]), "2", "recipients")
+	same(cancels[1].data.stripId, "A", "strip")
+	same(world.cleared, 1, "displays taken down on the leader")
+	same(activeRunId(), nil, "run id kept on the leader")
+end)
+
+test("driving away from a run that never counted down takes the display down", function()
+	newWorld()
+	runTo(11)
+	expect(activeRunId() ~= nil, "a run is up")
+	world.cleared = 0
+	world.pos = {500, 0, 0}
+	runTo(11.5)
+	same(#wireNamed("mileageDragLeave"), 1, "leave messages")
+	expect(world.cleared >= 1, "the display was taken down")
+	same(activeRunId(), nil, "run id kept")
+end)
+
+test("a cancel from the strip's leader takes the run down; from anyone else, or for another run, nothing", function()
+	newWorld({leader = 2})
+	runTo(1)
+	runFromLeader("A-5", {{1, 1}, {2, 2}})
+	same(activeRunId(), "A-5", "run recorded")
+	world.cleared = 0
+	fromPlayer(3, "mileageDragCancel", {stripId = "A", raceId = "A-5", reason = "staging"})
+	fromPlayer(2, "mileageDragCancel", {stripId = "A", raceId = "A-9", reason = "staging"})
+	fromPlayer(2, "mileageDragCancel", "not a table")
+	same(world.cleared, 0, "displays taken down by the wrong cancels")
+	same(activeRunId(), "A-5", "run after the wrong cancels")
+	fromPlayer(2, "mileageDragCancel", {stripId = "A", raceId = "A-5", reason = "staging"})
+	same(world.cleared, 1, "displays taken down")
+	same(activeRunId(), nil, "run id kept")
+end)
+
+test("the leader drops out during staging: the run comes down, and a fresh run forms with this player leading", function()
+	newWorld({leader = 2})
+	runTo(1)
+	runFromLeader("A-5", {{1, 1}, {2, 2}})
+	world.cleared = 0
+	setLeader(ME)
+	same(world.cleared, 1, "displays taken down")
+	same(activeRunId(), nil, "run id kept")
+	runTo(13)
+	same(#world.sessions, 2, "runs seen")
+	same(heatOf(lastSession()), "1:1", "the fresh run's heat")
+end)
+
+test("the leader drops out during a run: the run comes down", function()
+	newWorld({leader = 2})
+	runTo(1)
+	runFromLeader("A-5", {{1, 1}, {2, 2}})
+	stageAll()
+	world.drag.advanceOutOfStaging()
+	world.cleared = 0
+	setLeader(3)
+	same(world.cleared, 1, "displays taken down")
+	same(activeRunId(), nil, "run id kept")
+end)
+
+test("a leader change after the result is built leaves the timeslip up", function()
+	newWorld({leader = 2})
+	runTo(1)
+	runFromLeader("A-5", {{1, 1}, {2, 2}})
+	gameplay_drag_core.getRaceState("A-5").finishTimes = {[1] = 11.2, [2] = 11.9}
+	world.drag.onDragMpTimeslipRequested()
+	same(world.drag.isRaceFinalized(), true, "result built")
+	world.cleared = 0
+	setLeader(3)
+	same(world.cleared, 0, "displays taken down")
+end)
+
+test("a still-racing racer who leaves mid-run ends the run, with a cancel to them", function()
+	twoPlayersRunning()
+	otherLeaves(2)
+	runTo(3)
+	same(world.lobby.getRun("A"), nil, "run")
+	local cancels = wireNamed("mileageDragCancel")
+	same(#cancels, 1, "cancels sent")
+	same(recipients(cancels[1]), "2", "recipients")
+end)
+
+test("a finished or disqualified racer driving off does not end the other racer's run", function()
+	twoPlayersRunning()
+	gameplay_drag_core.getRaceState(world.lobby.getRun("A").raceId).finishTimes = {[2] = 12.3}
+	otherLeaves(2)
+	runTo(3)
+	same(world.lobby.getRun("A").step, "running", "step after a finished racer left")
+	same(#wireNamed("mileageDragCancel"), 0, "cancels sent")
+end)
+
+test("a disqualified opponent does not end this player's live run", function()
+	twoPlayersRunning()
+	racerOf(2).isDisqualified = true
+	world.drag.setDisqualifiedLights(-4)
+	world.pos = {0, 300, 0}
+	runTo(4)
+	same(#wireNamed("mileageDragLeave"), 0, "leave messages")
+	same(world.lobby.getRun("A").step, "running", "step")
+end)
+
+--== a run that did not register the real car ==================================
+
+local function warnings()
+	local out = {}
+	for _, line in ipairs(world.logs) do
+		if line:sub(1, 2) == "W " and line:find("did not register", 1, true) then table.insert(out, line) end
+	end
+	return out
+end
+
+test("the game did not register this player's car: one warning naming the strip and racers, and the run ends", function()
+	newWorld()
+	world.renamed = true
+	runTo(11)
+	same(#world.sessions, 1, "runs started")
+	local w = warnings()
+	same(#w, 1, "warnings")
+	expect(w[1]:find("'A'", 1, true) and w[1]:find("-3", 1, true), "the warning names the strip and racer keys: " .. w[1])
+	same(world.lobby.getRun("A"), nil, "run")
+	expect(world.cleared >= 1, "the display was taken down")
+end)
+
+test("on a player who is not the leader the same check takes the run off their screen", function()
+	newWorld({leader = 2})
+	world.renamed = true
+	runTo(1)
+	world.cleared = 0
+	runFromLeader("A-5", {{1, 1}, {2, 2}})
+	same(#warnings(), 1, "warnings")
+	same(world.cleared, 1, "displays taken down")
+end)
+
+test("a run this player is not in is not checked, and a run with the real car logs nothing", function()
+	newWorld({leader = 2})
+	world.renamed = true
+	runTo(1)
+	runFromLeader("A-5", {{2, 1}, {3, 2}})
+	same(#warnings(), 0, "warnings for a run this player is not in")
+	world.renamed = false
+	runFromLeader("A-6", {{1, 1}, {2, 2}})
+	same(#warnings(), 0, "warnings for a run with the real car")
+end)
+
+test("this player's own disqualification lets them leave the strip", function()
+	twoPlayersRunning()
+	racerOf(1).isDisqualified = true
+	world.pos = {0, 300, 0}
+	runTo(4)
+	same(#wireNamed("mileageDragLeave"), 1, "leave messages")
 end)

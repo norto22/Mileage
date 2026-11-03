@@ -29,9 +29,20 @@
 --  * Presence expires, three ways. A player who drives away, disconnects or crashes out
 --    must not hold a lane for ever, so joins carry a heartbeat and are dropped when
 --    stale; presence also ends as soon as they leave the staging area, so an idle car can
---    simply be shoved aside; and a racer who will not stage is dropped from the heat after
---    STAGE_TIMEOUT, because the countdown waits for everyone and one AFK player would
+--    simply be shoved aside; and a racer who will not stage is dropped from the run after
+--    STAGE_WINDOW, because the countdown waits for everyone and one AFK player would
 --    otherwise close the strip to the whole server.
+--
+--  * Each strip's leader runs one run at a time through one sequence, with one timeout
+--    per step:
+--
+--        waiting  -- one player: WAIT_ALONE seconds for a second, the time left on screen
+--        staging  -- the run is out; every racer stages, or STAGE_WINDOW ends it
+--        running  -- the tree went; every racer finishes or is disqualified, or RUN_LIMIT
+--        result   -- RESULT_LINGER on screen, then the strip resets for the next run
+--
+--    A run that ends any other way (not staged, a racer leaving mid-run, the leader
+--    changing) takes the lights down on every screen at the strip at once.
 
 local M = {}
 
@@ -41,10 +52,6 @@ local logTag = "mileage.dragLobby"
 local PRESENCE_TIMEOUT = 20
 -- How often a client re-announces that it is still at the strip.
 local PRESENCE_HEARTBEAT = 5
--- Grace period after a race finishes before the next heat is started.
-local NEXT_HEAT_DELAY = 6
--- Longest we will wait for the result screen before tearing the race down anyway.
-local FINALIZE_CAP = 18
 -- How long the result screen stays up before the race winds itself up.
 --
 -- The panel auto-dismisses itself at about 7.8 s (dragRace/app.vue SLIDE_IN_MS + DRAIN_MS)
@@ -73,29 +80,31 @@ local JOIN_RADIUS = 25
 -- How often we look around for a strip. A handful of distance checks, but no reason to do
 -- it every frame.
 local SCAN_INTERVAL = 0.5
--- How long the authority waits for everyone in a heat to stage before giving up on them.
+-- How long the leader waits for everyone in a run to stage before ending it.
 --
--- The countdown only fires when phaseHandlers.areAllRacersStaged is true, so one player
--- who drives up and then wanders off keeps the tree from ever going and blocks the strip
--- for everybody else. Long enough to fix a bad approach and roll back onto the line.
-local STAGE_TIMEOUT = 60
--- How long to wait for a second player before falling back to a solo run.
---
--- 8 seconds was far too short: two people driving to the strip separately arrive well
--- over that apart, so the first player's solo race started and locked the second one
--- out entirely. Long enough that anyone heading over together gets a real race, short
--- enough that a lone player is not left waiting.
-local SOLO_GRACE = 45
+-- The countdown only fires when every racer is staged, so one player who drives up and
+-- then wanders off would keep the tree from ever going. Long enough to fix a bad approach
+-- and roll back onto the line, short enough that a run that cannot go clears quickly.
+local STAGE_WINDOW = 30
+-- How long a lone player waits for a second racer before their solo run starts. The time
+-- left is on their screen, so the wait is never silent.
+local WAIT_ALONE = 10
+-- How long after the tree goes a racer may take to finish. A quarter mile takes well under
+-- this in any car, so only a stopped or stuck racer reaches it; the result then shows what
+-- arrived.
+local RUN_LIMIT = 60
 
 --- Authority-side only: who is currently at which strip and lane.
 --- presence[stripId][playerId] = { lane, vehicleId, persona, lastSeen }
 local presence = {}
 
---- Authority-side: the race we have created per strip, so we do not create two.
-local activeRaceByStrip = {}
+--- Authority-side: the one run per strip, so there are never two.
+--- runs[stripId] = { raceId, step = "staging" | "running" | "result", since, roster,
+---                   racers = { [playerId] = true } }
+local runs = {}
 
---- Authority-side: when a lone player started waiting at a strip, for the solo fallback.
-local soloWaitStartedAt = {}
+--- Authority-side: when a lone player started waiting at a strip.
+local waitingSince = {}
 
 --- Authority-side: players dropped for not staging, and where they were when dropped.
 --- stageBlocked[stripId][playerId] = vec3
@@ -181,10 +190,13 @@ local lastScan = 0
 local function transport() return mileage_dragTransport end
 local function gamemode() return multiplayer_gamemodes_drag_drag end
 
+-- Defined with the presence checks below; clearLocalContext needs it first.
+local inLiveRace
+
 --- Also false while a career drag mission is running.
 ---
 --- The lobby must not touch a strip that a mission owns. Without this, driving to the line
---- for a BMRA event put us in the roster, SOLO_GRACE expired, and we started a multiplayer
+--- for a BMRA event put us in the roster, the solo wait ran out, and we started a multiplayer
 --- race over the top of the mission's own AI race.
 local function isEnabled()
 	local gm = gamemode()
@@ -327,18 +339,17 @@ function M.clearLocalContext(keepRace)
 		-- Driving away clears the strip's leftovers, the way it does in single player.
 		--
 		-- poi.lua:52 and core.lua:1322 both do this on the way out, and both are gated on
-		-- NOT being multiplayer, so on the MP path nothing did -- the finished race just
-		-- stayed on screen until a timer got round to it.
+		-- NOT being multiplayer, so on the MP path nothing did. Whenever our own run is not
+		-- live -- finished, written off, or never counted down -- not only once it is
+		-- over: a run that never started used to leave its lights up through a lap.
 		--
 		-- Not when a mission took the strip over (keepRace): the drag core's racers are the
-		-- mission's then, and the last multiplayer race can still count as over.
+		-- mission's then.
 		local c = gameplay_drag_core
 		local data = not keepRace and c and c.getData and c.getData()
-		if data and data.racers and next(data.racers) then
+		if data and data.racers and next(data.racers) and not inLiveRace() then
 			local gm = gamemode()
-			if gm and gm.isRaceOver and gm.isRaceOver() and gm.tearDownRaceUI then
-				gm.tearDownRaceUI()
-			end
+			if gm and gm.tearDownRaceUI then gm.tearDownRaceUI() end
 		end
 	end
 	localContext = nil
@@ -368,10 +379,10 @@ end
 --- (core.lua:953, :1028, :1260 all gate on isServerHost). The race is not over when the
 --- first car finishes; it is over when it is reset, which is when treeStarted and
 --- currentPhase go back to their staging values on every client.
-local function inLiveRace()
-	-- Finished or written off: not racing, whatever the racer state still says.
+function inLiveRace()
+	-- The result is built: not racing, whatever the racer state still says.
 	local gm = gamemode()
-	if gm and gm.isRaceOver and gm.isRaceOver() then return false end
+	if gm and gm.isRaceFinalized and gm.isRaceFinalized() then return false end
 
 	local core = gameplay_drag_core
 	-- dragData.isStarted is the only part of the racer state a reset actually clears
@@ -387,6 +398,9 @@ local function inLiveRace()
 	local vehicleId = be:getPlayerVehicleID(0)
 	local racer = vehicleId and vehicleId ~= -1 and data.racers[vehicleId]
 	if not racer then return false end
+	-- Our OWN disqualification ends our run. Any car's used to, on both machines, so the
+	-- clean car left the strip mid-run and the leader called the whole run off.
+	if racer.isDisqualified or racer.isDesqualified then return false end
 
 	return racer.treeStarted == true or (racer.currentPhase or 1) > 1
 end
@@ -505,16 +519,14 @@ local function pruneStalePresence()
 			end
 		end
 		if not next(players) then
-			-- Drop the strip's race with it. Leaving activeRaceByStrip set would strand a
-			-- finished race on a strip nobody is at, and the next arrival would be met with
-			-- tryAdvanceHeat running against it instead of a race of their own.
+			-- The strip's run, if any, is the sequence's to end (authorityUpdate walks every
+			-- strip with a run as well as every strip with players).
 			--
 			-- stageBlocked deliberately survives: the player who emptied the strip by not
 			-- staging is usually still parked on it, and clearing their block here would
 			-- re-admit them on their very next heartbeat.
 			presence[stripId] = nil
-			activeRaceByStrip[stripId] = nil
-			soloWaitStartedAt[stripId] = nil
+			waitingSince[stripId] = nil
 		end
 	end
 end
@@ -742,7 +754,7 @@ function M.stripIdForRace(raceId)
 		end
 	end
 	for stripId in pairs(presence) do consider(stripId) end
-	for stripId in pairs(activeRaceByStrip) do consider(stripId) end
+	for stripId in pairs(runs) do consider(stripId) end
 	for stripId in pairs(stripCache) do consider(stripId) end
 	return best
 end
@@ -753,10 +765,25 @@ end
 --- path as every other client -- one flow to reason about instead of two. The send comes
 --- first because applying mutates the payload (hydrateStripData attaches the 15 KB strip
 --- definition, which must never go on the wire).
-local function broadcast(stripId, msgName, payload)
+---
+--- With a run, its racers get it too even when they are off the roster -- a racer who has
+--- finished and driven off down the strip still has the run on screen.
+local function runRecipients(stripId, run)
+	local ids = recipientsFor(stripId)
+	if run then
+		local own, listed = localPlayerId(), {}
+		for _, id in ipairs(ids) do listed[id] = true end
+		for playerId in pairs(run.racers) do
+			if playerId ~= own and not listed[playerId] then table.insert(ids, playerId) end
+		end
+	end
+	return ids
+end
+
+local function broadcast(stripId, msgName, payload, run)
 	local t = transport()
 	if not t then return end
-	local ids = recipientsFor(stripId)
+	local ids = runRecipients(stripId, run)
 	if #ids > 0 then t.send(msgName, ids, payload) end
 	M.applyLocally(msgName, payload)
 end
@@ -783,12 +810,18 @@ local function startRace(stripId, players)
 	local queue = buildQueue(players, laneCount)
 	local playersTable = buildPlayersTable(players)
 
-	activeRaceByStrip[stripId] = {
+	-- Only the first heat races. Anyone queued behind it is on the waiting list, and forms
+	-- the next run once this one is over and its racers are off the roster.
+	local racers = {}
+	for _, item in ipairs(queue[1] or {}) do racers[item.playerId] = true end
+	runs[stripId] = {
 		raceId = raceId,
-		startedAt = now(),
-		playerCount = countPlayers(players),
+		step = "staging",
+		since = now(),
 		roster = rosterFingerprint(players),
+		racers = racers,
 	}
+	waitingSince[stripId] = nil
 
 	local snapshot = {
 		id = raceId,
@@ -873,6 +906,7 @@ function M.applyLocally(msgName, data)
 	if not ok then
 		log("E", logTag, string.format("local apply of %s failed: %s", msgName, tostring(err)))
 	end
+	if msgName == "dragRaceStarted" and type(data) == "table" then M.checkRunStart(data.raceId) end
 end
 
 --== host side: starting the countdown ========================================
@@ -884,86 +918,69 @@ end
 --- Once every racer in the heat is staged, the authority picks the start time *and* the
 --- random amber delay and ships both -- the shared randValue is what stops each client
 --- randomising its own tree and diverging.
---- Who in this heat has not staged? Keyed by player, so it can be acted on.
+--- Who in this run has not staged? Keyed by player, so it can be acted on.
 ---
---- Players in `presence` who are not in the current heat have no racer entry and are
---- skipped -- waiting your turn is not the same as refusing to stage.
-local function unstagedPlayers(stripId)
+--- Players on the waiting list are not in the run and are skipped -- waiting your turn is
+--- not the same as refusing to stage. A racer in the run with no racer in the game's race
+--- counts as NOT staged: a run the game set up wrong must still end on the stage window,
+--- which is how today's strip came to hang (the drop looked our car up, found nothing and
+--- dropped nobody).
+local function unstagedPlayers(run)
 	local core = gameplay_drag_core
 	local dragData = core and core.getData and core.getData()
-	if not dragData or not dragData.racers then return {} end
+	local racers = dragData and dragData.racers or {}
 
 	local out = {}
-	for playerId in pairs(presence[stripId] or {}) do
-		local racer = dragData.racers[localRacerKeyFor(playerId)]
-		if racer and not racer.isFinished then
-			local staged = racer.currentPhase == 1
-				and racer.phases and racer.phases[1] and racer.phases[1].completed
-			if not staged then out[playerId] = true end
-		end
+	for playerId in pairs(run.racers) do
+		local racer = racers[localRacerKeyFor(playerId)]
+		local staged = racer ~= nil and (racer.currentPhase or 1) == 1
+			and racer.phases and racer.phases[1] and racer.phases[1].completed
+		if not staged then out[playerId] = true end
 	end
 	return out
 end
 
---- Nobody has staged in STAGE_TIMEOUT seconds: drop whoever is holding it up.
+--- Take the players who did not stage off the roster, and keep them off until they move.
 ---
---- They are removed from presence, which the roster check in authorityUpdate then sees as
---- a change and rebuilds the race without them, and blocked until they move so they
---- cannot immediately rejoin and block the next one too.
-local function dropUnstagedPlayers(stripId)
-	local players = presence[stripId]
-	if not players then return end
-
+--- The leader included. A block is lifted by moving STAGE_UNBLOCK_DISTANCE, so a parked
+--- leader stops restarting the wait and the stage window for ever, but stays the strip's
+--- leader and keeps running runs for the other lane.
+local function sitOutUnstaged(stripId, run)
+	local players = presence[stripId] or {}
 	stageBlocked[stripId] = stageBlocked[stripId] or {}
-	local own = localPlayerId()
-	for playerId in pairs(unstagedPlayers(stripId)) do
-		log("I", logTag, string.format("player %s has not staged at '%s' in %ds - dropping them",
-			tostring(playerId), stripId, STAGE_TIMEOUT))
-
-		-- Drop, but never block ourselves. We are the strip's authority, and a block is
-		-- only lifted by moving 5 m: blocking our own heartbeat would leave us holding a
-		-- strip we are refusing to join, silently, until we happened to drive off. That
-		-- is exactly what happened at 1104.27915 in the logged session. Dropping alone is
-		-- enough -- the race rebuilds without us and our next heartbeat re-adds us.
-		if playerId ~= own then
-			stageBlocked[stripId][playerId] = players[playerId] and players[playerId].pos or vec3(0, 0, 0)
-		end
+	for playerId in pairs(unstagedPlayers(run)) do
+		log("I", logTag, string.format("player %s has not staged at '%s' in %ds - sitting them out until they move",
+			tostring(playerId), stripId, STAGE_WINDOW))
+		local entry = players[playerId]
+		stageBlocked[stripId][playerId] = entry and entry.pos or vec3(0, 0, 0)
 		players[playerId] = nil
 	end
 end
 
-local function tryStartCountdown(stripId, race)
-	if race.countdownSent then return end
-
+--- Every racer staged: send the countdown and move the run on. True when it went.
+local function tryStartCountdown(stripId, run)
 	local ph = gameplay_drag_phaseHandlers
 	local core = gameplay_drag_core
-	if not ph or not ph.areAllRacersStaged or not core then return end
+	if not ph or not ph.areAllRacersStaged or not core then return false end
 
 	local dragData = core.getData()
-	if not dragData or not dragData.racers or not next(dragData.racers) then return end
+	if not dragData or not dragData.racers or not next(dragData.racers) then return false end
 
 	local allStaged, stagedCount, totalCount = ph.areAllRacersStaged(dragData)
-	if not allStaged or (totalCount or 0) < 1 then
-		race.stagingSince = race.stagingSince or now()
-		if (now() - race.stagingSince) >= STAGE_TIMEOUT then
-			race.stagingSince = nil
-			dropUnstagedPlayers(stripId)
-		end
-		return
-	end
+	if not allStaged or (totalCount or 0) < 1 or next(unstagedPlayers(run)) then return false end
 
-	race.countdownSent = true
+	run.step, run.since = "running", now()
 
 	local payload = {
 		type = "countdownStart",
-		raceId = race.raceId,
+		raceId = run.raceId,
 		startTime = now(),
 		-- Matches the range display.lua uses for its own tree delay.
 		randValue = 0.6 + math.random() * 0.6,
 	}
 
 	log("I", logTag, string.format("all %d of %d racer(s) staged - starting countdown for '%s'",
-		stagedCount or 0, totalCount or 0, race.raceId))
+		stagedCount or 0, totalCount or 0, run.raceId))
 
 	-- Leave staging BEFORE the message is applied to us.
 	--
@@ -980,163 +997,196 @@ local function tryStartCountdown(stripId, race)
 		log("I", logTag, "advanced out of staging before the countdown (authority)")
 	end
 
-	broadcast(stripId, "dragRaceCountdownStart", payload)
+	broadcast(stripId, "dragRaceCountdownStart", payload, run)
+	return true
 end
 
---== host side: advancing to the next heat ====================================
+--== host side: how a run ends ================================================
 
---- Moves the queue on once everyone in the current heat has finished.
+--- Is this racer out of the run: finished, or disqualified?
 ---
---- The sequence matters. dragRaceReset clears the finish times and timer values and,
---- via core.onDragRaceReset, clears lastStartedRaceId -- the guard that otherwise makes
---- a repeated dragRaceStarted a no-op. Only then does re-sending dragRaceStarted cause
---- core.onDragRaceStarted to read queue[currentPairIndex] and register the next pair.
---- The comment in core.lua is explicit about this: "Allow the same raceId to trigger
---- onDragRaceStarted again (next heat)".
-local function tryAdvanceHeat(stripId, race)
+--- The leader holds only stand-ins for the other racers, and a stand-in's isFinished is
+--- never set on this machine, so a finish time the racer reported counts too.
+local function racerDone(playerId, dragData, raceState)
+	local times = raceState and raceState.finishTimes
+	if times and (times[playerId] ~= nil or times[tostring(playerId)] ~= nil) then return true end
+	local racer = dragData and dragData.racers and dragData.racers[localRacerKeyFor(playerId)]
+	if not racer then return false end
+	return racer.isFinished == true or racer.isDisqualified == true or racer.isDesqualified == true
+end
+
+local function raceStateOf(run)
 	local core = gameplay_drag_core
-	if not core then return end
+	return core and core.getRaceState and core.getRaceState(run.raceId) or nil
+end
 
-	local dragData = core.getData()
-	if not dragData or not dragData.racers or not next(dragData.racers) then return end
-
-	local finished = dragData.isCompleted
-		or (core.allRacersFinished and core.allRacersFinished(dragData))
-	if not finished then
-		race.finishedAt = nil
-		return
-	end
-
-	-- Let the timeslip be read before wiping it.
-	race.finishedAt = race.finishedAt or now()
-	if (now() - race.finishedAt) < NEXT_HEAT_DELAY then return end
-
-	-- And do not tear anything down until the result screen has actually been built.
-	--
-	-- The reset clears finishTimes and timerValues (mpDragHandlers.lua:251-252), the only
-	-- source of the opponent's numbers. If it lands first, drag.lua clears timeslipPending
-	-- and the finalise then returns early for ever -- no result at all, silently.
-	-- NEXT_HEAT_DELAY alone is not enough, because cars are often still rolling to a stop
-	-- when it expires. The cap stops a client that never finalises from pinning the strip.
+--- Every racer finished or was disqualified, or the result is already built.
+local function runOver(run)
 	local gm = gamemode()
-	if not (gm and gm.isRaceFinalized and gm.isRaceFinalized())
-		and (now() - race.finishedAt) < FINALIZE_CAP then
-		return
+	if gm and gm.isRaceFinalized and gm.isRaceFinalized() then return true end
+	local core = gameplay_drag_core
+	local dragData = core and core.getData and core.getData()
+	if dragData and dragData.isCompleted then return true end
+	local raceState = raceStateOf(run)
+	for playerId in pairs(run.racers) do
+		if not racerDone(playerId, dragData, raceState) then return false end
 	end
+	return true
+end
 
-	local raceState = core.getRaceState and core.getRaceState(race.raceId)
+--- Take a run off this machine's screen: the lights, the waiting list and the run id.
+---
+--- Only a run this machine has (its own run, or one it holds the state of as the leader),
+--- and never a result that has been built -- that stays its RESULT_LINGER on screen and
+--- goes by itself, as a finished run always has. True when the display came down.
+local function cancelLocalRun(raceId, why)
+	if raceId == nil then return false end
+	local t = transport()
+	local active = t and t.getLocalClientActiveRace and t.getLocalClientActiveRace()
+	local core = gameplay_drag_core
+	local known = (active and active.id == raceId)
+		or (core and core.getRaceState and core.getRaceState(raceId) ~= nil)
+	if not known then return false end
 
-	-- Whoever just raced is at the FAR END of the strip, ~430 m from the stage line, so
-	-- take them off the roster before anything is rebuilt from it.
+	local gm = gamemode()
+	if not gm or (gm.isRaceFinalized and gm.isRaceFinalized()) then return false end
+	log("I", logTag, string.format("run '%s' called off (%s) - taking it off the screen", tostring(raceId), why))
+	if gm.tearDownRaceUI then gm.tearDownRaceUI() end
+	return true
+end
+
+--- The run ends without a result: every screen at the strip drops it at once.
+---
+--- The notice goes to everyone at the strip and in the run, and the leader applies it to
+--- itself. A leader who disconnects cannot send it, so a leader change does the same job
+--- on every player (onMileageDragAuthorityChanged).
+local function endRun(stripId, run, why)
+	log("I", logTag, string.format("run '%s' at '%s' ended: %s", run.raceId, stripId, why))
+	runs[stripId] = nil
+	local t = transport()
+	local ids = runRecipients(stripId, run)
+	if t and #ids > 0 then
+		t.send("mileageDragCancel", ids, {stripId = stripId, raceId = run.raceId})
+	end
+	cancelLocalRun(run.raceId, why)
+end
+
+--- The result has had its time on screen: reset the strip for the next run.
+local function closeRun(stripId, run)
+	log("I", logTag, string.format("run '%s' at '%s' is over - resetting the strip", run.raceId, stripId))
+
+	-- Reset, so treeStarted and isStarted go back to their staging values on every
+	-- machine. Without it the racers stay in their finished state for ever, inLiveRace()
+	-- stays true, and nobody's presence ever expires again.
 	--
-	-- Without this the authority completes the race and, on the very same tick, forms a
-	-- brand new one around two cars that physically cannot stage -- they are a quarter
-	-- mile away with their backs to the tree. That is what "stuck in a drag race" was:
-	--
-	--   271.41596  race 'alderStrip-217406' complete - all 1 heat(s) done
-	--   271.42269  starting race 'alderStrip-271431' ... with 2 player(s), 1 heat(s)
-	--   271.43130  left the strip (431.7 m from the stage line, vehicle 74748)
-	--
-	-- The distance check would have dropped them a tick later, but the new race had
-	-- already formed. Drop them here, where we know for a fact that they finished: they
-	-- drive back round and roll up again, exactly like single player.
-	local racedSlot = raceState and raceState.queue
-		and raceState.queue[raceState.currentPairIndex or 1]
-	if racedSlot and presence[stripId] then
-		for _, playerId in pairs(racedSlot) do
-			if presence[stripId][playerId] then
-				log("I", logTag, string.format(
-					"player %s finished and is down the strip - off the roster until they come back",
-					tostring(playerId)))
-				presence[stripId][playerId] = nil
-			end
-		end
+	-- Deliberately no queue and no currentPairIndex. core.setRaceState is a plain merge
+	-- over pairs(updates) (core.lua:842-844), so omitting a key leaves the stored value
+	-- alone. Sending an empty queue made dragBridge, which resolves every MP racer name
+	-- through queue[currentPairIndex] (dragBridge.lua:593-603), label the opponent "Bot".
+	broadcast(stripId, "dragRaceReset", {type = "dragRaceReset", raceId = run.raceId}, run)
+
+	-- And a closing notice. Where a result was built it stays up for its own linger; a run
+	-- that ran out of time with no result would otherwise keep its lights on screen.
+	local t = transport()
+	local ids = runRecipients(stripId, run)
+	if t and #ids > 0 then
+		t.send("mileageDragCancel", ids, {stripId = stripId, raceId = run.raceId})
 	end
+	cancelLocalRun(run.raceId, "the run is over")
 
-	-- Rebuild from who is at the strip *now*, rather than reusing the queue this race
-	-- started with. Anyone who turned up mid-race is then racing in the next heat
-	-- instead of waiting for the whole race to end, and anyone who left stops holding
-	-- a lane.
-	local players = presence[stripId] or {}
-	local stripData = resolveStripData(stripId)
-	local laneCount = 2
-	if stripData and stripData.strip and stripData.strip.lanes then
-		laneCount = #stripData.strip.lanes
+	-- The racers are usually a quarter mile down the strip with their backs to the tree,
+	-- so take them off the roster: a run formed around them could never stage. Whoever is
+	-- still on the line heart-beats straight back on and gets the next run.
+	local players = presence[stripId]
+	if players then
+		for playerId in pairs(run.racers) do players[playerId] = nil end
 	end
-	local queue = buildQueue(players, laneCount)
-	local playersTable = buildPlayersTable(players)
-
-	local nextIndex = (raceState and raceState.currentPairIndex or 1) + 1
-
-	if nextIndex > #queue then
-		-- Everyone has raced. Drop the race so a fresh one forms from whoever is still
-		-- standing at the strip, rather than leaving a finished race pinned forever.
-		log("I", logTag, string.format("race '%s' complete - all %d heat(s) done", race.raceId, #queue))
-
-		-- Reset first, and only then forget it. Without this the racers stay in their
-		-- finished state on every client for ever: treeStarted never goes back to false,
-		-- so inLiveRace() stays true, so nobody's presence ever expires again and the
-		-- strip fills up with people who left hours ago.
-		--
-		-- Deliberately no queue and no currentPairIndex. core.setRaceState is a plain merge
-		-- over pairs(updates) (core.lua:842-844), so omitting a key leaves the stored value
-		-- alone -- which is the whole point. Sending the freshly rebuilt queue shipped an
-		-- EMPTY one (the finishers are off the roster by this line, hence "all 0 heat(s)
-		-- done"), and dragBridge resolves every MP racer name through
-		-- queue[currentPairIndex] (dragBridge.lua:593-603). With the slot gone it fell back
-		-- to its single-player default and labelled the opponent "Bot" (dragBridge.lua:616).
-		-- isStarted = false still fires, which is all this reset is actually needed for.
-		broadcast(stripId, "dragRaceReset", {
-			type = "dragRaceReset",
-			raceId = race.raceId,
-		})
-
-		-- The UI is deliberately NOT torn down here.
-		--
-		-- This point is NEXT_HEAT_DELAY after the finish line, and the cars are usually
-		-- still rolling to a stop. dragBridge.reset() clears the race state, the racers,
-		-- the timeslip and the tree light staging, so doing it here destroyed the state
-		-- the result screen is built from and put the staging lights back on screen
-		-- instead. Each driver clears it by returning to the lane; see setLocalContext.
-		activeRaceByStrip[stripId] = nil
-		return
-	end
-
-	log("I", logTag, string.format("advancing '%s' to heat %d of %d",
-		race.raceId, nextIndex, #queue))
-
-	-- Push the refreshed roster first, so the reset's queue and the players map agree.
-	local joinPayload = {
-		type = "dragRacePlayerJoined",
-		raceId = race.raceId,
-		players = playersTable,
-		queue = queue,
-	}
-	broadcast(stripId, "dragRacePlayerJoined", joinPayload)
-
-	local resetPayload = {
-		type = "dragRaceReset",
-		raceId = race.raceId,
-		queue = queue,
-		currentPairIndex = nextIndex,
-	}
-	broadcast(stripId, "dragRaceReset", resetPayload)
-
-	-- Re-arm: racers for the new heat are registered by onDragRaceStarted.
-	broadcast(stripId, "dragRaceStarted", { raceId = race.raceId })
-
-	race.countdownSent = false
-	race.finishedAt = nil
-	race.stagingSince = nil
+	runs[stripId] = nil
 end
 
 --== authority side: the tick =================================================
 
 local function forgetStrip(stripId)
 	presence[stripId] = nil
-	activeRaceByStrip[stripId] = nil
-	soloWaitStartedAt[stripId] = nil
+	runs[stripId] = nil
+	waitingSince[stripId] = nil
 	stageBlocked[stripId] = nil
+end
+
+--- No run at the strip: two players get one at once, a lone player after WAIT_ALONE.
+---
+--- The solo run matters more than it looks. With MP drag active, poi.lua stops taking its
+--- singleplayer branch (shouldSyncState is true), so driving into a lane no longer starts
+--- a local race -- a lone player would just sit there, and on a live server that is the
+--- common case.
+local function stepWaiting(stripId, players)
+	local count = countPlayers(players)
+	if count >= 2 then
+		startRace(stripId, players)
+	elseif count == 1 then
+		waitingSince[stripId] = waitingSince[stripId] or now()
+		if (now() - waitingSince[stripId]) >= WAIT_ALONE then
+			log("I", logTag, string.format("alone at strip '%s' - starting a solo run", stripId))
+			startRace(stripId, players)
+		end
+	else
+		waitingSince[stripId] = nil
+	end
+end
+
+local function stepStaging(stripId, run, players)
+	-- The roster changed before the countdown. Nothing has happened yet, so rebuild the
+	-- run around whoever is there now: somebody who pulled up should not sit out a run
+	-- they could have been in, and somebody who left must not hold the tree, because
+	-- areAllRacersStaged counts a racer outside the lane as not staged
+	-- (phaseHandlers.lua:418). Two or more go again at once; one waits again.
+	local roster = rosterFingerprint(players)
+	if roster ~= run.roster then
+		endRun(stripId, run, string.format("the roster changed to [%s] before the countdown", roster))
+		if countPlayers(players) >= 2 then startRace(stripId, players) end
+		return
+	end
+	if tryStartCountdown(stripId, run) then return end
+	if (now() - run.since) >= STAGE_WINDOW then
+		sitOutUnstaged(stripId, run)
+		endRun(stripId, run, string.format("not staged in %d s", STAGE_WINDOW))
+	end
+end
+
+local function stepRunning(stripId, run, players)
+	-- A racer still racing has left the strip (driven off, or timed out). A finished or
+	-- disqualified car drives off down the strip as a matter of course, and does not end
+	-- the other car's run.
+	local core = gameplay_drag_core
+	local dragData = core and core.getData and core.getData()
+	local raceState = raceStateOf(run)
+	for playerId in pairs(run.racers) do
+		if not players[playerId] and not racerDone(playerId, dragData, raceState) then
+			endRun(stripId, run, string.format("player %s left mid-run", tostring(playerId)))
+			return
+		end
+	end
+	local outOfTime = (now() - run.since) >= RUN_LIMIT
+	if outOfTime or runOver(run) then
+		log("I", logTag, string.format("run '%s' at '%s': %s - showing the result", run.raceId, stripId,
+			outOfTime and string.format("out of time after %d s", RUN_LIMIT) or "every racer is in"))
+		run.step, run.since = "result", now()
+	end
+end
+
+local NO_PLAYERS = {}
+
+local function stepStrip(stripId, players)
+	local run = runs[stripId]
+	if not run then
+		stepWaiting(stripId, players)
+	elseif run.step == "staging" then
+		stepStaging(stripId, run, players)
+	elseif run.step == "running" then
+		stepRunning(stripId, run, players)
+	elseif (now() - run.since) >= RESULT_LINGER then
+		closeRun(stripId, run)
+	end
 end
 
 local function authorityUpdate()
@@ -1147,68 +1197,63 @@ local function authorityUpdate()
 			-- Not ours (any more). Forget the strip rather than acting on a roster we are
 			-- no longer told about; whoever holds it now is hearing the heartbeats.
 			forgetStrip(stripId)
-			goto continue
-		end
-
-		local active = activeRaceByStrip[stripId]
-
-		if not active then
-			local count = countPlayers(players)
-			if count >= 2 then
-				-- Someone to race. Cancel any pending solo timer and start for real.
-				soloWaitStartedAt[stripId] = nil
-				startRace(stripId, players)
-
-			elseif count == 1 then
-				-- Alone at the strip.
-				--
-				-- This matters more than it looks. With MP drag active, poi.lua stops
-				-- taking its singleplayer branch (shouldSyncState is true), so driving
-				-- into a lane no longer starts a local race -- a lone player would just
-				-- sit there. On a live server that is the common case, so the feature
-				-- would make drag racing worse for almost everyone.
-				--
-				-- After a short grace period (long enough for a second player who is
-				-- pulling in alongside), start a one-car race so solo practice works
-				-- exactly as it does in single player. If someone arrives later, the
-				-- race ends and a two-car one forms from the queue.
-				soloWaitStartedAt[stripId] = soloWaitStartedAt[stripId] or now()
-				if (now() - soloWaitStartedAt[stripId]) >= SOLO_GRACE then
-					soloWaitStartedAt[stripId] = nil
-					log("I", logTag, string.format("alone at strip '%s' - starting a solo run", stripId))
-					startRace(stripId, players)
-				end
-			else
-				soloWaitStartedAt[stripId] = nil
-			end
 		else
-			-- The roster changed while we were still waiting to stage. Nothing has
-			-- happened yet, so rebuild the race around whoever is there now.
-			--
-			-- Both directions matter. Somebody who pulled up should not have to sit out a
-			-- run they could have been in; and somebody who left -- or was dropped for not
-			-- staging, or shoved off the line -- must be taken out of the heat, because
-			-- areAllRacersStaged counts a racer outside the lane boundary as not staged
-			-- (phaseHandlers.lua:418) and would block the tree for everyone else forever.
-			--
-			-- Once the countdown has fired it is too late; changes wait for the next heat.
-			local count = countPlayers(players)
-			local roster = rosterFingerprint(players)
-			if not active.countdownSent and roster ~= active.roster then
-				log("I", logTag, string.format(
-					"roster at '%s' changed to %d player(s) [%s] before staging - rebuilding",
-					stripId, count, roster))
-				activeRaceByStrip[stripId] = nil
-				soloWaitStartedAt[stripId] = nil
-				if count > 0 then startRace(stripId, players) end
-			else
-				tryStartCountdown(stripId, active)
-				tryAdvanceHeat(stripId, active)
-			end
+			stepStrip(stripId, players)
 		end
-
-		::continue::
 	end
+
+	-- A run at a strip nobody is at any more still has to end.
+	for stripId in pairs(runs) do
+		if not presence[stripId] then
+			if isAuthorityFor(stripId) then stepStrip(stripId, NO_PLAYERS) else forgetStrip(stripId) end
+		end
+	end
+end
+
+--- Right after a run starts on this machine: did the game register our real car?
+---
+--- The game swaps this player's stand-in for their real car only when it hears who is on
+--- this machine, and when it does not (a renamed question, as 0.40.4.0 did), the stand-in
+--- can never stage and the strip hangs. Checked only when this player is in the run's
+--- heat. A miss is one warning naming the strip and the racers, and the run ends: on the
+--- leader for the whole strip, elsewhere on this screen.
+function M.checkRunStart(raceId)
+	local core = gameplay_drag_core
+	local raceState = core and core.getRaceState and raceId and core.getRaceState(raceId)
+	local queue = raceState and raceState.queue
+	local slot = type(queue) == "table" and queue[raceState.currentPairIndex or 1]
+	if type(slot) ~= "table" then return end
+	local own = localPlayerId()
+	local inHeat = false
+	for _, playerId in pairs(slot) do
+		if playerId == own then inHeat = true end
+	end
+	if not inHeat then return end
+
+	local data = core.getData and core.getData()
+	local racers = data and data.racers or {}
+	local vehicleId = be:getPlayerVehicleID(0)
+	if vehicleId and vehicleId ~= -1 and racers[vehicleId] then return end
+
+	local keys = {}
+	for key in pairs(racers) do table.insert(keys, tostring(key)) end
+	table.sort(keys)
+	local stripId = M.stripIdForRace(raceId)
+	log("W", logTag, string.format(
+		"the game did not register our car (%s) for run '%s' at '%s' - racers [%s]; ending the run",
+		tostring(vehicleId), tostring(raceId), tostring(stripId), table.concat(keys, ", ")))
+
+	local run = stripId and runs[stripId]
+	if run and run.raceId == raceId and isAuthorityFor(stripId) then
+		endRun(stripId, run, "the game did not register our car")
+	else
+		cancelLocalRun(raceId, "the game did not register our car")
+	end
+end
+
+--- The leader's run at a strip, or nil: { raceId, step, since, racers }.
+function M.getRun(stripId)
+	return runs[stripId]
 end
 
 --== lifecycle ================================================================
@@ -1254,8 +1299,8 @@ end
 
 function M.reset()
 	presence = {}
-	activeRaceByStrip = {}
-	soloWaitStartedAt = {}
+	runs = {}
+	waitingSince = {}
 	stageBlocked = {}
 	stripCache = {}
 	stripList = nil
@@ -1271,6 +1316,16 @@ function M.onMileageDragMessage(msgName, fromPlayerId, data)
 		onJoin(fromPlayerId, data)
 	elseif msgName == "mileageDragLeave" then
 		onLeave(fromPlayerId, data)
+	elseif msgName == "mileageDragCancel" then
+		-- Only the strip's leader calls a run off, as the server elected it; the server
+		-- stamps the sender, so nobody else can take a run off another player's screen.
+		local t = transport()
+		if type(data) ~= "table" or type(data.stripId) ~= "string" or not t or not t.getAuthorityFor
+			or t.getAuthorityFor(data.stripId) ~= fromPlayerId
+			or M.stripIdForRace(data.raceId) ~= data.stripId then
+			return
+		end
+		cancelLocalRun(data.raceId, "called off by the strip's leader")
 	end
 end
 
@@ -1278,6 +1333,17 @@ end
 --- left us.
 function M.onMileageDragAuthorityChanged(stripId, playerId, weHoldIt)
 	if not stripId then return end
+
+	-- Whatever run this machine has at that strip is over: its state lived on the old
+	-- leader, which may have disconnected without calling it off. Take it down here, on
+	-- every player, before a new leader forms a fresh run.
+	local t = transport()
+	local active = t and t.getLocalClientActiveRace and t.getLocalClientActiveRace()
+	if active and M.stripIdForRace(active.id) == stripId then
+		cancelLocalRun(active.id, "the strip's leader changed")
+	elseif runs[stripId] then
+		cancelLocalRun(runs[stripId].raceId, "the strip's leader changed")
+	end
 
 	forgetStrip(stripId)
 	if not weHoldIt then return end
