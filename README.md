@@ -36,7 +36,7 @@ Mileage was called CareerMP until v0.3.0. A server still running CareerMP needs 
 - Paying a player to tow or repair your car ([#91](https://github.com/norto22/Mileage/issues/91))
 - Loans between players ([#88](https://github.com/norto22/Mileage/issues/88))
 - Trading vehicles between players ([#39](https://github.com/norto22/Mileage/issues/39))
-- Race spots: ten of the game's West Coast routes on the big map, raced alone or with invited friends against up to five opponents in cars like yours, with the owner's prize for first place and each spot's best times on the leaderboard; the owner sets the prize with `Mileage SetConfig server spotRacePrize <dollars>` (in progress, [#38](https://github.com/norto22/Mileage/issues/38))
+- Race spots: ten of the game's West Coast routes on the big map, raced alone or with invited friends against up to five opponents in cars like yours, with the owner's prize for first place and each spot's best times on the leaderboard. Owners set them with `Mileage SetConfig server <key> <value>`: `allowSpotRaces` (on by default), `spotRacePrize` (dollars, 0 is off), `spotRacePrizeCooldownMinutes` (the wait between one player's prizes, 10 by default) and `spotRaceOpponentsMax` (0 to 5) (in progress, [#38](https://github.com/norto22/Mileage/issues/38))
 - Career races together ([#36](https://github.com/norto22/Mileage/issues/36))
 - Daily and weekly challenges ([#127](https://github.com/norto22/Mileage/issues/127))
 - Cops and racers ([#128](https://github.com/norto22/Mileage/issues/128))

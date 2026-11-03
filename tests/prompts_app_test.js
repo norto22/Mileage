@@ -730,6 +730,17 @@ test("a broken race spot result or leaderboard shows what it can and keeps the a
 		["City Race 1: 0", "highway_race: 0"], "each route listed, by its id when the name is missing");
 });
 
+test("times just under a whole minute or second round up into the next, never show 60 seconds", () => {
+	const {scope, context} = load();
+	scope.emit("MileageLeaderboard", {wins: [], drag: {}, spots: {r: {name: "R", rows: [
+		{name: "A", time: 59.996}, {name: "B", time: 69.996}, {name: "C", time: 119.999}, {name: "D", time: 61.5}]}}});
+	assert.deepStrictEqual([...scope.leaderboard.spots[0].rows].map((r) => r.value),
+		["1:00.00", "1:10.00", "2:00.00", "1:01.50"]);
+	assert.strictEqual(context.moTime(59.96), "1:00.0", "the race panel's clock too");
+	assert.strictEqual(context.moTime(119.97), "2:00.0");
+	assert.strictEqual(context.moTime(72.44), "1:12.4");
+});
+
 test("no text the app shows for a race spot says AI", () => {
 	const {scope} = load();
 	const texts = (v) => [v.title, v.note, v.warn, v.big, v.start].concat((v.rows || []).map((r) => r.label + " " + r.value),

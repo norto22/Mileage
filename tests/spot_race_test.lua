@@ -278,6 +278,22 @@ end)
 
 --== the server's own timing ======================================================
 
+World.test("the server times the car the player is on the grid in, not another of theirs parked nearby", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local r = route("highway_race")
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 0, {})
+	local pose = last(world, ann, "grid").pose
+	-- Another car of Ann's parked 10 m behind her grid place.
+	ann.parkedCar = {pos = {x = pose.pos.x - pose.dir.x * 10, y = pose.pos.y - pose.dir.y * 10, z = pose.pos.z}}
+	world:advance(6)
+	driveRoute(world, ann, r, 40)
+	world:advance(1)
+	local result = last(world, ann, "result")
+	expect(result, "the race ended at Ann's finish")
+	expect(result.places[1].seconds, "Ann's car was timed")
+end)
+
 World.test("a car at 80 m/s whose readings fall 40 m either side of a checkpoint passes it", function(world)
 	local ann = world:join("Ann", 1000, 0)
 	local r = route("highway_race")
@@ -311,6 +327,17 @@ World.test("a car that skips a checkpoint does not finish, and a teleport passes
 	local result = last(world, ann, "result")
 	same(result.why, "timeout", "the race ran out of time")
 	same(result.places[1].seconds, nil, "no finish")
+end)
+
+World.test("a car that stands 10 s and then jumps 1.2 km in one second passes no checkpoint", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local r = route("highway_race")
+	soloToGreen(world, ann)
+	world:advance(10)
+	local cp = r.checkpoints[2].pos
+	ann.car.pos = copy(cp)
+	world:advance(1)
+	same(standingsRow(world, ann, "Ann").passed, 0, "nothing passed on the jump")
 end)
 
 World.test("a game's finish report never decides: 0.1 s after green from a standing car counts for nothing", function(world)
@@ -438,6 +465,29 @@ World.test("each checkpoint pass sends progress, the last one the finish, and no
 	world:as(ann, function() same(mileage_spotRace.inRace(), false, "the race is over here") end)
 end)
 
+World.test("the racer's map route points at the next checkpoint and moves on after each pass", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local r = route("highway_race")
+	soloToGreen(world, ann)
+	expect(ann.route and metres(ann.route, r.checkpoints[1].pos) < 0.01, "at green: the first checkpoint")
+	driveTo(world, ann, r.checkpoints[1].pos, 40)
+	expect(metres(ann.route, r.checkpoints[2].pos) < 0.01, "after it: the second")
+	driveTo(world, ann, r.checkpoints[2].pos, 40)
+	expect(metres(ann.route, r.checkpoints[3].pos) < 0.01, "then the third")
+end)
+
+World.test("the racer's game counts a checkpoint as far out as the server does, its radius plus 10 m", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local r = route("highway_race")
+	soloToGreen(world, ann)
+	local cp = r.checkpoints[1]
+	local side = {x = -r.grid.dir.y, y = r.grid.dir.x}
+	driveTo(world, ann, {x = cp.pos.x + side.x * (cp.r + 5), y = cp.pos.y + side.y * (cp.r + 5), z = cp.pos.z}, 40)
+	world:advance(1)
+	same(#sentKey(world, ann, "progress"), 1, "the game counted it")
+	same(standingsRow(world, ann, "Ann").passed, 1, "and so did the server")
+end)
+
 World.test("a car off the route for 10 seconds is out, and its race ends", function(world)
 	local ann = world:join("Ann", 1000, 0)
 	local r = route("highway_race")
@@ -536,11 +586,26 @@ World.test("at green each opponent drives the checkpoints' road nodes for every 
 	end
 	expect(drive, "sent the game's race driving")
 	expect(drive:find('wpTargetList = {"cp1", "cp2", "cp3"', 1, true), "through the checkpoints' road nodes in order")
-	expect(drive:find('"cp11"}', 1, true), "to the finish line's")
+	expect(drive:find('"cp10", "cp11", "cp1"}', 1, true), "to the finish line's, and round to the first again so laps repeat")
 	expect(drive:find("noOfLaps = 2", 1, true), "both laps")
 	expect(drive:find("aggression = 0.8", 1, true), "at class B's push")
 	expect(drive:find("avoidCars = 'on'", 1, true), "round other cars")
 	same(car.commands[#car.commands], "ai.setRacing(true)", "racing")
+end)
+
+World.test("on a one-lap route the opponents drive on past the finish instead of braking on it", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	roadsAt(world, route("highway_race"))
+	withClass(ann)
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 1, {})
+	world:advance(6)
+	local drive = nil
+	for _, cmd in ipairs(spawned(world, ann)[1].car.commands) do
+		if cmd:find("ai.driveUsingPath", 1, true) then drive = cmd end
+	end
+	expect(drive:find('{"cp1", "cp2", "cp3", "cp4", "cp4+1", "cp4+2"}', 1, true), "the road beyond the finish follows it")
+	expect(drive:find("noOfLaps = 1", 1, true), "one lap")
 end)
 
 World.test("an opponent that cannot spawn, or never gets a server id, is left out and the race goes on", function(world)
@@ -552,8 +617,15 @@ World.test("an opponent that cannot spawn, or never gets a server id, is left ou
 	local ready = sentKey(world, ann, "ready")
 	same(#ready, 1, "ready at once")
 	same(#ready[1].opponents, 0, "no opponents")
+	same(#ready[1].failed, 2, "both reported as not started")
 	expect(last(world, ann, "countdown"), "the race goes on alone")
 	world:advance(6)
+	local rows = last(world, ann, "standings").rows
+	same(#rows, 3, "Ann and the two cars that did not start")
+	same(rows[2].out, "spawn", "listed as did not start")
+	same(rows[3].out, "spawn", "both")
+	same(rows[2].car, true, "as cars")
+	same(rows[2].name .. "," .. rows[3].name, "ETK 800 Series,Ibishu Pessima", "by model")
 	world:as(ann, function() mileage_spotRace.giveUp() end)
 	world:advance(2)
 	expect(last(world, ann, "result"), "that race is over")
@@ -567,6 +639,7 @@ World.test("an opponent that cannot spawn, or never gets a server id, is left ou
 	ready = sentKey(world, ann, "ready")
 	same(#ready, before + 1, "ready without it")
 	same(#ready[#ready].opponents, 0, "the car is left out")
+	same(#ready[#ready].failed, 1, "and reported as not started")
 	same(spawned(world, ann)[1].car.deleted, true, "and deleted")
 end)
 
@@ -873,6 +946,37 @@ World.test("a minute after the first finish the result comes, with anyone still 
 	same(result.withheld, "slow", "Bob never drove: no prize")
 	local board = world:dataFile("leaderboard.json")
 	same(board and board.wins and board.wins.Ann, nil, "no win against a player who never raced")
+end)
+
+World.test("a player who joined can still pull out with Decline before the race starts", function(world)
+	local ann, bob, cat = threePlayers(world)
+	request(world, ann, "highway_race", 0, {"Bob", "Cat"})
+	answer(world, bob, "join")
+	same(last(world, ann, "inviting").answers[1].answer, "joined", "Bob joined")
+	answer(world, bob, "decline")
+	same(last(world, ann, "inviting").answers[1].answer, "declined", "then pulled out")
+	answer(world, cat, "join")
+	expect(last(world, cat, "grid"), "the race starts once Cat answers")
+	same(#heard(world, bob, "grid"), 0, "Bob is not moved onto the grid")
+	same(#last(world, ann, "countdown").racers, 2, "Ann and Cat race")
+end)
+
+World.test("a closing for an older invite leaves a newer invite on the card", function(world)
+	local ann, bob, cat = threePlayers(world)
+	atStart(cat, "cell_tower")
+	request(world, cat, "cell_tower", 0, {"Bob"})
+	local first = last(world, bob, "invite").id
+	request(world, ann, "highway_race", 0, {"Bob"})
+	local second = last(world, bob, "invite").id
+	expect(first ~= second, "two invites")
+	world:as(cat, function() mileage_spotRace.callOff() end)
+	world:pump()
+	same(last(world, bob, "closed").id, first, "the first invite closed")
+	local card = lastCard(world, bob)
+	same(card.phase, "invite", "the card still shows an invite")
+	same(card.id, second, "the newer one, with its Join")
+	answer(world, bob, "join")
+	expect(last(world, bob, "grid"), "Bob can still join it")
 end)
 
 World.test("Join while in a mission says why and sends nothing; Decline sends decline; an unanswered invite closes", function(world)

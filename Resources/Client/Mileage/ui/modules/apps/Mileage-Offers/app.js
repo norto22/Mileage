@@ -391,11 +391,7 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 	}
 
 	function spotTime(seconds) {
-		var s = Number(seconds);
-		if (!isFinite(s) || s < 0) return "-";
-		var minutes = Math.floor(s / 60);
-		var rest = s - minutes * 60;
-		return minutes + ":" + (rest < 10 ? "0" : "") + rest.toFixed(2);
+		return moClock(seconds, 2);
 	}
 
 	function spotPrizeRow(data) {
@@ -793,11 +789,19 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 
 // Seconds as m:ss.s.
 function moTime(seconds) {
+	return moClock(seconds, 1);
+}
+
+// Seconds as m:ss with this many decimals, rounded before the minutes are split off so
+// 59.996 s reads 1:00.00, never 0:60.00.
+function moClock(seconds, decimals) {
 	var s = Number(seconds);
 	if (!isFinite(s) || s < 0) return "-";
-	var minutes = Math.floor(s / 60);
-	var rest = s - minutes * 60;
-	return minutes + ":" + (rest < 10 ? "0" : "") + rest.toFixed(1);
+	var scale = Math.pow(10, decimals);
+	var units = Math.round(s * scale);
+	var minutes = Math.floor(units / (60 * scale));
+	var rest = (units - minutes * 60 * scale) / scale;
+	return minutes + ":" + (rest < 10 ? "0" : "") + rest.toFixed(decimals);
 }
 
 function moDollars(n) {

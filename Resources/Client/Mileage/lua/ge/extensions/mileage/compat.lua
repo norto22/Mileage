@@ -331,8 +331,6 @@ function M.getPointNodePath(pos, node)
 	return nil
 end
 
--- About metres of road beyond node, heading along dir, as node names, so a racing car
--- does not brake for the finish; an empty list when the game cannot tell.
 -- The name of the road node nearest pos ({x, y, z}), or nil: the game's own lookup where it
 -- has one, else the nearest node of the road map. A race spot's opponents drive through the
 -- node at each checkpoint.
@@ -365,6 +363,8 @@ function M.getClosestRoadNode(pos)
 	return best
 end
 
+-- About metres of road beyond node, heading along dir, as node names, so a racing car
+-- does not brake for the finish; an empty list when the game cannot tell.
 function M.getRoadBeyond(node, dir, metres)
 	local fn = pickOrWarn(map, "map", "getGraphpath", "a racing traffic car brakes at the finish")
 	if not fn or type(dir) ~= "table" then return {} end

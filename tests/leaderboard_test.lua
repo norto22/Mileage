@@ -108,7 +108,7 @@ local function storedSpotTimes(world)
 	local times = {}
 	for i = 1, 12 do times["P" .. i] = {time = 300 - i, at = 1} end
 	world.disk["Resources/Server/Mileage/data/leaderboard.json"] = World.encode({wins = {Ann = 3}, drag = {},
-		spots = {city_race_1 = times, highway_race = {Ann = {time = 61.25, at = 1}}}})
+		spots = {city_race_1 = times, highway_race = {Ann = {time = 61.25, at = 1}, Bob = {time = 59.996, at = 1}}}})
 	world:restart()
 end
 
@@ -122,7 +122,7 @@ World.test("each race spot route has its ten fastest players on the board, named
 	same(city.rows[1].name, "P12", "fastest first")
 	same(city.rows[1].time, 288, "with the time")
 	same(city.rows[10].name, "P3", "tenth")
-	same(board.spots.highway_race.rows[1].name, "Ann", "another route")
+	same(board.spots.highway_race.rows[2].name, "Ann", "another route")
 	same(board.wins[1].wins, 3, "the wins are still there")
 end)
 
@@ -146,6 +146,7 @@ World.test("Mileage Leaderboard prints spot times and reset clears them", functi
 	local lines = world:console("Mileage Leaderboard")
 	same(countLines(lines, "best times at City Race 1"), 1, "route heading")
 	same(countLines(lines, "P12: 4:48.00"), 1, "the fastest line")
+	same(countLines(lines, "Bob: 1:00.00"), 1, "59.996 s rounds up to a whole minute, never 0:60.00")
 	world:console("Mileage Leaderboard reset")
 	world:restart()
 	same(next(leaderboardFor(world, ann).spots), nil, "no spot times after reset and restart")

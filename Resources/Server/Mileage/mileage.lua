@@ -2162,8 +2162,10 @@ function Leaderboard(arguments)
 	for _, routeId in ipairs(routes) do
 		print("[Mileage] Leaderboard - best times at " .. consoleText(top.spots[routeId].name))
 		for i, entry in ipairs(top.spots[routeId].rows) do
-			print(string.format("  %2d. %s: %d:%05.2f", i, consoleText(entry.name), math.floor(entry.time / 60),
-				entry.time % 60))
+			-- In hundredths first, so 59.996 s prints 1:00.00, never 0:60.00.
+			local hundredths = math.floor(entry.time * 100 + 0.5)
+			print(string.format("  %2d. %s: %d:%05.2f", i, consoleText(entry.name), math.floor(hundredths / 6000),
+				(hundredths % 6000) / 100))
 		end
 	end
 end
@@ -3400,6 +3402,9 @@ local PRIZE_HIGH = 1000000
 local CHECKPOINT_SLACK = 10
 -- Readings that arrive late after the first finish still count towards distance driven.
 local LATE_SECONDS = 2
+-- How stale BeamMP may leave a car's position between two readings and still have its next
+-- step count as driven.
+local STALE_SECONDS = 2
 -- Another racer must have driven at least this, on average over the winner's time, as the
 -- server read it, for the prize: opponents held still or held back pay nothing.
 local PACE_MPS = 8
@@ -3644,6 +3649,7 @@ end
 
 local function readingOf(race, racer)
 	if racer.car then return Money.vehiclePosition(racer.car) end
+	if racer.vehicle then return Money.vehiclePosition(racer.vehicle) end
 	local id = playerIdByName(racer.name)
 	if not id then return nil end
 	return Money.carPosition(id, racer.last or racer.pose.pos, race.cars)
@@ -3673,7 +3679,10 @@ local function readRacer(race, racer, now)
 		return
 	end
 	local metres = flatMetres(last, at)
-	if metres > Money.MAX_SPEED_MPS * (now - lastAt + LATE_SECONDS) then return end
+	-- The time the car could have driven this step: since its last move, but no more than
+	-- STALE_SECONDS before the server's last reading, so standing still earns no long jump.
+	local seconds = math.min(now - lastAt, now - readAt + STALE_SECONDS)
+	if metres > Money.MAX_SPEED_MPS * (seconds + LATE_SECONDS) then return end
 	if not race.paceUntil or now <= race.paceUntil then racer.driven = (racer.driven or 0) + metres end
 	if not racer.finish then passCheckpoints(race, racer, last, at, readAt, now) end
 end
@@ -3694,6 +3703,9 @@ local function standings(race)
 				at = racer.passedAt, seconds = racer.finish or (not racer.seen and racer.reported) or nil,
 				out = racer.out})
 		end
+	end
+	for _, model in ipairs(race.didNotStart or {}) do
+		table.insert(rows, {name = model, car = true, passed = 0, lap = 1, checkpoint = 0, out = "spawn"})
 	end
 	table.sort(rows, function(a, b)
 		if (a.out ~= nil) ~= (b.out ~= nil) then return a.out == nil end
@@ -3871,6 +3883,14 @@ end
 
 local function answerInvite(player_id, name, id, join)
 	local race = spotRaces[id]
+	if not join and race and race.phase == "inviting" and race.invited[name] == "joined" then
+		-- A player who joined pulls out before the race starts.
+		race.racers[name] = nil
+		race.invited[name] = "declined"
+		sendInviting(race)
+		if everyoneAnswered(race) then startGrid(race) end
+		return
+	end
 	if not race or race.phase ~= "inviting" or race.invited[name] ~= "waiting" then
 		sendJson("spotRaces", player_id, "rxMileageSpotRace", {phase = "closed", id = id,
 			why = "The invite is over."})
@@ -3921,7 +3941,27 @@ local function onReady(player_id, name, message)
 	local racer = race and race.racers[name]
 	if not racer or race.phase ~= "grid" or racer.ready then return end
 	racer.ready = true
-	if name == race.starter then addOpponents(race, player_id, message.opponents) end
+	if name == race.starter then
+		addOpponents(race, player_id, message.opponents)
+		-- Opponents the starter's game could not start, shown as such: at most the rest of
+		-- those asked for.
+		local listed = 0
+		for _ in pairs(race.cars) do listed = listed + 1 end
+		race.didNotStart = {}
+		for _, model in ipairs(type(message.failed) == "table" and message.failed or {}) do
+			if #race.didNotStart >= race.opponentsWanted - listed then break end
+			table.insert(race.didNotStart, modelText(model))
+		end
+	end
+	-- The car this racer drives: one of its own from before the race, not an opponent,
+	-- standing on its grid place as the server reads it. Only that car is timed, never
+	-- another of theirs parked nearby.
+	local car = message.car
+	local spawned = type(car) == "string" and Money.spawnedAt[car]
+	if Money.ownsVehicle(player_id, car) and not race.cars[car] and not (spawned and spawned >= race.askedAt) then
+		local at = Money.vehiclePosition(car)
+		if not at or Money.metresBetween(at, racer.pose.pos) <= START_METRES then racer.vehicle = car end
+	end
 	if allReady(race) then startCountdown(race) end
 end
 

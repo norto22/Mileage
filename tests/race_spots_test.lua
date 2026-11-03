@@ -135,7 +135,7 @@ World.test("with race spots on, the map has a place with a mission marker at eac
 	expect(math.abs(marker.pos.x - start.x) < 0.01 and math.abs(marker.pos.y - start.y) < 0.01, "at the start line")
 	same(city.markerInfo.bigmapMarker.name, "City Race 1", "named on the big map")
 	same(city.markerInfo.bigmapMarker.description, "Race spot · 2 laps · 5.0 km", "laps and length")
-	same(byId.mileageSpot_race_track.markerInfo.bigmapMarker.description, "Race spot · 3 layouts",
+	same(byId.mileageSpot_race_track.markerInfo.bigmapMarker.description, "Race spot · 2 laps · 8.1 km · 3 layouts",
 		"the race track's layouts share one place")
 	same(byId.mileageSpot_race_track_short, nil, "no second marker on the same start line")
 	same(#places(world, ann, "italy"), 0, "no places on other levels")

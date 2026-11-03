@@ -553,8 +553,11 @@ function World:moveSpawned()
 			if step >= d then
 				car.pathIndex = car.pathIndex + 1
 				if car.pathIndex > #car.path then
-					car.lap, car.pathIndex = car.lap + 1, 1
-					if car.lap > car.laps then car.racing = false end
+					-- As the game's ai.lua: laps repeat only on a path that ends on its first node,
+					-- and the next lap goes on from the second.
+					local loops = car.laps > 1 and #car.path > 1 and car.path[1] == car.path[#car.path]
+					car.lap, car.pathIndex = car.lap + 1, 2
+					if not loops or car.lap > car.laps then car.racing = false end
 				end
 			end
 		end

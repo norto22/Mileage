@@ -28,6 +28,9 @@ local M = {}
 
 local logTag = "mileage.spotRace"
 
+-- A checkpoint counts within its radius plus this, as the server counts it, so the game
+-- and the server always agree on which checkpoint is next.
+local CHECKPOINT_SLACK = 10
 local OFF_ROUTE_METRES = 1000
 local OFF_ROUTE_SECONDS = 10
 local PANEL_EVERY_SECONDS = 0.25
@@ -236,6 +239,8 @@ end
 -- the game gives that class, reports their checkpoints, and deletes them at every ending.
 
 local SPAWN_WAIT_SECONDS = 10
+-- How far past the finish of a one-lap route the opponents keep driving.
+local BEYOND_METRES = 250
 local STUCK_SPEED, STUCK_SECONDS = 1, 15
 
 -- The cars to race and their push: the game's group for this car's class, or this car's
@@ -295,15 +300,17 @@ local function spawnOpponents(poses, veh, vid)
 	local cars, aggression = opponentCars(#poses, veh, vid)
 	race.aggression = aggression
 	race.opponents = {}
+	-- The cars that did not start, by model name: the server lists them as such.
+	race.failed = {}
 	race.spawnWait = SPAWN_WAIT_SECONDS
 	local c = compat()
 	for i, pose in ipairs(poses) do
-		if isPoint(pose.pos) and isPoint(pose.dir) and isPoint(pose.up) then
-			local car = spawnOpponent(cars[i], pose)
-			if car then
-				table.insert(race.opponents, {vid = car:getID(), name = (c and c.getModelName(cars[i].model)) or cars[i].model,
-					passed = 0, slowFor = 0})
-			end
+		local name = (c and c.getModelName(cars[i].model)) or cars[i].model
+		local car = isPoint(pose.pos) and isPoint(pose.dir) and isPoint(pose.up) and spawnOpponent(cars[i], pose) or nil
+		if car then
+			table.insert(race.opponents, {vid = car:getID(), name = name, passed = 0, slowFor = 0})
+		else
+			table.insert(race.failed, name)
 		end
 	end
 end
@@ -328,6 +335,7 @@ local function opponentsListed(dt)
 		else
 			local veh = be:getObjectByID(opponent.vid)
 			if veh then pcall(function() veh:delete() end) end
+			table.insert(race.failed, opponent.name)
 		end
 	end
 	race.opponents = kept
@@ -337,13 +345,26 @@ end
 -- Green: each opponent drives the route's checkpoints, every lap, at its class's push.
 local function driveOpponents()
 	local c = compat()
-	local nodes = {}
+	local names = {}
 	for _, checkpoint in ipairs(race.route.checkpoints) do
 		local node = c and c.getClosestRoadNode(checkpoint.pos)
-		if node and nodes[#nodes] ~= string.format("%q", tostring(node)) then
-			table.insert(nodes, string.format("%q", tostring(node)))
+		if node and names[#names] ~= tostring(node) then table.insert(names, tostring(node)) end
+	end
+	if #names > 1 and race.route.laps > 1 then
+		-- The game's race driving repeats laps only on a path that ends on its first node
+		-- (ai.lua's loopPath), as its own races build theirs.
+		if names[#names] ~= names[1] then table.insert(names, names[1]) end
+	elseif #names > 0 then
+		-- One lap: drive on past the finish line instead of braking to a stop on it.
+		local last, before = race.route.checkpoints[#race.route.checkpoints].pos,
+			race.route.checkpoints[math.max(1, #race.route.checkpoints - 1)].pos
+		local dir = {x = last.x - before.x, y = last.y - before.y, z = 0}
+		for _, name in ipairs(c and c.getRoadBeyond(names[#names], dir, BEYOND_METRES) or {}) do
+			if tostring(name) ~= names[#names] then table.insert(names, tostring(name)) end
 		end
 	end
+	local nodes = {}
+	for i, name in ipairs(names) do nodes[i] = string.format("%q", name) end
 	for _, opponent in ipairs(race.opponents) do
 		local veh = be:getObjectByID(opponent.vid)
 		if veh then
@@ -370,12 +391,20 @@ local function routeName()
 	return race and race.route and race.route.name or ""
 end
 
--- The starter says ready once its opponents are listed.
-local function sendReadyWithOpponents()
+-- The server vehicle id of the car this player drives, which the server times.
+local function ownCarId()
+	local _, vid = playerVehicle()
+	if not vid or not MPVehicleGE or type(MPVehicleGE.getServerVehicleID) ~= "function" then return nil end
+	return MPVehicleGE.getServerVehicleID(vid)
+end
+
+-- Ready on the grid, naming this player's car; the starter's game also lists its opponents
+-- once BeamMP has given them their ids.
+local function sendReady()
 	race.listing = false
 	local list = {}
 	for _, opponent in ipairs(race.opponents) do table.insert(list, {car = opponent.sid, model = opponent.name}) end
-	send({ready = {race = race.id, opponents = list}})
+	send({ready = {race = race.id, car = ownCarId(), opponents = list, failed = race.failed or {}}})
 end
 
 -- Moves this car to its grid place and holds it there; the race is under way from now.
@@ -406,11 +435,7 @@ local function onGrid(message)
 		end
 	end
 	ui({phase = "grid", id = race.id, routeName = routeName()})
-	if not race.listing then
-		send({ready = {race = race.id, opponents = {}}})
-	elseif opponentsListed(0) then
-		sendReadyWithOpponents()
-	end
+	if not race.listing or opponentsListed(0) then sendReady() end
 end
 
 local function onCountdown(message)
@@ -459,7 +484,7 @@ local function passCheckpoints(state, pos, key)
 	state.lastPos = pos
 	while state.passed < total do
 		local checkpoint = checkpoints[state.passed % #checkpoints + 1]
-		if not passesAt(last, pos, checkpoint.pos, checkpoint.r) then return false end
+		if not passesAt(last, pos, checkpoint.pos, checkpoint.r + CHECKPOINT_SLACK) then return false end
 		state.passed = state.passed + 1
 		local lap = math.floor((state.passed - 1) / #checkpoints) + 1
 		local index = (state.passed - 1) % #checkpoints + 1
@@ -499,6 +524,16 @@ local function watchOpponents(dt)
 end
 
 -- This car's own checkpoints, lap by lap, from its last position to where it is now.
+-- The next checkpoint is the route on the big map and the navigation, set again after each
+-- pass, so the racer always knows where to drive.
+local function showNextCheckpoint()
+	if race.shownFor == race.passed then return end
+	race.shownFor = race.passed
+	local c = compat()
+	local checkpoints = race.route.checkpoints
+	if c then c.setNavigationTarget(checkpoints[race.passed % #checkpoints + 1].pos) end
+end
+
 local function checkOwnCar(dt)
 	local veh = playerVehicle()
 	if not veh then return end
@@ -509,6 +544,7 @@ local function checkOwnCar(dt)
 		ui({phase = "finished", id = race.id, routeName = routeName(), elapsed = race.elapsed})
 		return
 	end
+	showNextCheckpoint()
 	local nextPos = checkpoints[race.passed % #checkpoints + 1].pos
 	local away = distance(pos, nextPos)
 	if away > OFF_ROUTE_METRES then race.offFor = race.offFor + dt else race.offFor = 0 end
@@ -527,7 +563,7 @@ end
 
 local function updateRace(dt)
 	if race.phase == "grid" then
-		if race.listing and opponentsListed(dt) then sendReadyWithOpponents() end
+		if race.listing and opponentsListed(dt) then sendReady() end
 		return
 	end
 	if race.phase == "countdown" and race.countdownLeft then
@@ -540,6 +576,7 @@ local function updateRace(dt)
 			local veh = playerVehicle()
 			race.lastPos = veh and point(veh:getPosition()) or nil
 			setFrozen(false)
+			showNextCheckpoint()
 			driveOpponents()
 			ui({phase = "go", id = race.id, routeName = routeName()})
 		elseif math.ceil(race.countdownLeft) ~= before then
@@ -644,6 +681,10 @@ local function rxMileageSpotRace(data)
 			prize = message.prize, left = tonumber(message.seconds) or 30}
 		inviteCard(nil)
 	elseif phase == "closed" then
+		-- Only for the race, invite or starter's card this game has now: a closing for an
+		-- older invite must not cover a newer one.
+		local mine = (race and race.id == message.id) or (invite and invite.id == message.id) or starting == message.id
+		if not mine then return end
 		if race and race.id == message.id then endHere() end
 		if invite and invite.id == message.id then invite = nil end
 		if starting == message.id then starting = nil end

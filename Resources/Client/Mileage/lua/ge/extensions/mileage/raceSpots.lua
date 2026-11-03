@@ -63,10 +63,12 @@ local function km(metres)
 	return string.format("%.1f km", (tonumber(metres) or 0) / 1000)
 end
 
+-- "Race spot · 2 laps · 5.0 km", and the number of layouts where several start here.
 local function describe(spot)
-	if #spot.routes > 1 then return string.format("Race spot · %d layouts", #spot.routes) end
 	local route = spot.main
-	return string.format("Race spot · %d lap%s · %s", route.laps, route.laps == 1 and "" or "s", km(route.length))
+	local text = string.format("Race spot · %d lap%s · %s", route.laps, route.laps == 1 and "" or "s", km(route.length))
+	if #spot.routes > 1 then text = text .. string.format(" · %d layouts", #spot.routes) end
+	return text
 end
 
 --- The game's places on a level: one per race spot on West Coast, while race spots are on.
