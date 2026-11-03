@@ -503,7 +503,7 @@ test("the set-up card shows the route, the bests, the prize, the opponents and w
 	const v = scope.spot.view;
 	assert.strictEqual(v.title, "Race spot: City Race 1");
 	assert.deepStrictEqual(rowsOf(v), ["Route: Circuit, 2 laps, 4.1 km", "Best time here: 3:41.27 by Sam",
-		"Your best: 3:52.80", "Prize for first place: $2,000"]);
+		"Your best: 3:52.80", "Prize for first place: $4,000 for 4 racers"]);
 	assert.strictEqual(v.stepper.value, 3, "three opponents to start with");
 	assert.strictEqual(v.stepper.max, 5);
 	assert.strictEqual(v.layouts, null, "one route, no layout choice");
@@ -537,6 +537,47 @@ test("the opponents stay within 0 and the server's maximum; none and nobody invi
 	assert.strictEqual(scope.spot.view.start, "Start run");
 	assert.ok(scope.spot.view.note.includes("sets a time for the leaderboard but pays no prize"));
 	assert.ok(rowsOf(scope.spot.view).includes("Prize: None on this server"));
+});
+
+test("the set-up card's prize grows with the opponents and the friends picked", () => {
+	const {scope} = load();
+	scope.emit("MileageSpotRace", Object.assign({}, SETUP, {prize: 1000}));
+	const prize = () => rowsOf(scope.spot.view).filter((r) => r.startsWith("Prize"))[0];
+	assert.strictEqual(prize(), "Prize for first place: $2,000 for 4 racers", "three opponents to start with");
+	scope.spotOpponents(-2);
+	assert.strictEqual(prize(), "Prize for first place: $1,000 for 2 racers", "one opponent: the owner's prize");
+	scope.spotOpponents(4);
+	assert.strictEqual(prize(), "Prize for first place: $3,000 for 6 racers", "five opponents: three times");
+	scope.spotOpponents(-5);
+	scope.spotPick(scope.spot.view.players[0]);
+	assert.strictEqual(prize(), "Prize for first place: $1,000 for 2 racers", "a friend counts as a racer");
+	scope.spotPick(scope.spot.view.players[1]);
+	assert.strictEqual(prize(), "Prize for first place: $1,500 for 3 racers", "and grows it by half");
+	scope.spotPick(scope.spot.view.players[0]);
+	scope.spotPick(scope.spot.view.players[1]);
+	assert.strictEqual(prize(), "Prize for first place: $1,000 with a rival", "a run alone shows the prize a race pays");
+	scope.emit("MileageSpotRace", Object.assign({}, SETUP, {prize: 1000, againIn: 300}));
+	assert.strictEqual(prize(), "Prize for first place: Again in 5 min", "the wait as before");
+});
+
+test("the set-up card's grown prize is rounded down to whole dollars, as the server pays it", () => {
+	const {scope} = load();
+	scope.emit("MileageSpotRace", Object.assign({}, SETUP, {prize: 1001}));
+	const prize = () => rowsOf(scope.spot.view).filter((r) => r.startsWith("Prize"))[0];
+	scope.spotOpponents(-1);
+	assert.strictEqual(prize(), "Prize for first place: $1,501 for 3 racers", "1001 x 1.5 = 1501.5, rounded down");
+});
+
+test("a car changed since its last performance test is told its rivals may not match; a tested one is not", () => {
+	const {scope} = load();
+	scope.emit("MileageSpotRace", Object.assign({}, SETUP, {untested: true}));
+	assert.ok(scope.spot.view.note.startsWith("Your car changed since its last performance test, or was never " +
+		"tested, so its rivals may not match it until it is tested again."), scope.spot.view.note);
+	assert.ok(scope.spot.view.note.includes("Friends who join"), "the usual note still follows");
+	scope.emit("MileageSpotRace", Object.assign({}, SETUP, {untested: false}));
+	assert.ok(!scope.spot.view.note.includes("performance test"));
+	scope.emit("MileageSpotRace", Object.assign({}, SETUP, {untested: true, note: "Drive into the start marker first."}));
+	assert.strictEqual(scope.spot.view.note, "Drive into the start marker first.", "a reason it cannot start comes alone");
 });
 
 test("the race track's card offers its layouts and keeps the choice when the card is sent again", () => {
@@ -673,14 +714,15 @@ test("a won race spot shows the prize paid, or why not, and a new best", () => {
 	scope.emit("MileageSpotRace", Object.assign({}, won, {prize: 0, best: {improved: true}}));
 	assert.strictEqual(scope.spot.view.note, "Your first time here is on the leaderboard.");
 	const notes = {};
-	["alone", "slow", "wait", "unseen"].forEach((withheld) => {
+	["alone", "wait", "unseen", "slow"].forEach((withheld) => {
 		scope.emit("MileageSpotRace", Object.assign({}, won, {prize: 0, withheld, againIn: 360, best: {improved: false}}));
 		notes[withheld] = scope.spot.view.note;
 		assert.deepStrictEqual(rowsOf(scope.spot.view), [], withheld + ": no prize row");
 	});
 	assert.deepStrictEqual(notes, {
 		alone: "No prize: nobody else raced. Your time counts for the leaderboard.",
-		slow: "No prize: no other racer drove at race pace.",
+		// Slow rivals no longer withhold the prize; a reason the app does not know reads plainly.
+		slow: "No prize this time.",
 		wait: "No prize: you can win it again in 6 min.",
 		unseen: "Unranked: the server could not follow every car, so no prize, win or leaderboard time.",
 	});

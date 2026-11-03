@@ -1,8 +1,10 @@
 // Mileage prompts: race challenges and money requests to this player, the race
-// countdown, race panel and result, race events and the server leaderboard. Fed by the
-// game's Mileage extensions through guihooks (mileage/offers.lua and the race, event and
-// leaderboard extensions); every answer goes back through bngApi.engineLua with ids and
-// names base64-encoded. Every text from the server or another player is bound as text.
+// countdown, race panel and result, race events and the server leaderboard. While the
+// race window (Mileage-Race) is on the page, it shows the countdown and the race panel
+// instead (moRaceWindowShows). Fed by the game's Mileage extensions through guihooks
+// (mileage/offers.lua and the race, event and leaderboard extensions); every answer goes
+// back through bngApi.engineLua with ids and names base64-encoded. Every text from the
+// server or another player is bound as text.
 //
 // NOTE: top-level declarations must be `var` or function declarations: the game's UI
 // app service evaluates app.js again in the same scope when it refreshes apps, and a
@@ -183,6 +185,10 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 	$scope.$on('MileageRace', function (event, data) {
 		if (!data) return;
 		$scope.$evalAsync(function () {
+			if (moRaceWindowShows(data.phase)) {
+				$scope.race = null;
+				return;
+			}
 			var shown = raceView(data);
 			$scope.race = shown ? {id: data.race, phase: data.phase, view: shown} : null;
 		});
@@ -379,7 +385,6 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 	// Why the first place was not paid, when the server has a prize.
 	var SPOT_WITHHELD = {
 		alone: "No prize: nobody else raced. Your time counts for the leaderboard.",
-		slow: "No prize: no other racer drove at race pace.",
 		"car won": "No prize: only a player who finishes first is paid.",
 		unseen: "Unranked: the server could not follow every car, so no prize, win or leaderboard time.",
 	};
@@ -394,11 +399,15 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 		return moClock(seconds, 2);
 	}
 
-	function spotPrizeRow(data) {
+	// The owner's prize is for a race of two; each racer past two adds half of it again, as
+	// the server pays it. racers: the grid as set, every friend picked counted as joining.
+	function spotPrizeRow(data, racers) {
 		var prize = Number(data.prize) || 0, again = Number(data.againIn) || 0;
 		if (prize <= 0) return {label: "Prize", value: "None on this server"};
 		if (again > 0) return {label: "Prize for first place", value: "Again in " + Math.ceil(again / 60) + " min"};
-		return {label: "Prize for first place", value: moDollars(prize)};
+		if (racers < 2) return {label: "Prize for first place", value: moDollars(prize) + " with a rival"};
+		return {label: "Prize for first place",
+			value: moDollars(Math.floor(prize * (1 + 0.5 * (racers - 2)))) + " for " + racers + " racers"};
 	}
 
 	function setupView(s) {
@@ -407,12 +416,16 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 		rows.push({label: "Best time here", value: typeof route.best === "number" ?
 			spotTime(route.best) + " by " + String(route.bestBy || "") : "No times yet"});
 		if (typeof route.mine === "number") rows.push({label: "Your best", value: spotTime(route.mine)});
-		rows.push(spotPrizeRow(s));
 		var invited = s.players.filter(function (p) { return p.on; }).length;
+		rows.push(spotPrizeRow(s, 1 + s.opponents + invited));
 		var solo = s.opponents === 0 && invited === 0;
 		var note = s.note ? String(s.note) : (solo ?
 			"No opponents and nobody invited: this run sets a time for the leaderboard but pays no prize." :
 			"Friends who join are moved onto the grid beside you.");
+		if (!s.note && s.untested) {
+			note = "Your car changed since its last performance test, or was never tested, so its rivals may not " +
+				"match it until it is tested again. " + note;
+		}
 		if (s.allowed === false) note = "Race spots are off on this server.";
 		return {
 			title: "Race spot: " + String(s.spotName || ""),
@@ -546,7 +559,7 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 			spot: data.spot, spotName: data.spotName, routes: routes, allowed: data.allowed,
 			routeIndex: before ? Math.min(before.routeIndex, Math.max(0, routes.length - 1)) : 0,
 			opponents: before ? Math.min(before.opponents, max) : Math.min(3, max), opponentsMax: max,
-			prize: data.prize, againIn: data.againIn, note: data.note, pending: data.pending,
+			prize: data.prize, againIn: data.againIn, note: data.note, pending: data.pending, untested: data.untested === true,
 			players: (Array.isArray(data.players) ? data.players : []).map(function (p) {
 				var name = String(p.name || "");
 				return {name: name, busy: p.busy === true, on: p.busy !== true && picks[name] === true};
@@ -568,6 +581,10 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 				return;
 			case "inviteClosed":
 				if (current && current.kind === "invite" && current.id === data.id) $scope.spot = null;
+				return;
+			}
+			if (moRaceWindowShows(data.phase)) {
+				$scope.spot = null;
 				return;
 			}
 			var shown = spotView(data, current);
@@ -786,6 +803,14 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 	bngApi.engineLua('if mileage_aiRace then mileage_aiRace.sendState() end');
 	bngApi.engineLua('if mileage_spotRace then mileage_spotRace.sendState() end');
 }]);
+
+// Whether the race window (Mileage-Race) is on the page and shows this phase of a race:
+// the countdown, GO, the race and the wait after a finish. The prompts app then leaves
+// them to it.
+function moRaceWindowShows(phase) {
+	var open = typeof mileageRaceWindowsOpen === "number" && mileageRaceWindowsOpen > 0;
+	return open && (phase === "countdown" || phase === "go" || phase === "racing" || phase === "finished");
+}
 
 // Seconds as m:ss.s.
 function moTime(seconds) {

@@ -207,3 +207,30 @@ test("the Mileage prompts app is added beside the player list, once", function()
 	same(count, 1, "prompts app in the layout")
 	same(placement.right, "305px", "beside the player list")
 end)
+
+test("the race window goes once at the top right, just below the top bar", function()
+	local M = loadModule({
+		[USER_DEFAULT .. "career.uilayout.json"] = savedCareerLayout(BUILD),
+		[ORIGINAL_DEFAULT .. "career.uilayout.json"] = {apps = {{appName = "gameApp1"}}},
+	})
+	M.migrateLayouts()
+	files[USER_DEFAULT .. "career.uilayout.json"] = written[USER_DEFAULT .. "career.uilayout.json"]
+	M.migrateLayouts()
+	local layout = written[USER_DEFAULT .. "career.uilayout.json"]
+	local count, placement = 0, nil
+	for _, app in ipairs(layout.apps) do
+		if app.appName == "mileagerace" then count, placement = count + 1, app.placement end
+	end
+	same(count, 1, "the race window in the layout once")
+	same(placement.right, "0px", "at the right edge")
+	same(placement.top, "64px", "8 px below a 56 px top bar")
+	same(placement.width, "280px", "280 px wide")
+	same(placement.height, "90px", "90 px tall")
+	local shipped = nil
+	local f = assert(io.open("Resources/Client/Mileage/settings/ui_apps/layouts/default/mileage.uilayout.json", "r"))
+	local text = f:read("*a")
+	f:close()
+	shipped = text:match('"appName": "mileagerace",%s*"placement": (%b{})')
+	expect(shipped, "the shipped layout places the race window")
+	expect(shipped:find('"top": "64px"', 1, true) and shipped:find('"right": "0px"', 1, true), "at the same place")
+end)

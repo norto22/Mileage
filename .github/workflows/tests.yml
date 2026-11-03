@@ -29,6 +29,7 @@ jobs:
         run: |
           node tests/player_list_test.js
           node tests/prompts_app_test.js
+          node tests/race_window_test.js
 
       # A release branch is named for its version (v0.4.1), and everything that carries
       # the version must say the same; tools/set_version.py writes them all.

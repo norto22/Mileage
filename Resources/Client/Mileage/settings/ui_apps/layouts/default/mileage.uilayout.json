@@ -94,6 +94,18 @@
       }
     },
     {
+      "appName": "mileagerace",
+      "placement": {
+        "bottom": "",
+        "height": "90px",
+        "left": "",
+        "position": "absolute",
+        "right": "0px",
+        "top": "64px",
+        "width": "280px"
+      }
+    },
+    {
       "appName": "beammpSession",
       "placement": {
         "bottom": "",

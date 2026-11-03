@@ -61,6 +61,13 @@ local function compat()
 	return nil
 end
 
+-- mileage/raceRoad: the race road of a route (see there).
+local function raceRoad()
+	local r = extensions.mileage_raceRoad
+	if type(r) == "table" and type(r.usable) == "function" and type(r.legAfter) == "function" then return r end
+	return {usable = function() return nil end, legAfter = function() return nil end}
+end
+
 local function routes()
 	local r = extensions.mileage_spotRoutes
 	if type(r) == "table" and type(r.routes) == "table" then return r.routes end
@@ -184,9 +191,15 @@ local function setupCard()
 		end
 	end
 	local spotRoute = routeById(setup.spot)
+	-- A car changed since its last performance test, or never tested, gets rivals from an
+	-- older result or the class it was bought as.
+	local c = compat()
+	local _, vid = playerVehicle()
+	local class = c and vid and c.carPerformanceClass(vid)
 	ui({phase = "setup", spot = setup.spot, spotName = spotRoute and spotRoute.name or setup.spot, routes = list,
 		allowed = status.allowed, prize = status.prize, againIn = prizeAgainIn(), opponentsMax = status.opponentsMax,
-		players = players, note = setup.note, pending = pending})
+		players = players, note = setup.note, pending = pending,
+		untested = class ~= nil and (class.tested == "changed" or class.tested == "never")})
 end
 
 --- Opens the set-up card for a spot (the game's prompt at its start line), and asks the
@@ -243,18 +256,19 @@ local SPAWN_WAIT_SECONDS = 10
 local BEYOND_METRES = 250
 local STUCK_SPEED, STUCK_SECONDS = 1, 15
 
--- The cars to race and their push: the game's group for this car's class, or this car's
--- own model where the game cannot group cars.
+-- The cars to race and their push: the game's group for the class of this car as it is now
+-- (its latest performance test, upgrades counted), or this car's own model where the game
+-- cannot group cars.
 local function opponentCars(count, veh, vid)
 	local cars, aggression = {}, 1
-	local perf, grouping = gameplay_vehiclePerformance, career_modules_vehicleClassGrouping
-	if type(perf) == "table" and type(grouping) == "table" and type(perf.getClassFromVehId) == "function"
-			and type(grouping.generateGroup) == "function" then
-		local ok, data = pcall(perf.getClassFromVehId, vid)
-		local className = ok and type(data) == "table" and (type(data.class) == "table" and data.class.name or data.class)
+	local grouping = career_modules_vehicleClassGrouping
+	local c = compat()
+	if c and type(grouping) == "table" and type(grouping.generateGroup) == "function" then
+		local data = c.carPerformanceClass(vid)
+		local className = data and data.class
 		if type(className) == "string" then
 			local okGroup, group = pcall(grouping.generateGroup, className, nil, nil, nil, nil, nil, true, true,
-				data.performanceIndex)
+				data.index)
 			for _, entry in ipairs(okGroup and type(group) == "table" and type(group.data) == "table" and group.data or {}) do
 				if type(entry) == "table" and type(entry.model) == "string" then table.insert(cars, entry) end
 			end
@@ -342,13 +356,37 @@ local function opponentsListed(dt)
 	return true
 end
 
--- Green: each opponent drives the route's checkpoints, every lap, at its class's push.
+-- The road nodes of a lap of the race road, in order, with no node twice in a row. On a
+-- route of more than one lap the path starts at checkpoint 1's node and ends on it again
+-- (the closing road from the finish), as the game's race driving needs to repeat laps.
+local function roadNames(road, route)
+	local names = {}
+	local function add(list)
+		for _, name in ipairs(list) do
+			if names[#names] ~= tostring(name) then table.insert(names, tostring(name)) end
+		end
+	end
+	if route.laps > 1 and road.closing and #road.legs > 1 then
+		for i = 2, #road.legs do add(road.legs[i].nodes) end
+		add(road.closing.nodes)
+	else
+		for i = 1, #road.legs do add(road.legs[i].nodes) end
+	end
+	return names
+end
+
+-- Green: each opponent drives the route, every lap, at its class's push: every node of
+-- the race road where there is one, else the road node nearest each checkpoint.
 local function driveOpponents()
 	local c = compat()
 	local names = {}
-	for _, checkpoint in ipairs(race.route.checkpoints) do
-		local node = c and c.getClosestRoadNode(checkpoint.pos)
-		if node and names[#names] ~= tostring(node) then table.insert(names, tostring(node)) end
+	if race.road then
+		names = roadNames(race.road, race.route)
+	else
+		for _, checkpoint in ipairs(race.route.checkpoints) do
+			local node = c and c.getClosestRoadNode(checkpoint.pos)
+			if node and names[#names] ~= tostring(node) then table.insert(names, tostring(node)) end
+		end
 	end
 	if #names > 1 and race.route.laps > 1 then
 		-- The game's race driving repeats laps only on a path that ends on its first node
@@ -379,10 +417,77 @@ local function driveOpponents()
 	end
 end
 
+--== traffic during the race =================================================
+-- At the green each racer's game halves its own active traffic and parked cars, rounded
+-- up, to leave room for the racing cars. Its police cars are held out of the game's
+-- vehicle pool so none is hidden, and count towards the half. The game hides the rest as
+-- it does whenever its amounts change, and Mileage's hide sync shows that to every other
+-- game. Once this game's part of the race is over (its own race, and the opponents it
+-- drives), the police go back into the pool and the amounts back to what the server sets.
+
+local function thinTraffic()
+	local c = compat()
+	if not race or race.thinned or not c then return end
+	local amounts = c.getTrafficAmounts()
+	if not amounts then return end
+	local police = {}
+	if amounts.road then
+		for _, id in ipairs(c.getPoliceCars()) do
+			local pool = c.takeOutOfPool(id)
+			if pool then table.insert(police, {pool = pool, id = id}) end
+		end
+	end
+	race.thinned = {road = amounts.road, parked = amounts.parked, police = police}
+	c.setTrafficAmounts(amounts.road and math.max(0, math.ceil(amounts.activeRoad / 2) - #police),
+		amounts.parked and math.ceil(amounts.activeParked / 2))
+end
+
+-- The server's amounts now (a share it sent during the race included), or nil.
+local function serverAmounts()
+	local traffic, enabler = extensions.mileage_traffic, mileageEnabler
+	if type(traffic) ~= "table" or type(traffic.serverAmounts) ~= "function" or type(enabler) ~= "table"
+			or type(enabler.getClientConfig) ~= "function" then
+		return nil
+	end
+	local ok, road, parked = pcall(function() return traffic.serverAmounts(enabler.getClientConfig()) end)
+	if ok and tonumber(road) and tonumber(parked) then return road, parked end
+	return nil
+end
+
+local function restoreTraffic()
+	local thinned = race and race.thinned
+	if not thinned then return end
+	race.thinned = nil
+	local c = compat()
+	if not c then return end
+	for _, held in ipairs(thinned.police) do c.putBackInPool(held.pool, held.id) end
+	local road, parked = serverAmounts()
+	c.setTrafficAmounts(thinned.road and (road or thinned.road), thinned.parked and (parked or thinned.parked))
+end
+
+-- This racer's own race is over: its traffic comes back unless it still drives opponents.
+local function ownRaceOver()
+	for _, opponent in ipairs(race.opponents) do
+		if not opponent.ended then return end
+	end
+	restoreTraffic()
+end
+
 --== the race ================================================================
+
+-- Takes the checkpoint markers and the line off the screen.
+local function clearGuidance()
+	if not race or not (race.markers or race.lineSet) then return end
+	local c = compat()
+	if c and race.markers then c.clearRaceMarkers() end
+	if c and race.lineSet then c.clearNavigation() end
+	race.markers, race.lineSet = nil, nil
+end
 
 local function endHere()
 	if race and race.frozen then setFrozen(false) end
+	clearGuidance()
+	restoreTraffic()
 	deleteOpponents()
 	race = nil
 end
@@ -427,6 +532,12 @@ local function onGrid(message)
 			return
 		end
 		race = {id = message.id, route = route, starter = starter, phase = "grid", passed = 0, offFor = 0, opponents = {}}
+		-- The race road is worked out now, with the cars waiting on the grid; where this
+		-- game's check does not pass for the route, the game's own navigation is used.
+		race.road = raceRoad().usable(route)
+		if not race.road then
+			log("W", logTag, tostring(route.id) .. ": no race road that passes the check; using the game's navigation")
+		end
 		setup, pending, invite, starting = nil, false, nil, nil
 		setFrozen(true)
 		if starter and type(message.opponentPoses) == "table" and #message.opponentPoses > 0 then
@@ -530,8 +641,25 @@ local function showNextCheckpoint()
 	if race.shownFor == race.passed then return end
 	race.shownFor = race.passed
 	local c = compat()
+	if not c then return end
 	local checkpoints = race.route.checkpoints
-	if c then c.setNavigationTarget(checkpoints[race.passed % #checkpoints + 1].pos) end
+	local n = #checkpoints
+	local leg = race.road and raceRoad().legAfter(race.road, race.passed, n)
+	if leg and c.setNavigationPath(leg.points) then
+		race.lineSet = true
+	else
+		c.setNavigationTarget(checkpoints[race.passed % n + 1].pos)
+	end
+	if race.markers then
+		-- The checkpoint to drive to is red (blue at the finish: the game's marker calls that
+		-- mode "final"), the one after it black.
+		local total = n * race.route.laps
+		local modes = {}
+		local current = race.passed % n + 1
+		modes["cp" .. current] = race.passed + 1 == total and "final" or "default"
+		if race.passed + 2 <= total and current % n + 1 ~= current then modes["cp" .. (current % n + 1)] = "next" end
+		c.setRaceMarkerModes(modes)
+	end
 end
 
 local function checkOwnCar(dt)
@@ -576,8 +704,17 @@ local function updateRace(dt)
 			local veh = playerVehicle()
 			race.lastPos = veh and point(veh:getPosition()) or nil
 			setFrozen(false)
+			local c = compat()
+			if c then
+				local wps = {}
+				for i, checkpoint in ipairs(race.route.checkpoints) do
+					wps[i] = {name = "cp" .. i, pos = checkpoint.pos, r = checkpoint.r}
+				end
+				race.markers = c.setRaceMarkers(wps)
+			end
 			showNextCheckpoint()
 			driveOpponents()
+			thinTraffic()
 			ui({phase = "go", id = race.id, routeName = routeName()})
 		elseif math.ceil(race.countdownLeft) ~= before then
 			ui({phase = "countdown", id = race.id, routeName = routeName(), count = math.ceil(race.countdownLeft),
@@ -587,8 +724,16 @@ local function updateRace(dt)
 	end
 	if race.phase ~= "racing" then return end
 	race.elapsed = race.elapsed + dt
+	if race.markers then
+		local c = compat()
+		if c then c.renderRaceMarkers(dt) end
+	end
 	if not race.ended then checkOwnCar(dt) end
 	watchOpponents(dt)
+	if race.ended then
+		clearGuidance()
+		if race.thinned then ownRaceOver() end
+	end
 end
 
 --- Gives up the race under way: before the green the starter calls it off for everyone.
@@ -600,6 +745,7 @@ function M.giveUp()
 		return true
 	end
 	race.ended = "gaveUp"
+	ownRaceOver()
 	ui({phase = "out", id = race.id, routeName = routeName(), why = "gaveUp"})
 	return true
 end
@@ -735,6 +881,9 @@ function M.onBeamMPServerLeave()
 end
 
 function M.onExtensionUnloaded()
+	-- A reload mid-race must not leave the traffic thinned or the markers up.
+	clearGuidance()
+	restoreTraffic()
 	deleteOpponents()
 end
 

@@ -12,8 +12,8 @@
 -- `lineage` field in versions/client.json and versions/server.json.
 local LINEAGE = "norto22/Mileage"
 
-local HARD_CLIENT_VERSION = {major = 0, minor = 6, revision = 0, lineage = LINEAGE}
-local HARD_SERVER_VERSION = {major = 0, minor = 6, revision = 0, lineage = LINEAGE}
+local HARD_CLIENT_VERSION = {major = 0, minor = 6, revision = 1, lineage = LINEAGE}
+local HARD_SERVER_VERSION = {major = 0, minor = 6, revision = 1, lineage = LINEAGE}
 
 local RAW = "https://raw.githubusercontent.com/"
 local GITHUB_REPO = "norto22/Mileage/"
@@ -3406,7 +3406,8 @@ local LATE_SECONDS = 2
 -- step count as driven.
 local STALE_SECONDS = 2
 -- Another racer must have driven at least this, on average over the winner's time, as the
--- server read it, for the prize: opponents held still or held back pay nothing.
+-- server read it, for a race win on the leaderboard: opponents held still or held back
+-- win nothing there. The prize is paid whatever the rivals did.
 local PACE_MPS = 8
 -- An opponent the server sees standing this long is out; the starter's game saying it is
 -- out counts only once the server sees it standing STILL_CLAIM_SECONDS, or cannot read it.
@@ -3726,23 +3727,36 @@ local function ranked(race)
 	return true
 end
 
+-- The prize for a race of this many racers: the owner's prize for two, and half of it
+-- again for each racer past two, rounded down.
+local function prizeFor(racers)
+	return math.floor(serverNumber("spotRacePrize", 0, PRIZE_HIGH) * (1 + 0.5 * math.max(0, racers - 2)))
+end
+
+-- Every racer who started: players and opponents, those out since the green included.
+local function startedCount(race)
+	local n = 0
+	for _ in pairs(race.racers) do n = n + 1 end
+	return n
+end
+
 -- Why the first place is not paid, or nil: the race was not seen, a car won, nobody else
--- raced, nobody else drove at race pace, or the winner's wait is not over. A win counts on
--- the leaderboard unless the race was unseen, a car won, or nobody else really raced.
+-- raced, or the winner's wait is not over. The winner is paid whatever the rivals did.
 local function withheldFor(race, first)
 	if not ranked(race) then return "unseen" end
 	if first.car then return "car won" end
-	local others, atPace = 0, false
-	for key, racer in pairs(race.racers) do
-		if key ~= first.name then
-			others = others + 1
-			if (racer.driven or 0) >= PACE_MPS * first.seconds then atPace = true end
-		end
-	end
-	if others == 0 then return "alone" end
-	if not atPace then return "slow" end
+	if startedCount(race) < 2 then return "alone" end
 	if serverNumber("spotRacePrize", 0, PRIZE_HIGH) > 0 and prizeAgainIn(first.name) > 0 then return "wait" end
 	return nil
+end
+
+-- Whether another racer drove at race pace, on average over the winner's time, as the
+-- server read it: a win counts on the leaderboard only then.
+local function rivalAtPace(race, first)
+	for key, racer in pairs(race.racers) do
+		if key ~= first.name and (racer.driven or 0) >= PACE_MPS * first.seconds then return true end
+	end
+	return false
 end
 
 local function placesText(places)
@@ -3764,9 +3778,9 @@ local function endRace(race, why)
 	if first and why ~= "starterLeft" then
 		withheld = withheldFor(race, first)
 		if not first.car then winner = first.name end
-		local real = withheld ~= "unseen" and withheld ~= "car won" and withheld ~= "alone" and withheld ~= "slow"
+		local real = withheld ~= "unseen" and withheld ~= "car won" and withheld ~= "alone" and rivalAtPace(race, first)
 		if winner and real and Money.leaderboardWin then Money.leaderboardWin(winner) end
-		local prize = serverNumber("spotRacePrize", 0, PRIZE_HIGH)
+		local prize = prizeFor(startedCount(race))
 		if winner and not withheld and prize > 0 then
 			paid = prize
 			spotPrizeEarnedAt[winner] = os.time()
@@ -3787,7 +3801,7 @@ local function endRace(race, why)
 		if id then
 			sendJson("spotRaces", id, "rxMileageSpotRace", {phase = "result", id = race.id, route = race.route.id,
 				places = places, winner = winner, carWon = first ~= nil and first.car, prize = paid, withheld = withheld,
-				prizeOffered = serverNumber("spotRacePrize", 0, PRIZE_HIGH), ranked = isRanked, best = bests[name],
+				prizeOffered = prizeFor(startedCount(race)), ranked = isRanked, best = bests[name],
 				why = why, you = name, againIn = prizeAgainIn(name)})
 			sendStatus(id)
 		end
@@ -3866,7 +3880,8 @@ local function startRequest(player_id, name, request)
 		startGrid(race)
 		return
 	end
-	local prize = serverNumber("spotRacePrize", 0, PRIZE_HIGH)
+	-- The prize for the grid as set, every invited player counted as joining.
+	local prize = prizeFor(1 + race.opponentsWanted + #invited)
 	for _, other in ipairs(invited) do
 		sendTo(other, {phase = "invite", id = race.id, from = name, route = routeSummary(route),
 			opponents = race.opponentsWanted, prize = prize, seconds = INVITE_SECONDS})

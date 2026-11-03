@@ -55,8 +55,10 @@ loadPersistent('mileage/raceEvents')
 -- Racing your own traffic cars: uses the street race's rolling start and the race
 -- events' road-point picker, so it loads after both.
 loadPersistent('mileage/aiRace')
--- Race spots: the routes, the race itself, then the places on the map, which read both.
+-- Race spots: the routes, their race roads, the race itself, then the places on the map,
+-- which read the routes and the race.
 loadPersistent('mileage/spotRoutes')
+loadPersistent('mileage/raceRoad')
 loadPersistent('mileage/spotRace')
 loadPersistent('mileage/raceSpots')
 loadPersistent('mileagePrefabSync')

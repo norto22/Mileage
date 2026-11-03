@@ -421,6 +421,7 @@ World.CLIENT_FILES = {
 	{"mileage_raceEvents", CLIENT .. "mileage/raceEvents.lua"},
 	{"mileage_aiRace", CLIENT .. "mileage/aiRace.lua"},
 	{"mileage_spotRoutes", CLIENT .. "mileage/spotRoutes.lua"},
+	{"mileage_raceRoad", CLIENT .. "mileage/raceRoad.lua"},
 	{"mileage_spotRace", CLIENT .. "mileage/spotRace.lua"},
 	{"mileage_raceSpots", CLIENT .. "mileage/raceSpots.lua"},
 }
@@ -668,8 +669,16 @@ function World:loadGame(p)
 	}
 	p.globals.vec3 = function(x, y, z) return {x = x, y = y, z = z} end
 	p.globals.quatFromDir = function(dir, up) return {dir = dir, up = up} end
-	p.globals.core_groundMarkers = {getTargetPos = function() return p.route end,
-		setPath = function(pos) p.route = pos end}
+	-- setPath takes one position or a list of them (and options); getTargetPos is where it ends.
+	p.globals.core_groundMarkers = {
+		getTargetPos = function()
+			local route = p.route
+			if type(route) == "table" and route.x == nil then return route[#route] end
+			return route
+		end,
+		setPath = function(pos, options)
+			p.route, p.routeOptions = pos, options
+		end}
 	p.globals.gameplay_missions_missionManager = {getForegroundMissionId = function() return p.mission end}
 	p.globals.MPCoreNetwork = {isMPSession = function() return true end}
 	p.globals.gameplay_drag_core = {getData = function() return p.dragData end}
@@ -694,7 +703,45 @@ function World:loadGame(p)
 			return {getRandomPathG = function(_, node) return {node, node .. "+1", node .. "+2"} end}
 		end,
 	}
-	p.globals.gameplay_traffic = {getTrafficData = function() return p.trafficData end}
+	-- The game's traffic and parked car amounts (p.amounts: road and parked as set, roadCars
+	-- and parkedCars as spawned; every set goes to p.amountsSet) and its vehicle pool, which
+	-- holds every traffic car until one is taken out (p.outOfPool).
+	p.amounts = p.amounts or {road = math.huge, parked = math.huge, roadCars = 0, parkedCars = 0}
+	p.amountsSet, p.outOfPool = p.amountsSet or {}, p.outOfPool or {}
+	p.globals.gameplay_traffic = {getTrafficData = function() return p.trafficData end,
+		getTrafficVars = function() return {activeAmount = p.amounts.road} end,
+		getNumOfTraffic = function(activeOnly)
+			return activeOnly and math.min(p.amounts.road, p.amounts.roadCars) or p.amounts.roadCars
+		end,
+		setActiveAmount = function(n)
+			p.amounts.road = n
+			table.insert(p.amountsSet, "road " .. tostring(n))
+		end}
+	p.globals.gameplay_parking = {
+		getParkingVars = function() return {activeAmount = p.amounts.parked} end,
+		getParkedCarsAmount = function(activeOnly)
+			return activeOnly and math.min(p.amounts.parked, p.amounts.parkedCars) or p.amounts.parkedCars
+		end,
+		setActiveAmount = function(n)
+			p.amounts.parked = n
+			table.insert(p.amountsSet, "parked " .. tostring(n))
+		end}
+	local pool = {name = "autoTraffic"}
+	function pool:removeVeh(id)
+		if p.outOfPool[id] then return false end
+		p.outOfPool[id] = true
+		table.insert(p.amountsSet, "out " .. id)
+		return true
+	end
+	function pool:insertVeh(id, forceInsert)
+		p.outOfPool[id] = nil
+		table.insert(p.amountsSet, "in " .. id .. (forceInsert and " active" or ""))
+		return true
+	end
+	p.globals.core_vehicleActivePooling = {getPoolOfVeh = function(id)
+		if p.trafficData[id] and not p.outOfPool[id] then return pool, true end
+		return nil
+	end}
 	-- The game's place list and marker caches, and its prompt at a marker.
 	p.poiClears, p.markerClears, p.promptCloses = p.poiClears or 0, p.markerClears or 0, p.promptCloses or 0
 	p.globals.gameplay_rawPois = {clear = function() p.poiClears = p.poiClears + 1 end}
@@ -917,6 +964,25 @@ function World.new(opts)
 	World.restoreIo()
 	function log() end
 	function setExtensionUnloadMode() end
+	-- The game's race checkpoint markers (scenario/race_marker), as a game loads them: what
+	-- was set up, the modes given, how many frames drew them and how often they were cleared.
+	local markers = {setups = {}, modes = {}, renders = 0, clears = 0}
+	self.markers = markers
+	package.loaded["scenario/race_marker"] = {
+		init = function() end,
+		setupMarkers = function(wps) table.insert(markers.setups, wps) end,
+		-- The modes the game's default marker (sideColumnMarker) has; any other it cannot draw.
+		setModes = function(modes)
+			local known = {default = true, next = true, start = true, lap = true, recovery = true, final = true,
+				branch = true, hidden = true}
+			for name, mode in pairs(modes) do
+				if not known[mode] then error("the game's race marker has no mode " .. tostring(mode) .. " (" .. name .. ")") end
+			end
+			table.insert(markers.modes, modes)
+		end,
+		render = function() markers.renders = markers.renders + 1 end,
+		onClientEndMission = function() markers.clears = markers.clears + 1 end,
+	}
 	settings = {getValue = function() return nil end, setValue = function() end}
 	installDisk(self)
 	self.serverFS = FS

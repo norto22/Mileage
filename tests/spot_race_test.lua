@@ -503,6 +503,165 @@ World.test("a car off the route for 10 seconds is out, and its race ends", funct
 	same(result.places[1].out, "left", "listed as left the route")
 end)
 
+--== the race road ================================================================
+
+-- A test route on a small road map: from the grid (g) north to checkpoint 1 (b), then
+-- east to checkpoint 2 (c). The race road goes round by r1 and r2; the side street b-s-c
+-- is shorter, but a wall closes it. Links are given one way only, as a one-way road.
+local WALLED = {id = "walled", name = "Walled", closed = false, laps = 1, length = 320,
+	grid = {pos = {x = 0, y = -20, z = 0}, dir = {x = 0, y = 1, z = 0}},
+	checkpoints = {{pos = {x = 0, y = 100, z = 0}, r = 8}, {pos = {x = 200, y = 100, z = 0}, r = 8}},
+	walls = {{50, 90, 50, 110}}}
+
+local function walledMap(world)
+	local function node(x, y, links)
+		local l = {}
+		for _, name in ipairs(links or {}) do l[name] = {oneWay = true} end
+		return {pos = {x = x, y = y, z = 0}, links = l}
+	end
+	world.roadNodes = {
+		g = node(0, -20, {"a"}), a = node(0, 0, {"b"}), b = node(0, 100, {"r1", "s"}),
+		r1 = node(0, 200, {"r2"}), r2 = node(200, 200, {"c"}), s = node(100, 100, {"c"}), c = node(200, 100),
+	}
+end
+
+local function withRoutes(world, p, list)
+	world:as(p, function() mileage_spotRoutes.routes = list end)
+end
+
+local function logged(p)
+	p.logLines = {}
+	p.globals.log = function(level, tag, text)
+		if tag == "mileage.raceRoad" then table.insert(p.logLines, level .. " " .. text) end
+	end
+end
+
+World.test("the race road keeps off a side street a wall closes, one-way rules ignored", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	walledMap(world)
+	local road = world:as(ann, function() return mileage_raceRoad.road(WALLED) end)
+	expect(road, "a road")
+	same(table.concat(road.nodes, " "), "g a b r1 r2 c", "round by the race road, not the side street")
+	same(#road.legs, 2, "a leg to each checkpoint")
+	same(table.concat(road.legs[2].nodes, " "), "b r1 r2 c", "checkpoint 1 to 2 along the race road")
+	same(road.fallbacks, 0, "every leg crosses no wall")
+	same(road.points[4].y, 200, "the points follow the nodes")
+	WALLED.walls = {}
+	local open = world:as(ann, function() return mileage_raceRoad.road(WALLED) end)
+	same(open, road, "worked out once and kept")
+	world:hook(ann, "onBeamMPServerLeave")
+	open = world:as(ann, function() return mileage_raceRoad.road(WALLED) end)
+	same(table.concat(open.nodes, " "), "g a b s c", "without the wall, worked out again after leaving: the side street")
+	WALLED.walls = {{50, 90, 50, 110}}
+end)
+
+World.test("a leg no road reaches without crossing a wall takes the walls-ignored road and says so", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	walledMap(world)
+	logged(ann)
+	local closed = {}
+	for k, v in pairs(WALLED) do closed[k] = v end
+	closed.id = "closed_off"
+	closed.walls = {{50, 90, 50, 110}, {90, 190, 90, 210}}
+	local road = world:as(ann, function() return mileage_raceRoad.road(closed) end)
+	same(table.concat(road.legs[2].nodes, " "), "b s c", "the shortest road, walls ignored")
+	same(road.legs[2].fallback, true, "marked as such")
+	same(road.fallbacks, 1, "one leg")
+	same(countLines(ann.logLines, "closed_off: no road to checkpoint 2 crosses no wall"), 1, "logged")
+end)
+
+World.test("the race road check logs a line per route: passes, a fallback leg, a missed checkpoint", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	walledMap(world)
+	world.roadNodes.far = {pos = {x = 600, y = 600, z = 0}, links = {c = {}}}
+	logged(ann)
+	local closed, missed = {}, {}
+	for k, v in pairs(WALLED) do closed[k], missed[k] = v, v end
+	closed.id, closed.walls = "closed_off", {{50, 90, 50, 110}, {90, 190, 90, 210}}
+	missed.id = "missed"
+	missed.checkpoints = {WALLED.checkpoints[1], WALLED.checkpoints[2], {pos = {x = 400, y = 100, z = 0}, r = 8}}
+	missed.length = 520
+	-- A checkpoint on a road the map does not join to the others.
+	world.roadNodes.island = {pos = {x = -300, y = 100, z = 0}, links = {}}
+	local island = {}
+	for k, v in pairs(WALLED) do island[k] = v end
+	island.id = "island"
+	island.checkpoints = {WALLED.checkpoints[1], {pos = {x = -300, y = 100, z = 0}, r = 8}}
+	withRoutes(world, ann, {WALLED, closed, missed, island})
+	local result = world:as(ann, function() return mileage_raceRoad.check() end)
+	same(result.passed, 1, "one route passes")
+	same(result.total, 4, "of four")
+	same(countLines(ann.logLines, "W race road island: FAILS: no road reaches checkpoint 2"), 1,
+		"a checkpoint no road reaches fails it, said as such")
+	same(countLines(ann.logLines, "I race road walled: passes: 2 legs on roads that cross no wall, 2 checkpoints in order"),
+		1, "the walled route passes")
+	same(countLines(ann.logLines, "W race road closed_off: FAILS: the road to checkpoint 2 crosses a wall"), 1,
+		"a fallback leg fails the check")
+	same(countLines(ann.logLines, "W race road missed: FAILS: lap 1 misses checkpoint 3 (nearest"), 1,
+		"a checkpoint the road does not reach fails it")
+	same(countLines(ann.logLines, "W race road check: 1 of 4 routes pass"), 1, "and a summary")
+end)
+
+World.test("the race road check fails checkpoints a road passes in the wrong order, even on one stretch of it", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	world.roadNodes = {
+		g = {pos = {x = 0, y = -20, z = 0}, links = {b = {}}},
+		b = {pos = {x = 0, y = 100, z = 0}, links = {}},
+	}
+	logged(ann)
+	local reversed = {id = "reversed", name = "Reversed", closed = false, laps = 1, length = 120,
+		grid = {pos = {x = 0, y = -20, z = 0}, dir = {x = 0, y = 1, z = 0}},
+		checkpoints = {{pos = {x = 0, y = 80, z = 0}, r = 8}, {pos = {x = 0, y = 50, z = 0}, r = 8}}, walls = {}}
+	withRoutes(world, ann, {reversed})
+	local result = world:as(ann, function() return mileage_raceRoad.check() end)
+	same(result.passed, 0, "the second checkpoint lies behind the first, so the server could not finish it")
+	same(countLines(ann.logLines, "W race road reversed: FAILS: lap 1 misses checkpoint 2"), 1, "said so")
+	reversed.checkpoints[2].pos.y = 95
+	world:hook(ann, "onBeamMPServerLeave")
+	result = world:as(ann, function() return mileage_raceRoad.check() end)
+	same(result.passed, 1, "in order along the same stretch it passes")
+end)
+
+World.test("a road that runs along a wall crosses it", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	world.roadNodes = {
+		g = {pos = {x = 0, y = -20, z = 0}, links = {b = {}}},
+		b = {pos = {x = 0, y = 100, z = 0}, links = {}},
+	}
+	logged(ann)
+	local along = {id = "along", name = "Along", closed = false, laps = 1, length = 120,
+		grid = {pos = {x = 0, y = -20, z = 0}, dir = {x = 0, y = 1, z = 0}},
+		checkpoints = {{pos = {x = 0, y = 100, z = 0}, r = 8}}, walls = {{0, 30, 0, 60}}}
+	withRoutes(world, ann, {along})
+	local result = world:as(ann, function() return mileage_raceRoad.check() end)
+	same(result.passed, 0, "the only road lies on the wall")
+	same(countLines(ann.logLines, "W race road along: FAILS: the road to checkpoint 1 crosses a wall"), 1, "said so")
+	along.walls = {{5, 30, 5, 60}}
+	world:hook(ann, "onBeamMPServerLeave")
+	result = world:as(ann, function() return mileage_raceRoad.check() end)
+	same(result.passed, 1, "a wall beside the road is not crossed")
+end)
+
+World.test("a race road asked for before the game has a road map is worked out when the map comes", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	world.roadNodes = nil
+	same(world:as(ann, function() return mileage_raceRoad.road(WALLED) end), nil, "no map, no road")
+	same(world:as(ann, function() return mileage_raceRoad.usable(WALLED) end), nil, "and nothing usable")
+	walledMap(world)
+	local road = world:as(ann, function() return mileage_raceRoad.usable(WALLED) end)
+	expect(road, "the map arrived, so the road is there")
+	same(table.concat(road.nodes, " "), "g a b r1 r2 c", "the race road")
+end)
+
+World.test("the race road check runs once at each career start on a server", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	walledMap(world)
+	logged(ann)
+	withRoutes(world, ann, {WALLED})
+	world:startCareer(ann)
+	same(countLines(ann.logLines, "race road check: 1 of 1 routes pass"), 1, "checked at the career start")
+end)
+
 --== the starter's opponents ======================================================
 
 -- A road node at each checkpoint of the route, named cp1, cp2, ...
@@ -525,6 +684,68 @@ local function withClass(p)
 		getAggressionMultiplier = function(class) return class == "B" and 0.8 or 1 end,
 	}
 end
+
+-- p's car is career car 7 with these performance tests: current (its latest test, or nil
+-- when it changed since) and history (earlier results, newest first), each {class, index}.
+-- The game's stock lookup says class E at 18.
+local function withTests(p, current, history)
+	withClass(p)
+	p.globals.gameplay_vehiclePerformance.getClassFromVehId = function()
+		return {class = {name = "E"}, performanceIndex = 18}
+	end
+	p.globals.gameplay_vehiclePerformance.getClassFromData = function(data)
+		return {class = {name = data.class}, performanceIndex = data.index}
+	end
+	local vehicle = {certificationData = current, performanceHistory = history}
+	p.globals.career_modules_inventory = {
+		getInventoryIdFromVehicleId = function(vid) return vid == p.car.id and 7 or nil end,
+		getVehicles = function() return {[7] = vehicle} end,
+	}
+	p.globals.career_modules_vehiclePerformance = {getVehicleClass = function(id)
+		local data = id == 7 and vehicle.certificationData
+		return data and p.globals.gameplay_vehiclePerformance.getClassFromData(data) or nil
+	end}
+end
+
+World.test("an upgraded starter whose latest test is class S gets opponents grouped for S", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	withTests(ann, {class = "S", index = 92})
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 2, {})
+	same(ann.groupAsked.class, "S", "grouped for the class of its latest test")
+	same(ann.groupAsked.index, 92, "near that test's performance index")
+end)
+
+World.test("a car changed since its test races on its newest earlier result; one never tested on its stock class", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	withTests(ann, nil, {{class = "A", index = 71}, {class = "B", index = 55}})
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 1, {})
+	same(ann.groupAsked.class .. " " .. ann.groupAsked.index, "A 71", "the newest earlier result")
+	world:as(ann, function() mileage_spotRace.giveUp() end)
+	world:pump()
+	withTests(ann, nil, nil)
+	atStart(ann, "cell_tower")
+	request(world, ann, "cell_tower", 1, {})
+	same(ann.groupAsked.class .. " " .. ann.groupAsked.index, "E 18", "the class it was bought as")
+end)
+
+World.test("the set-up card says the rivals may not match a car changed since its test, or never tested", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	withTests(ann, {class = "S", index = 92})
+	world:as(ann, function() mileage_spotRace.openSetup("city_race_1") end)
+	same(lastCard(world, ann, "setup").untested, false, "a current test: nothing to say")
+	withTests(ann, nil, {{class = "S", index = 92}})
+	world:as(ann, function() mileage_spotRace.openSetup("city_race_1") end)
+	same(lastCard(world, ann, "setup").untested, true, "changed since its test")
+	withTests(ann, nil, nil)
+	world:as(ann, function() mileage_spotRace.openSetup("city_race_1") end)
+	same(lastCard(world, ann, "setup").untested, true, "never tested")
+	ann.globals.career_modules_inventory = false
+	ann.globals.career_modules_vehiclePerformance = false
+	world:as(ann, function() mileage_spotRace.openSetup("city_race_1") end)
+	same(lastCard(world, ann, "setup").untested, false, "not a career car: nothing to say")
+end)
 
 local function spawned(world, p)
 	local list = {}
@@ -695,6 +916,217 @@ World.test("without the game's class grouping, the opponents are the starter's o
 	same(#cars, 2, "two cars")
 	same(cars[1].car.JBeam, "pickup", "Ann's own model")
 	same(cars[2].car.JBeam, "pickup", "both")
+end)
+
+--== the race road in a race ======================================================
+
+-- A road map for route r: a node g at its grid and cp1, cp2, ... at its checkpoints, each
+-- linked to the next (a circuit's last back to its first). With detour, a wall closes the
+-- direct road from checkpoint 1 to 2 and the race road goes round by d1 and d2, 300 m to
+-- the side. Ann's game gets the wall too.
+local function raceRoadMap(world, ann, r, detour)
+	local nodes = {g = {pos = copy(r.grid.pos), links = {}}}
+	for i, checkpoint in ipairs(r.checkpoints) do nodes["cp" .. i] = {pos = copy(checkpoint.pos), links = {}} end
+	local function link(a, b) nodes[a].links[b] = {} end
+	link("g", "cp1")
+	for i = 1, #r.checkpoints - 1 do link("cp" .. i, "cp" .. (i + 1)) end
+	if r.closed then link("cp" .. #r.checkpoints, "cp1") end
+	local walls = {}
+	if detour then
+		local a, b = r.checkpoints[1].pos, r.checkpoints[2].pos
+		local length = math.sqrt((b.x - a.x) ^ 2 + (b.y - a.y) ^ 2)
+		local side = {x = -(b.y - a.y) / length, y = (b.x - a.x) / length}
+		local mid = {x = (a.x + b.x) / 2, y = (a.y + b.y) / 2}
+		walls = {{mid.x - side.x * 100, mid.y - side.y * 100, mid.x + side.x * 100, mid.y + side.y * 100}}
+		nodes.cp1.links.cp2 = nil
+		nodes.d1 = {pos = {x = a.x + side.x * 300, y = a.y + side.y * 300, z = a.z}, links = {}}
+		nodes.d2 = {pos = {x = b.x + side.x * 300, y = b.y + side.y * 300, z = b.z}, links = {}}
+		link("cp1", "d1")
+		link("d1", "d2")
+		link("d2", "cp2")
+		-- The shortcut the game's own navigation would take.
+		nodes.cp1.links.cp2 = {}
+	end
+	world.roadNodes = nodes
+	world:as(ann, function()
+		for _, rt in ipairs(mileage_spotRoutes.routes) do
+			if rt.id == r.id then rt.walls = walls end
+		end
+	end)
+end
+
+local function driveCommand(car)
+	local drive = nil
+	for _, cmd in ipairs(car.commands) do
+		if cmd:find("ai.driveUsingPath", 1, true) then drive = cmd end
+	end
+	return drive
+end
+
+World.test("the racer's line follows the race road round a wall to the next checkpoint, one-way rules off", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local r = route("highway_race")
+	raceRoadMap(world, ann, r, true)
+	soloToGreen(world, ann)
+	expect(type(ann.route) == "table" and ann.route.x == nil, "the line is a list of points")
+	local ys = {}
+	for _, p in ipairs(ann.route) do ys[#ys + 1] = math.floor(p.x) .. "," .. math.floor(p.y) end
+	same(#ann.route, 2, "the grid to checkpoint 1")
+	expect(metres(ann.route[#ann.route], r.checkpoints[1].pos) < 0.01, "ending at checkpoint 1")
+	same(ann.routeOptions.dirMult, 1, "with the game's one-way penalty off")
+	driveTo(world, ann, r.checkpoints[1].pos, 40)
+	same(#ann.route, 4, "then the road round the wall: checkpoint 1, d1, d2 and checkpoint 2")
+	expect(metres(ann.route[2], r.checkpoints[1].pos) > 250, "by way of the detour, not straight across the wall")
+	expect(metres(ann.route[#ann.route], r.checkpoints[2].pos) < 0.01, "ending at checkpoint 2")
+end)
+
+World.test("the checkpoints show as markers on the road, the next red and the one after black, and go at the finish", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local r = route("highway_race")
+	raceRoadMap(world, ann, r, false)
+	soloToGreen(world, ann)
+	local markers = world.markers
+	same(#markers.setups, 1, "set up once at the green")
+	same(#markers.setups[1], 4, "a marker at each checkpoint")
+	same(markers.setups[1][1].name, "cp1", "named by their place")
+	same(markers.setups[1][1].radius, r.checkpoints[1].r, "of the checkpoint's size")
+	local modes = markers.modes[#markers.modes]
+	same(modes.cp1, "default", "the next checkpoint")
+	same(modes.cp2, "next", "and the one after")
+	driveTo(world, ann, r.checkpoints[1].pos, 40)
+	modes = markers.modes[#markers.modes]
+	same(modes.cp2 .. " " .. modes.cp3, "default next", "moved on after a pass")
+	driveTo(world, ann, r.checkpoints[2].pos, 40)
+	driveTo(world, ann, r.checkpoints[3].pos, 40)
+	modes = markers.modes[#markers.modes]
+	same(modes.cp4, "final", "the last checkpoint is the finish, in the game's own word for it")
+	same(modes.cp1, nil, "and the first is hidden again")
+	expect(markers.renders > 0, "drawn every frame")
+	same(markers.clears, 0, "still up")
+	driveTo(world, ann, r.checkpoints[4].pos, 40)
+	world:advance(1)
+	same(markers.clears, 1, "gone when the racer finishes")
+end)
+
+World.test("opponents drive every node of the race road in order, round the wall", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local r = route("highway_race")
+	raceRoadMap(world, ann, r, true)
+	withClass(ann)
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 1, {})
+	world:advance(6)
+	local drive = driveCommand(spawned(world, ann)[1].car)
+	expect(drive, "the opponent was sent racing")
+	expect(drive:find('{"g", "cp1", "d1", "d2", "cp2", "cp3", "cp4", "cp4+1", "cp4+2"}', 1, true),
+		"every road node, the detour included, and on past the finish: " .. tostring(drive))
+end)
+
+World.test("on a circuit the opponents' path starts at checkpoint 1 and ends on it, so the laps repeat", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local r = route("city_race_1")
+	raceRoadMap(world, ann, r, false)
+	withClass(ann)
+	atStart(ann, "city_race_1")
+	request(world, ann, "city_race_1", 1, {})
+	world:advance(6)
+	local drive = driveCommand(spawned(world, ann)[1].car)
+	expect(drive:find('wpTargetList = {"cp1", "cp2", "cp3"', 1, true), "from checkpoint 1: " .. tostring(drive))
+	expect(drive:find('"cp12", "cp13", "cp1"}', 1, true), "round the finish and back to checkpoint 1")
+	expect(drive:find("noOfLaps = 2", 1, true), "both laps")
+end)
+
+World.test("a route whose race road fails the check keeps the game's own navigation and says so", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local r = route("highway_race")
+	-- The checkpoints are on the map but no road links them.
+	roadsAt(world, r)
+	local lines = {}
+	ann.globals.log = function(level, tag, text) lines[#lines + 1] = level .. " " .. tag .. " " .. text end
+	soloToGreen(world, ann)
+	expect(ann.route and ann.route.x ~= nil and metres(ann.route, r.checkpoints[1].pos) < 0.01,
+		"the next checkpoint alone, as before")
+	same(countLines(lines, "highway_race: no race road that passes the check"), 1, "logged once")
+end)
+
+--== traffic during the race =======================================================
+
+-- p's game has road traffic cars (police of them police) and parked cars, all active.
+local function withTraffic(world, p, road, police, parked)
+	p.amounts = {road = road, parked = parked, roadCars = road, parkedCars = parked}
+	local ids = {}
+	for i = 1, police do
+		local t = world:giveTraffic(p, {x = 5000 + i * 10, y = 5000})
+		t.entry.roleName = "police"
+		table.insert(ids, t.car.id)
+	end
+	p.amountsSet = {}
+	return ids
+end
+
+World.test("at the green each racer's game halves its traffic and parked cars, keeping its police on the road", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local bob = world:join("Bob", 1000, 1)
+	local police = withTraffic(world, ann, 9, 2, 6)
+	withTraffic(world, bob, 8, 0, 5)
+	withClass(ann)
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 1, {"Bob"})
+	local invite = last(world, bob, "invite")
+	world:as(bob, function() mileage_spotRace.join(invite.id) end)
+	world:pump()
+	world:advance(3)
+	same(#ann.amountsSet + #bob.amountsSet, 0, "nothing changes before the green")
+	world:advance(4)
+	same(table.concat(ann.amountsSet, ", "), "out " .. police[1] .. ", out " .. police[2] .. ", road 3, parked 3",
+		"the starter's police out of the pool, then 5 of 9 on the road with them, 3 of 6 parked")
+	same(table.concat(bob.amountsSet, ", "), "road 4, parked 3", "a joined player's game too: 4 of 8, 3 of 5")
+	world:advance(5)
+	same(#ann.amountsSet, 4, "once a race")
+	world:as(ann, function() mileage_spotRace.giveUp() end)
+	world:as(bob, function() mileage_spotRace.giveUp() end)
+	world:pump()
+	same(table.concat(bob.amountsSet, ", "), "road 4, parked 3, road 8, parked 5",
+		"a racer whose own race is over gets its traffic back at once")
+	same(#ann.amountsSet, 4, "the starter's opponents still race, so its traffic stays thin")
+	-- Its opponent has no road to drive here, so it stands and is out as stuck after 15 s.
+	world:advance(16)
+	same(#ann.amountsSet, 8, "back once its last opponent is out too")
+	world:advance(70)
+	expect(last(world, ann, "result"), "the race is over")
+	same(table.concat(ann.amountsSet, ", "), "out " .. police[1] .. ", out " .. police[2] .. ", road 3, parked 3, in " ..
+		police[1] .. " active, in " .. police[2] .. " active, road 9, parked 6",
+		"at the result the police go back into the pool, then the amounts")
+end)
+
+World.test("every ending puts the traffic back: a finish, leaving the route and leaving the server", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	withTraffic(world, ann, 6, 0, 4)
+	local r = route("highway_race")
+	soloToGreen(world, ann)
+	same(table.concat(ann.amountsSet, ", "), "road 3, parked 2", "thinned at the green")
+	driveRoute(world, ann, r, 40)
+	world:advance(1)
+	same(table.concat(ann.amountsSet, ", "), "road 3, parked 2, road 6, parked 4", "back at the finish")
+	ann.amountsSet = {}
+	soloToGreen(world, ann)
+	local g = r.grid.pos
+	driveTo(world, ann, {x = g.x - r.grid.dir.y * 1500, y = g.y + r.grid.dir.x * 1500, z = g.z}, 80)
+	world:advance(11)
+	same(table.concat(ann.amountsSet, ", "), "road 3, parked 2, road 6, parked 4", "back on leaving the route")
+	ann.amountsSet = {}
+	soloToGreen(world, ann)
+	world:hook(ann, "onBeamMPServerLeave")
+	same(table.concat(ann.amountsSet, ", "), "road 3, parked 2, road 6, parked 4", "back on leaving the server")
+end)
+
+World.test("a game without the traffic functions races as before", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	ann.globals.gameplay_traffic = false
+	ann.globals.gameplay_parking = false
+	soloToGreen(world, ann)
+	world:as(ann, function() same(mileage_spotRace.inRace(), true, "racing") end)
+	same(ann.car.frozen, false, "released on green")
 end)
 
 --== the server and the opponents =================================================
@@ -943,7 +1375,7 @@ World.test("a minute after the first finish the result comes, with anyone still 
 	same(result.places[2].name, "Bob", "Bob listed")
 	same(result.places[2].seconds, nil, "without a time")
 	same(result.winner, "Ann", "Ann won")
-	same(result.withheld, "slow", "Bob never drove: no prize")
+	same(result.withheld, nil, "Bob never drove, which withholds nothing")
 	local board = world:dataFile("leaderboard.json")
 	same(board and board.wins and board.wins.Ann, nil, "no win against a player who never raced")
 end)
@@ -1000,15 +1432,15 @@ end)
 
 --== the prize ===================================================================
 
--- Ann races the highway race against one opponent driving at speed (0: held still), Ann at
--- 40 m/s; returns her result.
-local function raceOne(world, ann, speed)
+-- Ann races the highway race against one opponent (or opponents) driving at speed (0: held
+-- still), Ann at 40 m/s; returns her result.
+local function raceOne(world, ann, speed, opponents)
 	local r = route("highway_race")
 	roadsAt(world, r)
 	withClass(ann)
 	world.opponentSpeed = speed
 	atStart(ann, "highway_race")
-	request(world, ann, "highway_race", 1, {})
+	request(world, ann, "highway_race", opponents or 1, {})
 	world:advance(6)
 	driveRoute(world, ann, r, 40)
 	for _ = 1, 70 do
@@ -1039,6 +1471,86 @@ World.test("a player who beats a driving opponent is paid the owner's prize and 
 	same(world:printedMatching("Ann wins, $2000 prize"), 1, "the console says so")
 end)
 
+World.test("the prize grows by half for each racer past two: six racers pay three times the owner's prize", function(world)
+	world:setConfig("server", "spotRacePrize", "2000")
+	local ann = world:join("Ann", 1000, 0)
+	local result = raceOne(world, ann, 30, 5)
+	same(#result.places, 6, "Ann and five opponents")
+	same(result.winner, "Ann", "Ann won")
+	same(result.prize, 6000, "2000 x (1 + 0.5 x 4)")
+	world:advance(2)
+	same(ann.money, 7000, "paid into Ann's career")
+end)
+
+World.test("every racer who started counts towards the prize, one out after the green too, one who pulled out before not", function(world)
+	world:setConfig("server", "spotRacePrize", "2000")
+	local ann = world:join("Ann", 1000, 0)
+	local r = route("highway_race")
+	roadsAt(world, r)
+	withClass(ann)
+	world.opponentSpeed = 30
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 2, {})
+	world:advance(6)
+	spawned(world, ann)[2].gone = true
+	driveRoute(world, ann, r, 40)
+	for _ = 1, 70 do
+		if last(world, ann, "result") then break end
+		world:advance(1)
+	end
+	local result = last(world, ann, "result")
+	same(result.winner, "Ann", "Ann won")
+	same(result.prize, 3000, "three racers started, one crashed out: 1.5 times")
+	world:advance(2)
+	-- Bob joins, then pulls out while Cat's invite is open; Cat declines: Ann and one
+	-- opponent remain.
+	local bob = world:join("Bob", 1000, 1)
+	local cat = world:join("Cat", 1000, 2)
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 1, {"Bob", "Cat"})
+	local invite = last(world, bob, "invite")
+	world:as(bob, function() mileage_spotRace.join(invite.id) end)
+	world:pump()
+	world:as(bob, function() mileage_spotRace.decline(invite.id) end)
+	world:pump()
+	world:as(cat, function() mileage_spotRace.decline(invite.id) end)
+	world:pump()
+	same(#last(world, ann, "countdown").racers, 2, "Ann and the opponent on the grid")
+	world:advance(6)
+	driveRoute(world, ann, r, 40)
+	for _ = 1, 70 do
+		if last(world, ann, "result").id == invite.id then break end
+		world:advance(1)
+	end
+	result = last(world, ann, "result")
+	same(result.id, invite.id, "the second race's result")
+	same(result.withheld, "wait", "inside Ann's wait")
+	same(result.prizeOffered, 2000, "two racers: the owner's prize")
+end)
+
+World.test("the invite carries the prize for the grid as set, every invited player counted as joining", function(world)
+	world:setConfig("server", "spotRacePrize", "2000")
+	local ann = world:join("Ann", 1000, 0)
+	local bob = world:join("Bob", 1000, 1)
+	world:join("Cat", 1000, 2)
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 2, {"Bob", "Cat"})
+	same(last(world, bob, "invite").prize, 5000, "Ann, two opponents, Bob and Cat: 2.5 times")
+	same(last(world, bob, "status").prize, 2000, "the status keeps the owner's prize for the set-up card")
+end)
+
+World.test("the winner is paid when the only rival stood still; the leaderboard win still needs a rival at race pace", function(world)
+	world:setConfig("server", "spotRacePrize", "2000")
+	local ann = world:join("Ann", 1000, 0)
+	local result = raceOne(world, ann, 0)
+	same(result.winner, "Ann", "Ann was first")
+	same(result.withheld, nil, "nothing withheld")
+	same(result.prize, 2000, "the owner's prize")
+	world:advance(2)
+	same(ann.money, 3000, "paid")
+	same(wins(world, "Ann"), 0, "but no race win against a car that never drove")
+end)
+
 World.test("no prize while the owner has set none; the win still counts", function(world)
 	local ann = world:join("Ann", 1000, 0)
 	local result = raceOne(world, ann, 30)
@@ -1050,33 +1562,28 @@ World.test("no prize while the owner has set none; the win still counts", functi
 	same(wins(world, "Ann"), 1, "a race win")
 end)
 
-World.test("opponents held still, racing alone, or a second win inside the wait pay no prize", function(world)
+World.test("racing alone or a second win inside the wait pays no prize", function(world)
 	world:setConfig("server", "spotRacePrize", "2000")
 	world:setConfig("server", "spotRacePrizeCooldownMinutes", "30")
 	local ann = world:join("Ann", 1000, 0)
-	local result = raceOne(world, ann, 0)
-	same(result.winner, "Ann", "Ann was first")
-	same(result.withheld, "slow", "the opponent never drove")
-	same(result.prize, 0, "no prize")
-	same(wins(world, "Ann"), 0, "and no win")
-	world:advance(2)
 	atStart(ann, "highway_race")
 	request(world, ann, "highway_race", 0, {})
 	world:advance(6)
 	driveRoute(world, ann, route("highway_race"), 40)
 	world:advance(1)
-	result = last(world, ann, "result")
+	local result = last(world, ann, "result")
 	same(result.withheld, "alone", "nobody else raced")
 	same(result.prize, 0, "no prize")
+	same(wins(world, "Ann"), 0, "and no win")
 	world:advance(2)
 	result = raceOne(world, ann, 30)
-	same(result.prize, 2000, "a real race pays")
+	same(result.prize, 2000, "a race pays")
 	world:advance(2)
 	result = raceOne(world, ann, 30)
 	same(result.withheld, "wait", "inside the 30 minute wait")
 	same(result.prize, 0, "no prize")
 	expect(result.againIn > 0, "the card says when")
-	same(wins(world, "Ann"), 2, "both real races count as wins")
+	same(wins(world, "Ann"), 2, "both races count as wins")
 	world:advance(2)
 	same(ann.money, 3000, "paid once")
 	same(last(world, ann, "status").againIn > 0, true, "the set-up card knows the wait")
@@ -1224,17 +1731,18 @@ World.test("the Oracle race: two opponents and an invited friend, all four place
 	expect(names.Bob and names["Ibishu Pessima"] and names["ETK 800 Series"], "Bob and both opponents placed")
 	same(result.winner, "Ann", "Ann won")
 	same(result.ranked, true, "the server followed every car")
-	same(last(world, ann, "result").prize, 2000, "Ann is paid")
-	same(result.prize, 2000, "Bob's card says what the winner was paid")
+	same(last(world, ann, "result").prize, 4000, "Ann is paid for four racers: twice the owner's prize")
+	same(result.prize, 4000, "Bob's card says what the winner was paid")
 	world:advance(2)
-	same(ann.money, 3000, "paid once")
+	same(ann.money, 5000, "paid once")
 	same(bob.money, 1000, "nothing for Bob")
 	local board = world:dataFile("leaderboard.json")
 	same(board.spots.rally_track.Ann.time, result.places[1].seconds, "Ann's time kept under the spot")
 	expect(board.spots.rally_track.Bob, "Bob's time kept too")
 	same(board.wins.Ann, 1, "a race win")
 	for _, s in ipairs(spawned(world, ann)) do same(s.car.deleted, true, "the opponents are gone") end
-	-- Again, with the opponents held still and Bob not driving: Ann is first but paid nothing.
+	-- Again, with the opponents held still: Ann is first, inside her wait, and a grid that
+	-- never drove wins her nothing on the leaderboard.
 	world.opponentSpeed = 0
 	atStart(ann, "rally_track")
 	world:as(ann, function() mileage_spotRace.openSetup("rally_track") end)
@@ -1245,10 +1753,11 @@ World.test("the Oracle race: two opponents and an invited friend, all four place
 	world:advance(2)
 	local again = last(world, ann, "result")
 	same(again.winner, "Ann", "Ann first again")
-	same(again.withheld, "slow", "nobody else drove")
+	same(again.withheld, "wait", "inside the wait")
 	same(again.prize, 0, "no prize")
 	world:advance(2)
-	same(ann.money, 3000, "still paid once")
+	same(ann.money, 5000, "still paid once")
+	same(world:dataFile("leaderboard.json").wins.Ann, 1, "no second win")
 end)
 
 World.test("leaving the server ends the race here and releases the car", function(world)
@@ -1539,4 +2048,181 @@ World.test("a closing for another race while racing leaves this race and its car
 	world:pump()
 	world:as(ann, function() same(mileage_spotRace.inRace(), true, "still racing") end)
 	same(lastCard(world, ann, "closed"), nil, "no closed card for a race this game is not in")
+end)
+
+--== further cases: rounding, cars that never started, laps and length, police =========
+
+World.test("the grown prize is rounded down: three racers on a $1,001 prize pay $1,501", function(world)
+	world:setConfig("server", "spotRacePrize", "1001")
+	local ann = world:join("Ann", 1000, 0)
+	local result = raceOne(world, ann, 30, 2)
+	same(#result.places, 3, "Ann and two opponents")
+	same(result.winner, "Ann", "Ann won")
+	same(result.prize, 1501, "1001 x 1.5 = 1501.5, rounded down")
+	world:advance(2)
+	same(ann.money, 2501, "a whole number of dollars paid")
+end)
+
+World.test("opponents that never started do not count towards the prize: Ann against cars that did not spawn races alone", function(world)
+	world:setConfig("server", "spotRacePrize", "2000")
+	local ann = world:join("Ann", 1000, 0)
+	local r = route("highway_race")
+	roadsAt(world, r)
+	withClass(ann)
+	world.spawnRefused = true
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 2, {})
+	world:advance(6)
+	driveRoute(world, ann, r, 40)
+	for _ = 1, 70 do
+		if last(world, ann, "result") then break end
+		world:advance(1)
+	end
+	local result = last(world, ann, "result")
+	expect(result, "the race ended")
+	same(result.winner, "Ann", "Ann first")
+	same(result.withheld, "alone", "two cars asked for, none started: nobody else raced")
+	same(result.prize, 0, "no prize")
+end)
+
+World.test("the race road check of a two-lap route counts every checkpoint of both laps and the way back", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	walledMap(world)
+	logged(ann)
+	local twoLaps = {}
+	for k, v in pairs(WALLED) do twoLaps[k] = v end
+	twoLaps.id, twoLaps.laps, twoLaps.length = "two_laps", 2, 1000
+	withRoutes(world, ann, {twoLaps})
+	local road = world:as(ann, function() return mileage_raceRoad.road(twoLaps) end)
+	expect(road.closing, "a road from the finish back to checkpoint 1")
+	same(table.concat(road.closing.nodes, " "), "c r2 r1 b", "the way back keeps off the walled side street too")
+	local result = world:as(ann, function() return mileage_raceRoad.check() end)
+	same(result.passed, 1, "the route passes")
+	same(countLines(ann.logLines, "I race road two_laps: passes: 3 legs on roads that cross no wall, 4 checkpoints in order"),
+		1, "two legs and the way back, both laps' checkpoints")
+end)
+
+World.test("the race road check fails a route whose road is far longer than the route", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	walledMap(world)
+	logged(ann)
+	local short = {}
+	for k, v in pairs(WALLED) do short[k] = v end
+	-- The road is 520 m; a route said to be 100 m long makes it 5.2 times the route.
+	short.id, short.length = "short", 100
+	withRoutes(world, ann, {short})
+	local result = world:as(ann, function() return mileage_raceRoad.check() end)
+	same(result.passed, 0, "it fails")
+	same(countLines(ann.logLines, "W race road short: FAILS: its 0.5 km is 5.20 x the route's 0.1 km"), 1,
+		"its length is out of reason")
+end)
+
+World.test("a game whose traffic is all police keeps every police car and sets no amount below zero", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local police = withTraffic(world, ann, 2, 2, 0)
+	soloToGreen(world, ann)
+	same(table.concat(ann.amountsSet, ", "), "out " .. police[1] .. ", out " .. police[2] .. ", road 0, parked 0",
+		"both police held out of the pool, half of 2 is 1, which the police already fill")
+end)
+
+--== the race road in a race: laps, endings and a reload ==========================
+
+World.test("on a circuit the racer's line after the finish of lap 1 is the road back to checkpoint 1, not the grid's", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local r = route("city_race_1")
+	raceRoadMap(world, ann, r, false)
+	soloToGreen(world, ann, "city_race_1")
+	local n = #r.checkpoints
+	expect(metres(ann.route[1], r.grid.pos) < 0.01, "at the green the line starts at the grid")
+	for i = 1, n do driveTo(world, ann, r.checkpoints[i].pos, 40) end
+	same(#ann.route, 2, "lap 2: the closing road, the finish to checkpoint 1")
+	expect(metres(ann.route[1], r.checkpoints[n].pos) < 0.01, "from the finish")
+	expect(metres(ann.route[2], r.checkpoints[1].pos) < 0.01, "to checkpoint 1")
+	driveTo(world, ann, r.checkpoints[1].pos, 40)
+	expect(metres(ann.route[1], r.checkpoints[1].pos) < 0.01 and metres(ann.route[2], r.checkpoints[2].pos) < 0.01,
+		"then checkpoint 1 to 2 again")
+end)
+
+World.test("no checkpoint markers before the green: a race called off in its countdown never sets any up", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local r = route("highway_race")
+	raceRoadMap(world, ann, r, false)
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 0, {})
+	world:advance(2)
+	same(#world.markers.setups, 0, "none in the countdown")
+	world:as(ann, function() mileage_spotRace.giveUp() end)
+	world:pump()
+	world:advance(6)
+	same(#world.markers.setups, 0, "none after the call-off either")
+	same(world.markers.renders, 0, "nothing drawn")
+end)
+
+World.test("every ending takes the checkpoint markers and the line off: give up, leaving the route, leaving the server", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local r = route("highway_race")
+	raceRoadMap(world, ann, r, false)
+	local markers = world.markers
+	soloToGreen(world, ann)
+	expect(type(ann.route) == "table", "the line is up")
+	world:as(ann, function() mileage_spotRace.giveUp() end)
+	world:advance(1)
+	same(markers.clears, 1, "gave up: the markers go")
+	same(ann.route, nil, "and the line")
+	world:advance(70)
+	soloToGreen(world, ann)
+	expect(type(ann.route) == "table", "a new race, a new line")
+	local g = r.grid.pos
+	driveTo(world, ann, {x = g.x - r.grid.dir.y * 1500, y = g.y + r.grid.dir.x * 1500, z = g.z}, 80)
+	world:advance(11)
+	same(markers.clears, 2, "left the route: the markers go")
+	same(ann.route, nil, "and the line")
+	world:advance(70)
+	soloToGreen(world, ann)
+	world:hook(ann, "onBeamMPServerLeave")
+	same(markers.clears, 3, "left the server: the markers go")
+	same(ann.route, nil, "and the line")
+end)
+
+World.test("a reload of the race extension mid-race puts the traffic back and takes the markers off", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local r = route("highway_race")
+	raceRoadMap(world, ann, r, false)
+	withTraffic(world, ann, 6, 0, 4)
+	soloToGreen(world, ann)
+	same(table.concat(ann.amountsSet, ", "), "road 3, parked 2", "thinned at the green")
+	world:as(ann, function() mileage_spotRace.onExtensionUnloaded() end)
+	same(table.concat(ann.amountsSet, ", "), "road 3, parked 2, road 6, parked 4", "back at the reload")
+	same(world.markers.clears, 1, "the markers are gone")
+	same(ann.route, nil, "and the line")
+end)
+
+World.test("a wall on the road's line but clear of it does not close the road, along x or along y", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	logged(ann)
+	world.roadNodes = {
+		g = {pos = {x = -20, y = 0, z = 0}, links = {b = {}}},
+		b = {pos = {x = 100, y = 0, z = 0}, links = {}},
+	}
+	local along = {id = "along_x", name = "Along x", closed = false, laps = 1, length = 120,
+		grid = {pos = {x = -20, y = 0, z = 0}, dir = {x = 1, y = 0, z = 0}},
+		checkpoints = {{pos = {x = 100, y = 0, z = 0}, r = 8}}, walls = {{130, 0, 160, 0}}}
+	withRoutes(world, ann, {along})
+	local result = world:as(ann, function() return mileage_raceRoad.check() end)
+	same(result.passed, 1, "a wall beyond the end of the road, on its line, is not crossed")
+	along.walls = {{100, 0, 130, 0}}
+	world:hook(ann, "onBeamMPServerLeave")
+	result = world:as(ann, function() return mileage_raceRoad.check() end)
+	same(result.passed, 0, "a wall that touches the road's end on its line closes it")
+	world.roadNodes = {
+		g = {pos = {x = 0, y = -20, z = 0}, links = {b = {}}},
+		b = {pos = {x = 0, y = 100, z = 0}, links = {}},
+	}
+	local alongY = {id = "along_y", name = "Along y", closed = false, laps = 1, length = 120,
+		grid = {pos = {x = 0, y = -20, z = 0}, dir = {x = 0, y = 1, z = 0}},
+		checkpoints = {{pos = {x = 0, y = 100, z = 0}, r = 8}}, walls = {{0, -60, 0, -30}}}
+	withRoutes(world, ann, {alongY})
+	world:hook(ann, "onBeamMPServerLeave")
+	result = world:as(ann, function() return mileage_raceRoad.check() end)
+	same(result.passed, 1, "along y too: a wall behind the grid on the road's line is not crossed")
 end)

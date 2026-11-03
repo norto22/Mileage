@@ -282,6 +282,69 @@ function M.setNavigationTarget(pos)
 	return ok
 end
 
+-- Shows the line along points (a list of {x, y, z}, in order) as the route on the big map
+-- and the road, with the game's one-way penalty off, so it follows a closed course the
+-- way it is raced. Returns true when it ran.
+function M.setNavigationPath(points)
+	local fn = pickOrWarn(core_groundMarkers, "core_groundMarkers", "setPath", "the race route is not shown on the map")
+	if not fn or type(points) ~= "table" or #points == 0 then return false end
+	local list = {}
+	for i, p in ipairs(points) do list[i] = vec3(p.x, p.y, p.z) end
+	local ok, err = pcall(fn, list, {dirMult = 1})
+	if not ok then log("E", "mileage.compat", "setPath failed: " .. tostring(err)) end
+	return ok
+end
+
+-- Takes the route off the big map and the road.
+function M.clearNavigation()
+	local fn = pick(core_groundMarkers, "setPath")
+	if fn then pcall(fn, nil) end
+end
+
+-- The game's race checkpoint markers (scenario/race_marker), as freeroam's hotlapping
+-- uses them: setRaceMarkers puts one at each of wps ({name, pos, r}), setRaceMarkerModes
+-- gives each a mode by name ("default", "next", "lap", "final"; the rest are hidden),
+-- renderRaceMarkers draws them each frame and clearRaceMarkers removes them. Each does
+-- nothing, returning false, where the game lacks the module.
+local function raceMarkerModule()
+	local ok, module = pcall(require, "scenario/race_marker")
+	if ok and type(module) == "table" then return module end
+	return nil
+end
+
+function M.setRaceMarkers(wps)
+	local markers = raceMarkerModule()
+	if not markers or type(markers.setupMarkers) ~= "function" then return false end
+	local list = {}
+	for i, wp in ipairs(wps) do
+		list[i] = {name = wp.name, pos = vec3(wp.pos.x, wp.pos.y, wp.pos.z), radius = wp.r}
+	end
+	local ok, err = pcall(function()
+		if type(markers.init) == "function" then markers.init() end
+		markers.setupMarkers(list)
+	end)
+	if not ok then log("E", "mileage.compat", "race markers failed: " .. tostring(err)) end
+	return ok
+end
+
+function M.setRaceMarkerModes(modes)
+	local markers = raceMarkerModule()
+	if not markers or type(markers.setModes) ~= "function" then return false end
+	return (pcall(markers.setModes, modes))
+end
+
+function M.renderRaceMarkers(dt)
+	local markers = raceMarkerModule()
+	if not markers or type(markers.render) ~= "function" then return false end
+	return (pcall(markers.render, dt, dt))
+end
+
+function M.clearRaceMarkers()
+	local markers = raceMarkerModule()
+	if not markers or type(markers.onClientEndMission) ~= "function" then return false end
+	return (pcall(markers.onClientEndMission))
+end
+
 -- Moves veh to pos facing rot, clear of anything in the way. Returns true when it ran.
 function M.safeTeleport(veh, pos, rot)
 	local fn = pickOrWarn(spawn, "spawn", "safeTeleport", "a race cannot move a car to the start")
@@ -375,6 +438,86 @@ function M.getRoadBeyond(node, dir, metres)
 	return {}
 end
 
+--== traffic during a race spot race =========================================
+-- A race spot race thins this game's own traffic and parked cars with the game's own
+-- active amounts, which put the rest in its vehicle pool, hidden; police cars are taken
+-- out of that pool for the race so none is hidden. Each returns nil (or does nothing) when
+-- the game lacks it, and the race runs with traffic as it is.
+
+local THIN_CONSEQUENCE = "traffic is not thinned during a race spot race"
+
+-- fn(...)'s first result, or nil when fn is missing or fails.
+local function call(fn, ...)
+	if not fn then return nil end
+	local ok, result = pcall(fn, ...)
+	return ok and result or nil
+end
+
+-- {road, parked}: the active amounts as set (nil where the game cannot tell), and
+-- activeRoad, activeParked: how many of each are active now. nil when neither is known.
+function M.getTrafficAmounts()
+	local roadVars = pickOrWarn(gameplay_traffic, "gameplay_traffic", "getTrafficVars", THIN_CONSEQUENCE)
+	local roadCount = pickOrWarn(gameplay_traffic, "gameplay_traffic", "getNumOfTraffic", THIN_CONSEQUENCE)
+	local parkedVars = pickOrWarn(gameplay_parking, "gameplay_parking", "getParkingVars", THIN_CONSEQUENCE)
+	local parkedCount = pickOrWarn(gameplay_parking, "gameplay_parking", "getParkedCarsAmount", THIN_CONSEQUENCE)
+	local amounts = {}
+	local vars, n = call(roadVars), call(roadCount, true)
+	if type(vars) == "table" and tonumber(vars.activeAmount) and tonumber(n) then
+		amounts.road, amounts.activeRoad = tonumber(vars.activeAmount), tonumber(n)
+	end
+	vars, n = call(parkedVars), call(parkedCount, true)
+	if type(vars) == "table" and tonumber(vars.activeAmount) and tonumber(n) then
+		amounts.parked, amounts.activeParked = tonumber(vars.activeAmount), tonumber(n)
+	end
+	if not amounts.road and not amounts.parked then return nil end
+	return amounts
+end
+
+-- Sets the active traffic and parked amounts; a nil one is left as it is.
+function M.setTrafficAmounts(road, parked)
+	local setRoad = pickOrWarn(gameplay_traffic, "gameplay_traffic", "setActiveAmount", THIN_CONSEQUENCE)
+	local setParked = pickOrWarn(gameplay_parking, "gameplay_parking", "setActiveAmount", THIN_CONSEQUENCE)
+	for _, set in ipairs({{setRoad, road}, {setParked, parked}}) do
+		if set[1] and set[2] then
+			local ok, err = pcall(set[1], set[2])
+			if not ok then log("E", "mileage.compat", "setActiveAmount failed: " .. tostring(err)) end
+		end
+	end
+end
+
+-- The game vehicle ids of this game's police traffic cars.
+function M.getPoliceCars()
+	local data = M.getTrafficData()
+	local ids = {}
+	for id, veh in pairs(type(data) == "table" and data or {}) do
+		local role = type(veh) == "table" and (veh.roleName or (type(veh.role) == "table" and veh.role.name))
+		if role == "police" then table.insert(ids, id) end
+	end
+	table.sort(ids)
+	return ids
+end
+
+-- Takes the car with game vehicle id out of the vehicle pool it is active in, so a lower
+-- active amount never hides it. Returns the pool to put it back in, or nil.
+function M.takeOutOfPool(id)
+	local fn = pick(core_vehicleActivePooling, "getPoolOfVeh")
+	if not fn then return nil end
+	local ok, pool, active = pcall(fn, id)
+	if not ok or type(pool) ~= "table" or not active then return nil end
+	local removed, err = pcall(function() return pool:removeVeh(id) end)
+	if not removed then
+		log("E", "mileage.compat", "a police car could not be held out of the traffic pool: " .. tostring(err))
+		return nil
+	end
+	return err and pool or nil
+end
+
+-- Puts a car taken out with takeOutOfPool back, active.
+function M.putBackInPool(pool, id)
+	local ok, err = pcall(function() return pool:insertVeh(id, true) end)
+	if not ok then log("E", "mileage.compat", "a police car could not go back into the traffic pool: " .. tostring(err)) end
+end
+
 -- The model's name as the game shows it ("Ibishu Pessima"), or the model key.
 function M.getModelName(jbeam)
 	local fn = pick(core_vehicles, "getModel")
@@ -387,6 +530,46 @@ function M.getModelName(jbeam)
 		end
 	end
 	return type(jbeam) == "string" and jbeam or nil
+end
+
+-- {class = name, index = performance index} from one of the game's class answers.
+local function classOf(data)
+	if type(data) ~= "table" then return nil end
+	local name = type(data.class) == "table" and data.class.name or data.class
+	if type(name) ~= "string" then return nil end
+	return {class = name, index = tonumber(data.performanceIndex)}
+end
+
+-- The performance class of the car with game vehicle id vid as it is now, upgrades
+-- counted, from the career's own garage tests of that car: {class, index, tested}.
+-- tested is "current" (its latest test still holds), "changed" (it changed since, so this
+-- is its newest earlier result), "never" (a career car never tested: the class it was
+-- bought as) or "stock" (not a career car: the class it was bought as). nil when the game
+-- cannot tell.
+function M.carPerformanceClass(vid)
+	local inventory = career_modules_inventory
+	local invId = call(pick(inventory, "getInventoryIdFromVehicleId"), vid)
+	if invId then
+		local current = classOf(call(pick(career_modules_vehiclePerformance, "getVehicleClass"), invId))
+		if current then
+			current.tested = "current"
+			return current
+		end
+		local vehicles = call((pick(inventory, "getVehicles")))
+		local vehicle = type(vehicles) == "table" and vehicles[invId]
+		local history = type(vehicle) == "table" and vehicle.performanceHistory
+		local fromData = pick(gameplay_vehiclePerformance, "getClassFromData")
+		if type(history) == "table" and history[1] then
+			local earlier = classOf(call(fromData, history[1]))
+			if earlier then
+				earlier.tested = "changed"
+				return earlier
+			end
+		end
+	end
+	local stock = classOf(call(pick(gameplay_vehiclePerformance, "getClassFromVehId"), vid))
+	if stock then stock.tested = invId and "never" or "stock" end
+	return stock
 end
 
 -- The control bound to a key action ("j"), or nil when none is.

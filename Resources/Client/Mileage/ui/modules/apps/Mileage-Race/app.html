@@ -1,0 +1,18 @@
+<div ng-controller="MileageRace" class="mileageRace">
+	<link rel="stylesheet" type="text/css" href="/ui/modules/apps/Mileage-Race/app.css">
+
+	<div class="mr-card" ng-if="live">
+		<div class="mr-top" ng-class="{'mr-counting': live.view.countdown}">
+			<span class="mr-big" ng-bind="live.view.big"></span>
+			<span class="mr-label" ng-if="live.view.label" ng-bind="live.view.label"></span>
+			<span class="mr-time" ng-if="live.view.time" ng-bind="live.view.time"></span>
+		</div>
+		<div class="mr-bottom">
+			<span class="mr-line">
+				<span class="mr-part" ng-repeat="part in live.view.line track by $index" ng-bind="part"></span>
+			</span>
+			<button class="mr-give" ng-if="live.view.giveUp" ng-click="giveUp()" ng-bind="live.view.giveUp"></button>
+		</div>
+		<div class="mr-warn" ng-if="live.view.warn" ng-bind="live.view.warn"></div>
+	</div>
+</div>
