@@ -39,11 +39,52 @@ local function equal(a, b)
 	return true
 end
 
+-- The route without the walls, which only the game's copy carries.
+local function withoutWalls(routes)
+	local list = {}
+	for i, route in ipairs(routes) do
+		local copy = {}
+		for k, v in pairs(route) do if k ~= "walls" then copy[k] = v end end
+		list[i] = copy
+	end
+	return list
+end
+
 test("the server and the game list the same twelve routes", function()
 	local server, client = serverRoutes(), clientRoutes()
 	same(#server, 12, "server routes")
 	same(#client, 12, "game routes")
-	expect(equal(server, client), "the server's and the game's route lists differ")
+	expect(equal(server, withoutWalls(client)), "the server's and the game's route lists differ")
+end)
+
+test("the game's routes carry the walls of their courses' barriers; the server's carry none", function()
+	local routes = byId(clientRoutes())
+	-- The rally track and the highway endurance run have no barriers in their prefabs.
+	for id, route in pairs(routes) do
+		if id == "rally_track" or id == "highway_endurance" then
+			same(route.walls and #route.walls or 0, 0, id .. " has no walls")
+		else
+			expect(type(route.walls) == "table" and #route.walls > 0, id .. " has walls")
+			for i, wall in ipairs(route.walls) do
+				same(#wall, 4, id .. " wall " .. i .. " is x1, y1, x2, y2")
+				local length = math.sqrt((wall[3] - wall[1]) ^ 2 + (wall[4] - wall[2]) ^ 2)
+				-- A join is at most 4.5 m; the longest piece is a caution tape barricade's, 5.9 m.
+				expect(length > 0 and length <= 6, id .. " wall " .. i .. " joins near neighbours only")
+			end
+		end
+	end
+	-- City Race 1: its 188 concrete barriers, caution tape and the forward prefab's pole fences.
+	expect(#routes.city_race_1.walls >= 188, "a wall piece for every barrier")
+	-- A barrier of City Race 1 (city_race_1.prefab, its first TSStatic) lies on a wall.
+	local onWall = false
+	for _, wall in ipairs(routes.city_race_1.walls) do
+		local mx, my = (wall[1] + wall[3]) / 2, (wall[2] + wall[4]) / 2
+		if math.abs(mx + 350.408) < 0.2 and math.abs(my - 307.84) < 0.2 then onWall = true end
+	end
+	expect(onWall, "the barrier at -350.4, 307.8 is the middle of a wall piece")
+	for _, route in ipairs(serverRoutes()) do
+		same(route.walls, nil, route.id .. ": the server's copy has no walls")
+	end
 end)
 
 test("every route but the drag strip is a route, in ten spots", function()

@@ -503,6 +503,114 @@ World.test("a car off the route for 10 seconds is out, and its race ends", funct
 	same(result.places[1].out, "left", "listed as left the route")
 end)
 
+--== the race road ================================================================
+
+-- A test route on a small road map: from the grid (g) north to checkpoint 1 (b), then
+-- east to checkpoint 2 (c). The race road goes round by r1 and r2; the side street b-s-c
+-- is shorter, but a wall closes it. Links are given one way only, as a one-way road.
+local WALLED = {id = "walled", name = "Walled", closed = false, laps = 1, length = 320,
+	grid = {pos = {x = 0, y = -20, z = 0}, dir = {x = 0, y = 1, z = 0}},
+	checkpoints = {{pos = {x = 0, y = 100, z = 0}, r = 8}, {pos = {x = 200, y = 100, z = 0}, r = 8}},
+	walls = {{50, 90, 50, 110}}}
+
+local function walledMap(world)
+	local function node(x, y, links)
+		local l = {}
+		for _, name in ipairs(links or {}) do l[name] = {oneWay = true} end
+		return {pos = {x = x, y = y, z = 0}, links = l}
+	end
+	world.roadNodes = {
+		g = node(0, -20, {"a"}), a = node(0, 0, {"b"}), b = node(0, 100, {"r1", "s"}),
+		r1 = node(0, 200, {"r2"}), r2 = node(200, 200, {"c"}), s = node(100, 100, {"c"}), c = node(200, 100),
+	}
+end
+
+local function withRoutes(world, p, list)
+	world:as(p, function() mileage_spotRoutes.routes = list end)
+end
+
+local function logged(p)
+	p.logLines = {}
+	p.globals.log = function(level, tag, text)
+		if tag == "mileage.raceRoad" then table.insert(p.logLines, level .. " " .. text) end
+	end
+end
+
+World.test("the race road keeps off a side street a wall closes, one-way rules ignored", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	walledMap(world)
+	local road = world:as(ann, function() return mileage_raceRoad.road(WALLED) end)
+	expect(road, "a road")
+	same(table.concat(road.nodes, " "), "g a b r1 r2 c", "round by the race road, not the side street")
+	same(#road.legs, 2, "a leg to each checkpoint")
+	same(table.concat(road.legs[2].nodes, " "), "b r1 r2 c", "checkpoint 1 to 2 along the race road")
+	same(road.fallbacks, 0, "every leg crosses no wall")
+	same(road.points[4].y, 200, "the points follow the nodes")
+	WALLED.walls = {}
+	local open = world:as(ann, function() return mileage_raceRoad.road(WALLED) end)
+	same(open, road, "worked out once and kept")
+	world:hook(ann, "onBeamMPServerLeave")
+	open = world:as(ann, function() return mileage_raceRoad.road(WALLED) end)
+	same(table.concat(open.nodes, " "), "g a b s c", "without the wall, worked out again after leaving: the side street")
+	WALLED.walls = {{50, 90, 50, 110}}
+end)
+
+World.test("a leg no road reaches without crossing a wall takes the walls-ignored road and says so", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	walledMap(world)
+	logged(ann)
+	local closed = {}
+	for k, v in pairs(WALLED) do closed[k] = v end
+	closed.id = "closed_off"
+	closed.walls = {{50, 90, 50, 110}, {90, 190, 90, 210}}
+	local road = world:as(ann, function() return mileage_raceRoad.road(closed) end)
+	same(table.concat(road.legs[2].nodes, " "), "b s c", "the shortest road, walls ignored")
+	same(road.legs[2].fallback, true, "marked as such")
+	same(road.fallbacks, 1, "one leg")
+	same(countLines(ann.logLines, "closed_off: no road to checkpoint 2 crosses no wall"), 1, "logged")
+end)
+
+World.test("the race road check logs a line per route: passes, a fallback leg, a missed checkpoint", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	walledMap(world)
+	world.roadNodes.far = {pos = {x = 600, y = 600, z = 0}, links = {c = {}}}
+	logged(ann)
+	local closed, missed = {}, {}
+	for k, v in pairs(WALLED) do closed[k], missed[k] = v, v end
+	closed.id, closed.walls = "closed_off", {{50, 90, 50, 110}, {90, 190, 90, 210}}
+	missed.id = "missed"
+	missed.checkpoints = {WALLED.checkpoints[1], WALLED.checkpoints[2], {pos = {x = 400, y = 100, z = 0}, r = 8}}
+	missed.length = 520
+	-- A checkpoint on a road the map does not join to the others.
+	world.roadNodes.island = {pos = {x = -300, y = 100, z = 0}, links = {}}
+	local island = {}
+	for k, v in pairs(WALLED) do island[k] = v end
+	island.id = "island"
+	island.checkpoints = {WALLED.checkpoints[1], {pos = {x = -300, y = 100, z = 0}, r = 8}}
+	withRoutes(world, ann, {WALLED, closed, missed, island})
+	local result = world:as(ann, function() return mileage_raceRoad.check() end)
+	same(result.passed, 1, "one route passes")
+	same(result.total, 4, "of four")
+	same(countLines(ann.logLines, "W race road island: FAILS: no road reaches checkpoint 2"), 1,
+		"a checkpoint no road reaches fails it, said as such")
+	same(countLines(ann.logLines, "I race road walled: passes: 2 legs on roads that cross no wall, 2 checkpoints in order"),
+		1, "the walled route passes")
+	same(countLines(ann.logLines, "W race road closed_off: FAILS: the road to checkpoint 2 crosses a wall"), 1,
+		"a fallback leg fails the check")
+	same(countLines(ann.logLines, "W race road missed: FAILS: lap 1 misses checkpoint 3 (nearest"), 1,
+		"a checkpoint the road does not reach fails it")
+	same(countLines(ann.logLines, "W race road check: 1 of 4 routes pass"), 1, "and a summary")
+end)
+
+World.test("the race road check runs once at each career start on a server", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	walledMap(world)
+	logged(ann)
+	withRoutes(world, ann, {WALLED})
+	world:startCareer(ann)
+	same(countLines(ann.logLines, "race road check: 1 of 1 routes pass"), 1, "checked at the career start")
+end)
+
 --== the starter's opponents ======================================================
 
 -- A road node at each checkpoint of the route, named cp1, cp2, ...

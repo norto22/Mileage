@@ -421,6 +421,7 @@ World.CLIENT_FILES = {
 	{"mileage_raceEvents", CLIENT .. "mileage/raceEvents.lua"},
 	{"mileage_aiRace", CLIENT .. "mileage/aiRace.lua"},
 	{"mileage_spotRoutes", CLIENT .. "mileage/spotRoutes.lua"},
+	{"mileage_raceRoad", CLIENT .. "mileage/raceRoad.lua"},
 	{"mileage_spotRace", CLIENT .. "mileage/spotRace.lua"},
 	{"mileage_raceSpots", CLIENT .. "mileage/raceSpots.lua"},
 }
