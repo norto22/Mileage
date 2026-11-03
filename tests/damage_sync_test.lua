@@ -200,9 +200,19 @@ local function addCar(game, owner, vid, opts)
 		car.beamstate.deformedBeams[cid] = ratio
 	end
 	car.obj = {}
+	-- What the copy's vehicle Lua did to the car, in order: {"node", cid}, {"beam", cid},
+	-- {"commit"}.
+	car.applyLog, car.commits = {}, 0
 	function car.obj:getID() return gid end
 	function car.obj:getBeamRestLength(cid) return car.restLen[cid] end
-	function car.obj:setBeamLength(cid, len) car.restLen[cid] = len end
+	function car.obj:setBeamLength(cid, len)
+		table.insert(car.applyLog, {"beam", cid})
+		car.restLen[cid] = len
+	end
+	function car.obj:commitLoad()
+		table.insert(car.applyLog, {"commit"})
+		car.commits = car.commits + 1
+	end
 	function car.obj:beamIsBroken(cid) return car.broken[cid] == true end
 	function car.obj:breakBeam(cid)
 		car.breakCalls = car.breakCalls + 1
@@ -210,7 +220,10 @@ local function addCar(game, owner, vid, opts)
 		car.beamstate.deformedBeams[cid] = 1
 	end
 	function car.obj:getNodePosition(cid) return vec3(car.nodePos[cid]) end
-	function car.obj:setNodePosition(cid, p) car.nodePos[cid] = vec3(p) end
+	function car.obj:setNodePosition(cid, p)
+		table.insert(car.applyLog, {"node", cid})
+		car.nodePos[cid] = vec3(p)
+	end
 	function car.obj:getDirectionVector() return vec3(car.fwd) end
 	function car.obj:getDirectionVectorUp() return vec3(car.up) end
 	function car.obj:queueGameEngineLua(cmd) table.insert(game.geQueue, cmd) end
@@ -1746,4 +1759,42 @@ test("a hydraulic beam broken on the owner reaches the copy broken, its length l
 	step(1.5)
 	same(copy.broken[5], true, "the copy's hydraulic beam 5 broken")
 	same(copy.restLen[5], 1, "the copy's hydraulic beam 5 length")
+end)
+
+--== the owner's full damage as one whole shape =============================
+
+-- Points of `car` more than 2 mm from where they are on `owner`, each in its car's own frame.
+local function pointsOff(owner, car)
+	local off = {}
+	for cid in pairs(owner.v.data.nodes) do
+		local ox, oy, oz = toCarFrame(owner, owner.nodePos[cid])
+		local cx, cy, cz = toCarFrame(car, car.nodePos[cid])
+		if math.abs(ox - cx) > 0.002 or math.abs(oy - cy) > 0.002 or math.abs(oz - cz) > 0.002 then
+			table.insert(off, cid)
+		end
+	end
+	return off
+end
+
+-- Nudges every point of a car but its reference point by dz metres up, in its own frame:
+-- a copy whose physics rests at another suspension height.
+local function nudgePoints(car, dz)
+	for cid in pairs(car.v.data.nodes) do
+		if cid ~= 0 then
+			local x, y, z = toCarFrame(car, car.nodePos[cid])
+			car.nodePos[cid] = fromCarFrame(car, x, y, z + dz)
+		end
+	end
+end
+
+test("a damaged still car's copy, reset, gets every point of his car", function()
+	local owner, copy = syncedGames()
+	nudgePoints(copy, 0.05)
+	copy.applyLog, copy.commits = {}, 0
+	phantomBreaks(copy, 30, 1)
+	step(10)
+	expect(copy.veh.resets >= 1, "the copy was reset in place")
+	same(#pointsOff(owner, copy), 0, "points of the copy away from the owner's car")
+	same(copy.commits, 1, "commits of the owner's damage")
+	same(copy.restLen[7], 0.8, "the owner's dent on the copy")
 end)
