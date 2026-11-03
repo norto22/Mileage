@@ -239,10 +239,15 @@ local function rxCareerDamage(data)
 	local cleared = message.c == 1 and 1 or 0
 	local command = string.format("mileageDamage.applyDamage(%d,{%s},{%s})", cleared, beams, nodes)
 	if numbered then
-		-- A part of the owner's whole shape: the copy waits on until it has every part
-		-- and has applied them (shapeApplied), so a set with a part lost is asked again.
+		-- A part of the owner's whole shape: the copy waits until it has every part and
+		-- has applied them (shapeApplied), so a set with a part lost is asked for again,
+		-- also when the owner sent it to everyone unasked.
 		local a = awaiting[gameVehicleID]
-		if a then a.wait = RETRY_SECONDS end
+		if a then
+			a.wait = RETRY_SECONDS
+		else
+			awaiting[gameVehicleID] = {sid = message.v, wait = RETRY_SECONDS, tries = 1}
+		end
 		command = string.format("mileageDamage.applyDamage(%d,{%s},{%s},%d,%d)", cleared, beams, nodes, part, parts)
 	elseif cleared == 1 or (beams == "" and nodes == "") then
 		-- A cleared notice, or an undamaged car's full damage: nothing more to wait for.

@@ -196,7 +196,13 @@ local function addCar(game, owner, vid, opts)
 	local hydros = {}
 	for _, cid in ipairs(opts.hydros or {}) do table.insert(hydros, {beamCID = cid}) end
 	for _, cid in ipairs(opts.settling or {}) do beams[cid].beamPrecompressionTime = 0.5 end
-	car.v = {data = {beams = beams, nodes = nodes, refNodes = {[0] = {ref = 0}}, hydros = hydros}}
+	-- opts.beamNames / opts.beamTags: {cid = name or tag}; opts.controllers: the car's
+	-- jbeam controllers; opts.data: more of v.data.
+	for cid, name in pairs(opts.beamNames or {}) do beams[cid].name = name end
+	for cid, tag in pairs(opts.beamTags or {}) do beams[cid].tag = tag end
+	car.v = {data = {beams = beams, nodes = nodes, refNodes = {[0] = {ref = 0}}, hydros = hydros,
+		controller = opts.controllers}}
+	for k, value in pairs(opts.data or {}) do car.v.data[k] = value end
 	car.beamstate = {damage = 0, deformedBeams = {}}
 	function car.beamstate.onBeamDeformed(cid, ratio)
 		car.deformCalls = car.deformCalls + 1
@@ -2102,4 +2108,87 @@ test("every part of the biggest whole shape fits a 32 KB message", function()
 		longest = math.max(longest, #('{"v":"999-999",' .. m:sub(2)))
 	end
 	expect(longest <= 32768, "the longest part with its car id: " .. longest .. " bytes")
+end)
+
+--== found in verification ===================================================
+
+-- A copy whose car has the game's other controllers that lengthen beams on their own:
+-- hydraulic suspension (beams by name, from the default and a named list), a beam chain
+-- and beam segments (beams by tag) and googly eyes (their default tags).
+local function copyWithControllers()
+	local copy = copyCar({beams = 100,
+		controllers = {
+			{fileName = "hydraulicSuspension"},
+			{fileName = "hydraulicSuspension", name = "front", hydraulicBeams = "frontHydros"},
+			{fileName = "mechanics/beamChain", beamTag = "chain"},
+			{fileName = "mechanics/beamSegments", segmentBeamTag = "seg", sensorBeamTag = "sensor"},
+			{fileName = "propAnimation/googlyEyes"},
+		},
+		data = {hydraulicsData = {{beamName = "susp", groupName = "g"}}, frontHydros = {{beamName = "fh", groupName = "f"}}},
+		beamNames = {[72] = "susp", [80] = "fh"},
+		beamTags = {[73] = "chain", [74] = "chain", [75] = "seg", [76] = {"other", "seg"}, [77] = "sensor",
+			[78] = "eyeBeam", [79] = "eyeLimiterBeam"}})
+	inVehicle(copy, copy.ext.applyDamage, 0, {7, 0.9, 0, 0.2}, {})
+	return copy
+end
+
+test("beams the car's controllers lengthen on their own never start a resync, their breaks still do", function()
+	local copy = copyWithControllers()
+	for cid = 72, 80 do copy.restLen[cid] = 1.03 end
+	copy.beamstate.damage = copy.beamstate.damage + 10
+	tick(copy, 5)
+	same(resetRequests(copy).resync, 0, "resyncs for the controllers' lengths")
+	copy.broken[73] = true
+	copy.beamstate.damage = copy.beamstate.damage + 10
+	tick(copy, 2)
+	same(resetRequests(copy).resync, 1, "resyncs once a chain beam breaks")
+end)
+
+test("a whole shape sent to everyone, with a part lost, is asked for by a copy that was not waiting", function()
+	local owner, copy, owners, copies = twoGames({beams = 300, nodes = 1200, separate = true})
+	for cid = 0, 9 do dent(owner, cid, 0.8) end
+	step(10)
+	same(copy.commits, 1, "commits of the owner's first full send")
+	local requestsBefore = requestsFor("0-0")
+	-- The owner's game dropped queued messages: a cleared notice, then its whole shape
+	-- for everyone. The copy loses that shape's middle part.
+	dent(owner, 20, 0.7)
+	nudgePoints(copy, 0.05)
+	local rx, dropped = copies.handlers.rxCareerDamage, 0
+	copies.handlers.rxCareerDamage = function(data)
+		if dropped == 0 and data:find('"p":2,', 1, true) then dropped = 1; return end
+		return rx(data)
+	end
+	inVehicle(owner, owner.ext.sendFull, 1)
+	step(30)
+	same(dropped, 1, "middle parts lost")
+	same(requestsFor("0-0") - requestsBefore, 1, "requests after the lost part")
+	same(copy.commits, 2, "commits")
+	same(#pointsOff(owner, copy), 0, "points of the copy away from the owner's car")
+	same(copy.restLen[20], 0.7, "the owner's latest dent")
+end)
+
+test("a whole set with a row the copy cannot use applies nothing and keeps the copy waiting", function()
+	for _, bad in ipairs({
+		{beams = {7, 0.8, 0, 0.3}, nodes = {1, 0, 0, 0, 999, 0, 0, 0}},   -- unknown point
+		{beams = {7, 0.8, 0, 0.3}, nodes = {4, 1001, 0, 0}},               -- past 1000 m
+		{beams = {7, 0.8, 0, 0.3, 8, 150, 0, 0}, nodes = {1, 0, 0, 0}},    -- rest length out of range
+		{beams = {7, 0.8, 0, 0.3, 999, 0.8, 0, 0}, nodes = {1, 0, 0, 0}},  -- unknown beam
+	}) do
+		local copy = copyCar()
+		inVehicle(copy, copy.ext.applyDamage, 0, bad.beams, bad.nodes, 1, 1)
+		same(#copy.applyLog, 0, "changes to the copy")
+		same(countLines(copy.game.geQueue, "shapeApplied"), 0, "waits ended")
+	end
+end)
+
+test("a point of a whole shape up to 1000 m away, a part torn off and flung, is placed", function()
+	local copy = copyCar()
+	inVehicle(copy, copy.ext.applyDamage, 0, {7, 0.8, 0, 0.3}, {4, 25, 0, 0, 5, 0, -999, 0}, 1, 1)
+	same(copy.commits, 1, "commits")
+	local x = toCarFrame(copy, copy.nodePos[4])
+	local _, y = toCarFrame(copy, copy.nodePos[5])
+	expect(math.abs(x - 25) < 1e-6, "point 4 placed 25 m away")
+	expect(math.abs(y + 999) < 1e-6, "point 5 placed 999 m away")
+	same(countLines(copy.game.geQueue, "shapeApplied"), 1, "waits ended")
 end)

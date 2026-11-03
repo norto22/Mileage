@@ -34,6 +34,8 @@ local MAX_NODES = 500            -- per message; keeps one message under the 32 
 local LENGTH_CHANGED = 0.001     -- metres of rest length that count as a change
 local MAX_LENGTH = 100           -- metres; a rest length beyond this is refused
 local MAX_OFFSET = 20            -- metres from the reference node; further is refused
+-- A whole shape places every point, a part torn off and flung away included.
+local MAX_SHAPE_OFFSET = 1000
 local MAX_DEFORM = 10            -- deformation ratio; larger is refused
 local MAX_PARTS = 64             -- numbered parts of one whole shape
 local SET_WAIT_SECONDS = 5       -- a copy drops a set with no new part for this long
@@ -57,8 +59,9 @@ local role = nil                 -- "owner", "copy" or nil
 -- ({len, broken}), and what is still to send.
 local baseline = {}
 -- Beams whose rest length the game changes on its own: hydraulics (steering and the
--- like) and beams that settle just after spawn. Only their breaks are sent, compared and
--- applied; their lengths are left to each game.
+-- like), beams that settle just after spawn, and beams of controllers that set lengths
+-- (hydraulic suspension, beam chains and segments, googly eyes). Only their breaks are
+-- sent, compared and applied; their lengths are left to each game.
 local lengthIgnored = {}
 local sent = {}
 local lastDamage = nil
@@ -142,6 +145,34 @@ local function captureBaseline()
 	end
 	for _, hydro in pairs(v.data.hydros or {}) do
 		if hydro.beamCID then lengthIgnored[hydro.beamCID] = true end
+	end
+	-- The game's controllers that set beam lengths themselves (BeamNG.drive 0.40.4.0,
+	-- lua/vehicle/controller): hydraulic suspension names its beams, the others tag them.
+	local names, tags = {}, {}
+	for _, c in pairs(v.data.controller or {}) do
+		if c.fileName == "hydraulicSuspension" then
+			for _, h in pairs(v.data[c.hydraulicBeams or "hydraulicsData"] or {}) do
+				if type(h) == "table" and h.beamName then names[h.beamName] = true end
+			end
+		elseif c.fileName == "mechanics/beamChain" then
+			if c.beamTag then tags[c.beamTag] = true end
+		elseif c.fileName == "mechanics/beamSegments" then
+			if c.segmentBeamTag then tags[c.segmentBeamTag] = true end
+			if c.sensorBeamTag then tags[c.sensorBeamTag] = true end
+		elseif c.fileName == "propAnimation/googlyEyes" then
+			tags[c.eyeBeamTag or "eyeBeam"] = true
+			tags[c.eyeLimiterBeamTag or "eyeLimiterBeam"] = true
+		end
+	end
+	if next(names) == nil and next(tags) == nil then return end
+	for _, beam in pairs(v.data.beams or {}) do
+		local tagged = false
+		if type(beam.tag) == "table" then
+			for _, t in pairs(beam.tag) do tagged = tagged or tags[t] == true end
+		else
+			tagged = beam.tag ~= nil and tags[beam.tag] == true
+		end
+		if beam.cid and (tagged or (beam.name and names[beam.name])) then lengthIgnored[beam.cid] = true end
 	end
 end
 
@@ -380,33 +411,46 @@ local function refused(what)
 	log("W", "mileage.damage", "refused part of another player's damage message: " .. what)
 end
 
--- nodes is {id, x, y, z, ...} in the car's own frame.
-local function placePoints(fr, nodes)
+-- Why a point row {id, x, y, z} in the car's own frame cannot be used, or nil.
+local function pointProblem(cid, x, y, z, maxOffset)
+	if not (isId(cid) and v.data.nodes[cid]) then return "unknown point " .. tostring(cid) end
+	if not (isNumber(x) and isNumber(y) and isNumber(z)
+			and abs(x) <= maxOffset and abs(y) <= maxOffset and abs(z) <= maxOffset) then
+		return "point offset out of range"
+	end
+	return nil
+end
+
+-- Why a beam row {id, rest length, broken 0/1, deformation} cannot be used, or nil.
+local function beamProblem(cid, len, broken, deform)
+	if not (isId(cid) and v.data.beams[cid]) then return "unknown beam " .. tostring(cid) end
+	if not (isNumber(len) and len > 0 and len <= MAX_LENGTH) then return "rest length out of range" end
+	if not (broken == 0 or broken == 1) then return "broken flag not 0 or 1" end
+	if not (isNumber(deform) and deform >= 0 and deform <= MAX_DEFORM) then return "deformation out of range" end
+	return nil
+end
+
+-- nodes is {id, x, y, z, ...} in the car's own frame; a row that cannot be used is skipped.
+local function placePoints(fr, nodes, maxOffset)
 	for i = 1, #nodes - 3, 4 do
 		local cid, x, y, z = nodes[i], nodes[i + 1], nodes[i + 2], nodes[i + 3]
-		if not (isId(cid) and v.data.nodes[cid]) then
-			refused("unknown point " .. tostring(cid))
-		elseif not (isNumber(x) and isNumber(y) and isNumber(z)
-				and abs(x) <= MAX_OFFSET and abs(y) <= MAX_OFFSET and abs(z) <= MAX_OFFSET) then
-			refused("point offset out of range")
+		local problem = pointProblem(cid, x, y, z, maxOffset)
+		if problem then
+			refused(problem)
 		else
 			obj:setNodePosition(cid, fromCarFrame(fr, x, y, z))
 		end
 	end
 end
 
--- beams is {id, rest length, broken 0/1, deformation, ...}.
+-- beams is {id, rest length, broken 0/1, deformation, ...}; a row that cannot be used is
+-- skipped.
 local function setBeams(beams)
 	for i = 1, #beams - 3, 4 do
 		local cid, len, broken, deform = beams[i], beams[i + 1], beams[i + 2], beams[i + 3]
-		if not (isId(cid) and v.data.beams[cid]) then
-			refused("unknown beam " .. tostring(cid))
-		elseif not (isNumber(len) and len > 0 and len <= MAX_LENGTH) then
-			refused("rest length out of range")
-		elseif not (broken == 0 or broken == 1) then
-			refused("broken flag not 0 or 1")
-		elseif not (isNumber(deform) and deform >= 0 and deform <= MAX_DEFORM) then
-			refused("deformation out of range")
+		local problem = beamProblem(cid, len, broken, deform)
+		if problem then
+			refused(problem)
 		else
 			if not lengthIgnored[cid] then obj:setBeamLength(cid, len) end
 			if broken == 1 and not obj:beamIsBroken(cid) then obj:breakBeam(cid) end
@@ -417,10 +461,26 @@ local function setBeams(beams)
 	end
 end
 
+-- Why a whole set cannot be applied as one shape, or nil: any row it cannot use.
+local function setProblem(set)
+	for p = 1, set.total do
+		local beams, nodes = set.parts[p][1], set.parts[p][2]
+		for i = 1, #nodes - 3, 4 do
+			local problem = pointProblem(nodes[i], nodes[i + 1], nodes[i + 2], nodes[i + 3], MAX_SHAPE_OFFSET)
+			if problem then return problem end
+		end
+		for i = 1, #beams - 3, 4 do
+			local problem = beamProblem(beams[i], beams[i + 1], beams[i + 2], beams[i + 3])
+			if problem then return problem end
+		end
+	end
+	return nil
+end
+
 -- Ordinary dents: their own points moved, their beams set, as they come.
 local function applyDents(beams, nodes)
 	local fr = carFrame()
-	if fr then placePoints(fr, nodes) end
+	if fr then placePoints(fr, nodes, MAX_OFFSET) end
 	setBeams(beams)
 end
 
@@ -439,14 +499,20 @@ end
 
 -- Every part is in: the whole shape goes on the way the game restores a saved damaged
 -- car (beamstate.load), every point, then every beam, then one commit, so no beam is
--- stretched between moved and unmoved points.
+-- stretched between moved and unmoved points. A set with any row the copy cannot use is
+-- not applied at all, so the copy never reports a shape it applied only in part.
 local function applySet()
 	local fr = carFrame()
 	if not fr then return dropSet() end
+	local problem = setProblem(pendingSet)
+	if problem then
+		refused(problem)
+		return dropSet()
+	end
 	local set = pendingSet
 	pendingSet = nil
 	reported = {}
-	for p = 1, set.total do placePoints(fr, set.parts[p][2]) end
+	for p = 1, set.total do placePoints(fr, set.parts[p][2], MAX_SHAPE_OFFSET) end
 	for p = 1, set.total do setBeams(set.parts[p][1]) end
 	obj:commitLoad()
 	reportsChanged = true
