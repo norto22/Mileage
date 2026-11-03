@@ -9,9 +9,10 @@
 --     another player's car. The walking unicycle gets neither.
 --   * An owner's vehicle Lua hands its changed beams to onLocalDamage; they go to the
 --     server ("careerDamage") at most SENDS_PER_SECOND a second, queued.
---   * A copy asks the owner for the car's full damage once ("careerDamageRequest"), and
---     each damage message from the server ("rxCareerDamage") is checked and handed to the
---     copy's vehicle Lua.
+--   * A copy asks the owner for the car's full damage ("careerDamageRequest"), again
+--     until it has applied every numbered part of it (shapeApplied), and each damage
+--     message from the server ("rxCareerDamage") is checked and handed to the copy's
+--     vehicle Lua.
 --
 -- Only numbers this module has checked and formatted itself reach a vehicle command; no
 -- text from another player's message is ever pasted into one.
@@ -27,6 +28,7 @@ local MAX_QUEUE = 30
 local MAX_MESSAGE_BYTES = 32768
 local MAX_BEAMS = 400
 local MAX_NODES = 500
+local MAX_PARTS = 64
 -- A game that joins a busy server builds many copies at once; their full-damage requests
 -- go out at most this many a second (the server passes 4), and one that gets no answer
 -- is asked again every RETRY_SECONDS, at most REQUEST_TRIES times in all.
@@ -212,6 +214,11 @@ local function numberRows(list, maxRows)
 	return table.concat(parts, ",")
 end
 
+-- A part number of a whole shape, or the number of its parts: 1 to MAX_PARTS.
+local function isPartNumber(x)
+	return isNumber(x) and x >= 1 and x <= MAX_PARTS and x == math.floor(x)
+end
+
 local function rxCareerDamage(data)
 	if type(data) ~= "string" or #data > MAX_MESSAGE_BYTES then return end
 	-- Text from another player's game: the game's decoder may raise on a bad one.
@@ -223,13 +230,30 @@ local function rxCareerDamage(data)
 	local veh = be:getObjectByID(gameVehicleID)
 	if not veh then return end
 	local beams, nodes = numberRows(message.b, MAX_BEAMS), numberRows(message.n, MAX_NODES)
-	if not beams or not nodes then
+	local part, parts = message.p, message.t
+	local numbered = part ~= nil or parts ~= nil
+	if not beams or not nodes or (numbered and not (isPartNumber(part) and isPartNumber(parts) and part <= parts)) then
 		warnOnce("malformed", "a damage message for " .. message.v .. " was not in the expected form")
 		return
 	end
 	local cleared = message.c == 1 and 1 or 0
-	awaiting[gameVehicleID] = nil
-	veh:queueLuaCommand(string.format("mileageDamage.applyDamage(%d,{%s},{%s})", cleared, beams, nodes))
+	local command = string.format("mileageDamage.applyDamage(%d,{%s},{%s})", cleared, beams, nodes)
+	if numbered then
+		-- A part of the owner's whole shape: the copy waits on until it has every part
+		-- and has applied them (shapeApplied), so a set with a part lost is asked again.
+		local a = awaiting[gameVehicleID]
+		if a then a.wait = RETRY_SECONDS end
+		command = string.format("mileageDamage.applyDamage(%d,{%s},{%s},%d,%d)", cleared, beams, nodes, part, parts)
+	elseif cleared == 1 or (beams == "" and nodes == "") then
+		-- A cleared notice, or an undamaged car's full damage: nothing more to wait for.
+		awaiting[gameVehicleID] = nil
+	end
+	veh:queueLuaCommand(command)
+end
+
+-- From a copy's vehicle Lua: it has every part of its owner's whole shape and applied it.
+local function shapeApplied(gameVehicleID)
+	if roles[gameVehicleID] == "copy" then awaiting[gameVehicleID] = nil end
 end
 
 -- Another game built a copy of one of this game's cars, or its copy drifted: the owner
@@ -302,6 +326,7 @@ end
 
 M.onLocalDamage = onLocalDamage
 M.resetCopy = resetCopy
+M.shapeApplied = shapeApplied
 M.onUpdate = onUpdate
 M.onVehicleSpawned = onVehicleSpawned
 M.onVehicleDestroyed = forget
