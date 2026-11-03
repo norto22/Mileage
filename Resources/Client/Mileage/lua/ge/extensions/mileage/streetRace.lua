@@ -85,6 +85,10 @@ function M.eligibility()
 		return "Racing needs game functions this version of the game does not have."
 	end
 	if race then return "You are already in a race." end
+	local spot = extensions.mileage_spotRace
+	if type(spot) == "table" and type(spot.inRace) == "function" and spot.inRace() then
+		return "You are already in a race."
+	end
 	if c.getForegroundMissionId() then return "Finish or leave your mission first." end
 	local veh, id = playerVehicle()
 	if not veh or veh.JBeam == "unicycle" then return "Get in one of your own cars first." end

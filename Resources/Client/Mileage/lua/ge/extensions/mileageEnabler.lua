@@ -240,10 +240,11 @@ local function isAiTraffic(gameVehicleID)
 	return type(entry) == "table" and entry.isAi == true
 end
 
--- The car the player is in is theirs to drive, even one taken from traffic.
+-- The car the player is in is theirs to drive, even one taken from traffic. A race spot's
+-- opponent (mileage/spotRace.lua) counts as traffic: no nametag, hidden far away.
 local function isTrafficCar(gameVehicleID, veh)
 	if gameVehicleID == be:getPlayerVehicleID(0) then return false end
-	if veh.isTraffic == "true" or veh.isParked == "true" then return true end
+	if veh.isTraffic == "true" or veh.isParked == "true" or veh.mileageSpotRacer == "true" then return true end
 	return isAiTraffic(gameVehicleID)
 end
 

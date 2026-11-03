@@ -365,6 +365,293 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 		bngApi.engineLua('if mileage_aiRace then mileage_aiRace.sendState() end');
 	};
 
+	//== races at race spots =====================================================
+	// mileage/spotRace.lua sends MileageSpotRace: "setup" (the card at a spot's start line),
+	// "inviting" (the starter's answers so far), "invite" (to an invited player), "grid",
+	// "countdown", "go", "racing", "finished", "out", "result", "closed", "inviteClosed" and
+	// "clear". Opponents are named by their car model; every card carries "you".
+
+	$scope.spot = null;
+
+	// Why a racer has no time.
+	var SPOT_OUT = {gaveUp: "Gave up", left: "Left the route", stuck: "Stuck", gone: "Crashed out",
+		quit: "Left the server", notReady: "Not ready", spawn: "Did not start"};
+	// Why the first place was not paid, when the server has a prize.
+	var SPOT_WITHHELD = {
+		alone: "No prize: nobody else raced. Your time counts for the leaderboard.",
+		slow: "No prize: no other racer drove at race pace.",
+		"car won": "No prize: only a player who finishes first is paid.",
+		unseen: "Unranked: the server could not follow every car, so no prize, win or leaderboard time.",
+	};
+
+	function spotRouteText(route) {
+		var laps = Number(route.laps) || 1;
+		return (route.closed ? "Circuit" : "Point to point") + ", " + laps + " lap" + (laps === 1 ? "" : "s") + ", " +
+			moKm(route.length);
+	}
+
+	function spotTime(seconds) {
+		return moClock(seconds, 2);
+	}
+
+	function spotPrizeRow(data) {
+		var prize = Number(data.prize) || 0, again = Number(data.againIn) || 0;
+		if (prize <= 0) return {label: "Prize", value: "None on this server"};
+		if (again > 0) return {label: "Prize for first place", value: "Again in " + Math.ceil(again / 60) + " min"};
+		return {label: "Prize for first place", value: moDollars(prize)};
+	}
+
+	function setupView(s) {
+		var route = s.routes[s.routeIndex] || {};
+		var rows = [{label: "Route", value: spotRouteText(route)}];
+		rows.push({label: "Best time here", value: typeof route.best === "number" ?
+			spotTime(route.best) + " by " + String(route.bestBy || "") : "No times yet"});
+		if (typeof route.mine === "number") rows.push({label: "Your best", value: spotTime(route.mine)});
+		rows.push(spotPrizeRow(s));
+		var invited = s.players.filter(function (p) { return p.on; }).length;
+		var solo = s.opponents === 0 && invited === 0;
+		var note = s.note ? String(s.note) : (solo ?
+			"No opponents and nobody invited: this run sets a time for the leaderboard but pays no prize." :
+			"Friends who join are moved onto the grid beside you.");
+		if (s.allowed === false) note = "Race spots are off on this server.";
+		return {
+			title: "Race spot: " + String(s.spotName || ""),
+			layouts: s.routes.length > 1 ? s.routes.map(function (r, i) {
+				return {name: String(r.name || ""), on: i === s.routeIndex, index: i};
+			}) : null,
+			rows: rows,
+			stepper: {value: s.opponents, max: s.opponentsMax},
+			players: s.players,
+			note: note,
+			start: solo ? "Start run" : "Start race",
+			startOff: s.pending === true || s.allowed === false,
+			cancel: true,
+		};
+	}
+
+	function spotPlaces(data) {
+		var you = String(data.you || "");
+		return (Array.isArray(data.places) ? data.places : []).map(function (p, i) {
+			var time = typeof p.seconds === "number";
+			return {
+				place: time ? i + 1 : "-",
+				name: !p.car && p.name === you ? "You" : String(p.name || ""),
+				value: time ? spotTime(p.seconds) : (SPOT_OUT[p.out] || "Did not finish"),
+				me: !p.car && p.name === you,
+			};
+		});
+	}
+
+	function spotResultView(data) {
+		var you = String(data.you || ""), routeName = String(data.routeName || "");
+		var title;
+		if (data.winner === you) title = "You won " + routeName;
+		else if (data.winner) title = String(data.winner) + " won " + routeName;
+		else if (data.carWon && Array.isArray(data.places) && data.places[0]) title = String(data.places[0].name) + " won " + routeName;
+		else title = routeName + ": no winner";
+		var rows = [], notes = [];
+		var paid = Number(data.prize) || 0;
+		if (paid > 0 && data.winner === you) rows.push({label: "Prize", value: moDollars(paid)});
+		if (data.withheld === "unseen") {
+			notes.push(SPOT_WITHHELD.unseen);
+		} else if ((Number(data.prizeOffered) || 0) > 0 && data.withheld) {
+			if (data.withheld === "wait") {
+				notes.push("No prize: you can win it again in " + Math.ceil((Number(data.againIn) || 0) / 60) + " min.");
+			} else if (data.withheld === "car won" || data.winner === you) {
+				notes.push(SPOT_WITHHELD[data.withheld] || "No prize this time.");
+			}
+		}
+		if (data.best && typeof data.best === "object" && data.best.improved) {
+			notes.push(typeof data.best.old === "number" ? "New personal best. Your best here was " + spotTime(data.best.old) + "." :
+				"Your first time here is on the leaderboard.");
+		}
+		if (data.why === "starterLeft") notes.push("The starter left, so the race ended with no winner.");
+		else if (data.why === "timeout") notes.push("The time ran out.");
+		return {title: title, places: spotPlaces(data), rows: rows, note: notes.join(" "), close: true};
+	}
+
+	function spotView(data, current) {
+		var routeName = String(data.routeName || "");
+		switch (data.phase) {
+		case "inviting":
+			var answers = Array.isArray(data.answers) ? data.answers : [];
+			var opponents = Number(data.opponents) || 0;
+			var rows = answers.map(function (a) {
+				return {label: String(a.name || ""), value: a.answer === "joined" ? "Joined" :
+					(a.answer === "declined" ? "Declined" : "Waiting…")};
+			});
+			rows.push({label: "Opponents", value: opponents + " car" + (opponents === 1 ? "" : "s") + " on the grid"});
+			return {title: "Race spot: " + routeName, rows: rows,
+				note: "Starts when everyone has answered, or in " + Math.ceil(Number(data.seconds) || 0) + " s.",
+				startNow: true, callOff: true};
+		case "invite":
+			var route = data.route && typeof data.route === "object" ? data.route : {};
+			var n = Number(data.opponents) || 0, prize = Number(data.prize) || 0;
+			var inviteRows = [{label: "Race spot", value: String(route.name || "")}, {label: "Route", value: spotRouteText(route)},
+				{label: "Opponents", value: n + " car" + (n === 1 ? "" : "s") + ", plus " + String(data.from || "")}];
+			if (prize > 0) inviteRows.push({label: "Prize for first place", value: moDollars(prize)});
+			return {title: String(data.from || "") + " invites you to a race", rows: inviteRows,
+				note: data.note ? String(data.note) : "Joining moves your car to the start grid.", join: true};
+		case "grid":
+			return {title: routeName, note: "Lining up on the grid..."};
+		case "countdown":
+			var you = String(data.you || "");
+			var names = (Array.isArray(data.racers) ? data.racers : []).filter(function (r) { return !r.car; })
+				.map(function (r) { return r.name === you ? "You" : String(r.name); });
+			var cars = (Array.isArray(data.racers) ? data.racers : []).filter(function (r) { return r.car; }).length;
+			if (cars > 0) names.push(cars + " car" + (cars === 1 ? "" : "s"));
+			return {title: routeName, big: String(data.count), rows: [{label: "Grid", value: names.join(", ")}]};
+		case "go":
+			return {title: routeName, big: "GO", giveUp: true};
+		case "racing":
+			var racingRows = [];
+			if (typeof data.place === "number") racingRows.push({label: "Place", value: data.place + " / " + data.of});
+			racingRows.push({label: "Lap", value: data.lap + " / " + data.laps});
+			racingRows.push({label: "Checkpoint", value: data.checkpoint + " / " + data.checkpoints});
+			racingRows.push({label: "Time", value: moTime(data.elapsed)});
+			if (data.ahead) {
+				racingRows.push({label: "Ahead", value: String(data.ahead) +
+					(typeof data.gap === "number" ? ", " + data.gap.toFixed(1) + " s" : "")});
+			}
+			var view = {title: routeName, rows: racingRows, giveUp: true};
+			if (typeof data.offRoute === "number") {
+				view.warn = "You are off the route. Head back to checkpoint " + data.checkpoint + " within " + data.offRoute +
+					" s or your race ends.";
+				if (typeof data.nextMetres === "number") {
+					racingRows.push({label: "Next checkpoint", value: moKm(data.nextMetres) + " away"});
+				}
+			}
+			return view;
+		case "finished":
+			return {title: "Finished in " + moTime(data.elapsed), note: "Waiting for the other racers..."};
+		case "out":
+			return {title: "Your race is over", note: (data.why === "left" ? "You left the route." : "You gave up.") +
+				" The others race on.", close: true};
+		case "result":
+			return spotResultView(data);
+		case "closed":
+			return {title: current && current.kind === "invite" ? "Invite over" : "Race called off",
+				note: String(data.why || ""), close: true};
+		}
+		return null;
+	}
+
+	function showSetup(data) {
+		var before = $scope.spot && $scope.spot.kind === "setup" && $scope.spot.setup.spot === data.spot ? $scope.spot.setup : null;
+		var routes = Array.isArray(data.routes) ? data.routes : [];
+		var max = Math.max(0, Number(data.opponentsMax) || 0);
+		var picks = {};
+		if (before) before.players.forEach(function (p) { picks[p.name] = p.on; });
+		var s = {
+			spot: data.spot, spotName: data.spotName, routes: routes, allowed: data.allowed,
+			routeIndex: before ? Math.min(before.routeIndex, Math.max(0, routes.length - 1)) : 0,
+			opponents: before ? Math.min(before.opponents, max) : Math.min(3, max), opponentsMax: max,
+			prize: data.prize, againIn: data.againIn, note: data.note, pending: data.pending,
+			players: (Array.isArray(data.players) ? data.players : []).map(function (p) {
+				var name = String(p.name || "");
+				return {name: name, busy: p.busy === true, on: p.busy !== true && picks[name] === true};
+			}),
+		};
+		$scope.spot = {kind: "setup", setup: s, view: setupView(s)};
+	}
+
+	$scope.$on('MileageSpotRace', function (event, data) {
+		if (!data) return;
+		$scope.$evalAsync(function () {
+			var current = $scope.spot;
+			switch (data.phase) {
+			case "setup":
+				showSetup(data);
+				return;
+			case "clear":
+				$scope.spot = null;
+				return;
+			case "inviteClosed":
+				if (current && current.kind === "invite" && current.id === data.id) $scope.spot = null;
+				return;
+			}
+			var shown = spotView(data, current);
+			if (!shown) return;
+			var kind = data.phase === "invite" ? "invite" : data.phase;
+			var spot = {kind: kind, id: data.id, view: shown};
+			if (kind === "invite") {
+				// A new card for the same invite (a note after Join) keeps its time bar.
+				var again = current && current.kind === "invite" && current.id === data.id;
+				spot.seconds = again ? current.seconds : (Number(data.seconds) || 30);
+				spot.shownAt = again ? current.shownAt : Date.now();
+			}
+			$scope.spot = spot;
+		});
+	});
+
+	function refreshSetup() {
+		if ($scope.spot && $scope.spot.kind === "setup") $scope.spot.view = setupView($scope.spot.setup);
+	}
+
+	$scope.spotLayout = function (index) {
+		if (!$scope.spot || $scope.spot.kind !== "setup") return;
+		$scope.spot.setup.routeIndex = index;
+		refreshSetup();
+	};
+
+	$scope.spotOpponents = function (step) {
+		if (!$scope.spot || $scope.spot.kind !== "setup") return;
+		var s = $scope.spot.setup;
+		s.opponents = Math.max(0, Math.min(s.opponentsMax, s.opponents + step));
+		refreshSetup();
+	};
+
+	$scope.spotPick = function (player) {
+		if (!$scope.spot || $scope.spot.kind !== "setup" || player.busy) return;
+		player.on = !player.on;
+		refreshSetup();
+	};
+
+	$scope.spotStart = function () {
+		if (!$scope.spot || $scope.spot.kind !== "setup" || $scope.spot.view.startOff) return;
+		var s = $scope.spot.setup;
+		var route = s.routes[s.routeIndex];
+		if (!route) return;
+		var names = s.players.filter(function (p) { return p.on; }).map(function (p) { return p.name; });
+		s.pending = true;
+		refreshSetup();
+		bngApi.engineLua('if mileage_spotRace then mileage_spotRace.request(' + moLuaString(route.id) + ', ' + s.opponents +
+			', ' + moLuaString(JSON.stringify(names)) + ') end');
+	};
+
+	$scope.spotCancel = function () {
+		$scope.spot = null;
+		bngApi.engineLua('if mileage_spotRace then mileage_spotRace.closeSetup() end');
+	};
+
+	$scope.spotJoin = function () {
+		if (!$scope.spot || $scope.spot.kind !== "invite") return;
+		bngApi.engineLua('if mileage_spotRace then mileage_spotRace.join(' + moLuaString($scope.spot.id) + ') end');
+	};
+
+	$scope.spotDecline = function () {
+		if (!$scope.spot || $scope.spot.kind !== "invite") return;
+		var id = $scope.spot.id;
+		$scope.spot = null;
+		bngApi.engineLua('if mileage_spotRace then mileage_spotRace.decline(' + moLuaString(id) + ') end');
+	};
+
+	$scope.spotStartNow = function () {
+		bngApi.engineLua('if mileage_spotRace then mileage_spotRace.startNow() end');
+	};
+
+	$scope.spotCallOff = function () {
+		bngApi.engineLua('if mileage_spotRace then mileage_spotRace.callOff() end');
+	};
+
+	$scope.spotGiveUp = function () {
+		bngApi.engineLua('if mileage_spotRace then mileage_spotRace.giveUp() end');
+	};
+
+	$scope.spotClose = function () {
+		$scope.spot = null;
+	};
+
 	//== the server leaderboard =================================================
 
 	$scope.leaderboard = null;
@@ -385,7 +672,18 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 					}),
 				};
 			});
-			$scope.leaderboard = {tab: $scope.leaderboard ? $scope.leaderboard.tab : "wins", wins: wins, strips: strips};
+			var spots = Object.keys(data.spots || {}).map(function (routeId) {
+				var spot = data.spots[routeId] || {};
+				var rows = Array.isArray(spot.rows) ? spot.rows : [];
+				return {
+					name: String(spot.name || routeId),
+					rows: rows.map(function (row, i) {
+						return {place: i + 1, name: String(row.name), value: spotTime(row.time)};
+					}),
+				};
+			}).sort(function (a, b) { return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0); });
+			$scope.leaderboard = {tab: $scope.leaderboard ? $scope.leaderboard.tab : "wins", wins: wins, strips: strips,
+				spots: spots};
 		});
 	});
 
@@ -475,7 +773,8 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 
 	// Redraws the time bars.
 	var ticker = setInterval(function () {
-		if ($scope.offers.length > 0 || ($scope.traffic && $scope.traffic.kind === "invite")) {
+		if ($scope.offers.length > 0 || ($scope.traffic && $scope.traffic.kind === "invite") ||
+				($scope.spot && $scope.spot.kind === "invite")) {
 			$scope.$evalAsync(function () {});
 		}
 	}, 500);
@@ -485,15 +784,24 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 	bngApi.engineLua('if mileage_streetRace then mileage_streetRace.sendState() end');
 	bngApi.engineLua('if mileage_raceEvents then mileage_raceEvents.sendState() end');
 	bngApi.engineLua('if mileage_aiRace then mileage_aiRace.sendState() end');
+	bngApi.engineLua('if mileage_spotRace then mileage_spotRace.sendState() end');
 }]);
 
 // Seconds as m:ss.s.
 function moTime(seconds) {
+	return moClock(seconds, 1);
+}
+
+// Seconds as m:ss with this many decimals, rounded before the minutes are split off so
+// 59.996 s reads 1:00.00, never 0:60.00.
+function moClock(seconds, decimals) {
 	var s = Number(seconds);
 	if (!isFinite(s) || s < 0) return "-";
-	var minutes = Math.floor(s / 60);
-	var rest = s - minutes * 60;
-	return minutes + ":" + (rest < 10 ? "0" : "") + rest.toFixed(1);
+	var scale = Math.pow(10, decimals);
+	var units = Math.round(s * scale);
+	var minutes = Math.floor(units / (60 * scale));
+	var rest = (units - minutes * 60 * scale) / scale;
+	return minutes + ":" + (rest < 10 ? "0" : "") + rest.toFixed(decimals);
 }
 
 function moDollars(n) {

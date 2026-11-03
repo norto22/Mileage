@@ -331,6 +331,38 @@ function M.getPointNodePath(pos, node)
 	return nil
 end
 
+-- The name of the road node nearest pos ({x, y, z}), or nil: the game's own lookup where it
+-- has one, else the nearest node of the road map. A race spot's opponents drive through the
+-- node at each checkpoint.
+function M.getClosestRoadNode(pos)
+	if type(pos) ~= "table" then return nil end
+	local nodes = M.getMapNodes()
+	local find = pick(map, "findClosestRoad")
+	if find then
+		local ok, a, b = pcall(find, vec3(pos.x, pos.y, pos.z))
+		if ok and a ~= nil then
+			local na, nb = nodes and nodes[a], nodes and nodes[b]
+			if nb and na and na.pos and nb.pos then
+				local da = (na.pos.x - pos.x) ^ 2 + (na.pos.y - pos.y) ^ 2 + (na.pos.z - pos.z) ^ 2
+				local db = (nb.pos.x - pos.x) ^ 2 + (nb.pos.y - pos.y) ^ 2 + (nb.pos.z - pos.z) ^ 2
+				if db < da then return b end
+			end
+			return a
+		end
+	end
+	if type(nodes) ~= "table" then return nil end
+	local best, bestDistance = nil, nil
+	for name, node in pairs(nodes) do
+		local p = type(node) == "table" and node.pos
+		local ok, x, y, z = pcall(function() return p.x, p.y, p.z end)
+		if ok and type(x) == "number" then
+			local d = (x - pos.x) ^ 2 + (y - pos.y) ^ 2 + (z - pos.z) ^ 2
+			if not bestDistance or d < bestDistance then best, bestDistance = name, d end
+		end
+	end
+	return best
+end
+
 -- About metres of road beyond node, heading along dir, as node names, so a racing car
 -- does not brake for the finish; an empty list when the game cannot tell.
 function M.getRoadBeyond(node, dir, metres)

@@ -113,3 +113,46 @@
 	color: #bbb;
 	font-weight: normal;
 }
+.mo-table tr.mo-me td {
+	color: #f9a825;
+}
+/* Race spots: the opponents stepper, the invite list and the off-route warning. */
+.mo-sub {
+	color: #bbb;
+	font-size: 0.85em;
+	margin: 8px 0 2px;
+}
+.mo-stepper {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+}
+.mo-card .mo-stepper button {
+	flex: 0 0 40px;
+	min-height: 32px;
+	padding: 4px 0;
+	font-size: 1.1em;
+}
+.mo-stepper output {
+	min-width: 1.5em;
+	text-align: center;
+	font-weight: bold;
+}
+.mo-pick {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 0.9em;
+	margin: 3px 0;
+	cursor: pointer;
+}
+.mo-pick input {
+	accent-color: #f9a825;
+}
+.mo-warn {
+	background: rgba(249, 168, 37, 0.18);
+	border-left: 3px solid #f9a825;
+	padding: 6px 8px;
+	font-size: 0.85em;
+	margin: 6px 0;
+}
