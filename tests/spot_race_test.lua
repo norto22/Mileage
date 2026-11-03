@@ -634,6 +634,37 @@ local function withClass(p)
 	}
 end
 
+-- p's car is career car 7 with these performance tests: current (its latest test, or nil
+-- when it changed since) and history (earlier results, newest first), each {class, index}.
+-- The game's stock lookup says class E at 18.
+local function withTests(p, current, history)
+	withClass(p)
+	p.globals.gameplay_vehiclePerformance.getClassFromVehId = function()
+		return {class = {name = "E"}, performanceIndex = 18}
+	end
+	p.globals.gameplay_vehiclePerformance.getClassFromData = function(data)
+		return {class = {name = data.class}, performanceIndex = data.index}
+	end
+	local vehicle = {certificationData = current, performanceHistory = history}
+	p.globals.career_modules_inventory = {
+		getInventoryIdFromVehicleId = function(vid) return vid == p.car.id and 7 or nil end,
+		getVehicles = function() return {[7] = vehicle} end,
+	}
+	p.globals.career_modules_vehiclePerformance = {getVehicleClass = function(id)
+		local data = id == 7 and vehicle.certificationData
+		return data and p.globals.gameplay_vehiclePerformance.getClassFromData(data) or nil
+	end}
+end
+
+World.test("an upgraded starter whose latest test is class S gets opponents grouped for S", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	withTests(ann, {class = "S", index = 92})
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 2, {})
+	same(ann.groupAsked.class, "S", "grouped for the class of its latest test")
+	same(ann.groupAsked.index, 92, "near that test's performance index")
+end)
+
 local function spawned(world, p)
 	local list = {}
 	for _, s in pairs(world.spawned) do
