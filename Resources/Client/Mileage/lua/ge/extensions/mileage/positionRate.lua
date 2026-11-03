@@ -1,41 +1,69 @@
---Mileage :: position rate (CLIENT)
+--Mileage :: send rate of traffic and parked cars (CLIENT)
 --
--- BeamMP sends the position of every car this game owns up to 50 times a second, traffic
--- and parked cars included, and the server passes each one to every other player. Most
--- of those cars are traffic nobody else is near and parked cars standing still, where a
--- late update cannot be seen. While the career runs on a server, Mileage's check sits in
--- front of BeamMP's send (positionGE.sendVehiclePosRot, which BeamMP's vehicle Lua calls
--- by name for each position):
+-- BeamMP sends every car this game owns, traffic and parked cars included, as if a player
+-- drove it: its position up to 50 times a second, its lights 15 and its pedals and
+-- steering 30 times a second when they change, and the server passes each one to every
+-- other player. While the career runs on a server, Mileage's checks sit in front of
+-- BeamMP's sends, which BeamMP's vehicle Lua calls by name for each update
+-- (positionGE.sendVehiclePosRot, MPElectricsGE.sendElectrics, MPInputsGE.sendInputs):
 --
 --   * a parked car moving under PARKED_STILL_SPEED sends at most once a second;
 --   * driving traffic more than FAR_DISTANCE from every other player's car (their
---     traffic not counted) sends at most twice a second;
---   * a hidden car sends nothing;
---   * everything else - the car the player drives, the player's other cars, traffic near
---     another player, a parked car that is moving - sends every position, as before.
+--     traffic not counted) is "far" and sends its position at most twice a second;
+--   * other driving traffic is "near" and sends its position at most 20 times a second,
+--     which keeps every gap at half of the 0.1 s for which another game keeps steering a
+--     car without an update;
+--   * a hidden car sends no position;
+--   * lights and inputs of these cars are never dropped: BeamMP sends only what changed,
+--     so each car's changed values are merged (the latest value of each kept) and the
+--     merged set is sent at the rate in SPACING, a hidden car's once it is shown again;
+--   * everything else - the car the player drives, the player's other cars, a parked car
+--     that is moving - sends every update, as before.
 --
 -- Each car's rule is worked out once a second (a still parked car's speed four times a
--- second, so a car that is hit is sent at once), never on each send. If BeamMP's function
--- is missing the log says so once and BeamMP sends as it always does; if the check fails
--- every position goes through. BeamMP's own files are not changed.
+-- second, so a car that is hit is sent at once), never on each send. If one of BeamMP's
+-- functions is missing the log says so once and BeamMP sends it as it always does; if a
+-- check fails the update goes through. BeamMP's own files are not changed. Every send
+-- BeamMP asks for, and whether it went through, is told to the cost meter
+-- (mileage/perfMeter.lua).
 
 local M = {}
 
 local logTag = "mileage.positionRate"
 
 local PARKED_STILL_SPEED = 0.5   -- metres a second
-local PARKED_EVERY = 1           -- seconds between positions of a still parked car
 local FAR_DISTANCE = 500         -- metres from every other player's car
-local FAR_EVERY = 0.5            -- seconds between positions of far traffic
 local CLASSIFY_EVERY = 1         -- seconds between working out each car's rule
 local PARKED_CHECK_EVERY = 0.25  -- seconds between speed checks of still parked cars
 
--- {module, original, check} while BeamMP's send is wrapped.
-local wrapped = nil
+-- Seconds between sends of each update by a car's rule; none for a hidden car (its
+-- position is dropped, its lights and inputs held until it is shown).
+local SPACING = {
+	pos = {parked = 1, far = 0.5, near = 0.05},
+	elec = {parked = 1, far = 1, near = 0.2},
+	inp = {parked = 1, far = 1, near = 0.1},
+}
 
--- Own cars under a rule, by game vehicle id: {kind = "parked" | "far" | "hidden", last = time
--- of the last position let through}. A car not listed sends every position.
+-- BeamMP's send functions: the module's global name, the function and the update kind.
+local TARGETS = {
+	{global = "positionGE", field = "sendVehiclePosRot", update = "pos",
+		missing = "every car's position is sent at BeamMP's own rate"},
+	{global = "MPElectricsGE", field = "sendElectrics", update = "elec",
+		missing = "traffic's lights are sent at BeamMP's own rate"},
+	{global = "MPInputsGE", field = "sendInputs", update = "inp",
+		missing = "traffic's pedals and steering are sent at BeamMP's own rate"},
+}
+
+-- {module, original, check} by update kind while that BeamMP function is wrapped.
+local wraps = {}
+
+-- The rule of each own car under one, by game vehicle id: "parked" | "far" | "near" |
+-- "hidden". A car not listed sends every update.
 local limited = {}
+-- When each car last sent each update: lastSent[update][gameVehicleID] = clock.
+local lastSent = {pos = {}, elec = {}, inp = {}}
+-- Lights and inputs changed since a car's last send, merged: held[update][gameVehicleID].
+local held = {elec = {}, inp = {}}
 
 local clock = 0
 local sinceClassify = CLASSIFY_EVERY
@@ -66,6 +94,11 @@ local function isStill(veh)
 	return veh:getVelocity():length() < PARKED_STILL_SPEED
 end
 
+local function tellMeter(update, isTrafficCar, through)
+	local meter = extensions.mileage_perfMeter
+	if meter and meter.sent then meter.sent(update, isTrafficCar, through) end
+end
+
 -- Works out the rule of every own car.
 local function classify()
 	local vehicles = MPVehicleGE.getVehicles()
@@ -84,85 +117,183 @@ local function classify()
 	end
 	local rules = {}
 	for gameVehicleID, veh in pairs(own) do
-		local kind = nil
 		if not veh:getActive() then
-			kind = "hidden"
-		elseif veh.isParked == "true" and isStill(veh) then
-			kind = "parked"
-		elseif veh.isParked ~= "true" and isTraffic(gameVehicleID, veh) and farFromAll(veh:getPosition(), others) then
-			-- Driving traffic only: a parked car that moves was pushed or hit.
-			kind = "far"
-		end
-		if kind then
-			local previous = limited[gameVehicleID]
-			rules[gameVehicleID] = {kind = kind, last = previous and previous.last}
+			rules[gameVehicleID] = "hidden"
+		elseif veh.isParked == "true" then
+			-- A parked car that moves was pushed or hit: every update goes through.
+			if isStill(veh) then rules[gameVehicleID] = "parked" end
+		elseif isTraffic(gameVehicleID, veh) then
+			rules[gameVehicleID] = farFromAll(veh:getPosition(), others) and "far" or "near"
 		end
 	end
 	limited = rules
+	-- Cars gone from the game keep no times or held updates.
+	for _, byCar in pairs(lastSent) do
+		for gameVehicleID in pairs(byCar) do
+			if not be:getObjectByID(gameVehicleID) then byCar[gameVehicleID] = nil end
+		end
+	end
+	for _, byCar in pairs(held) do
+		for gameVehicleID in pairs(byCar) do
+			if not be:getObjectByID(gameVehicleID) then byCar[gameVehicleID] = nil end
+		end
+	end
 end
 
 -- A still parked car that starts moving (it was hit) or a hidden car shown again sends
--- every position until the next full check gives it its rule.
+-- every update until the next full check gives it its rule.
 local function checkParked()
-	for gameVehicleID, rule in pairs(limited) do
-		if rule.kind ~= "far" then
+	for gameVehicleID, kind in pairs(limited) do
+		if kind == "parked" or kind == "hidden" then
 			local veh = be:getObjectByID(gameVehicleID)
-			if not veh or (rule.kind == "parked" and not isStill(veh)) or (rule.kind == "hidden" and veh:getActive()) then
+			if not veh or (kind == "parked" and not isStill(veh)) or (kind == "hidden" and veh:getActive()) then
 				limited[gameVehicleID] = nil
 			end
 		end
 	end
 end
 
-local function letThrough(gameVehicleID)
-	local rule = limited[gameVehicleID]
-	if not rule then return true end
-	if rule.kind == "hidden" then return false end
-	local every = rule.kind == "parked" and PARKED_EVERY or FAR_EVERY
-	if rule.last and clock - rule.last < every - 1e-6 then return false end
-	rule.last = clock
+-- true when a car under a rule may send this update now; it then counts as sent. A send
+-- is due SPACING after the last one was due, so BeamMP's 50-a-second calls give the
+-- spacing's rate on average (0.04 and 0.06 s gaps for 0.05); a car that sent nothing
+-- for longer starts again from now.
+local function due(update, gameVehicleID, kind)
+	local every = SPACING[update][kind]
+	if not every then return false end
+	local nextAt = lastSent[update][gameVehicleID]
+	if nextAt and clock < nextAt - 1e-6 then return false end
+	if nextAt and clock - nextAt < every then
+		lastSent[update][gameVehicleID] = nextAt + every
+	else
+		lastSent[update][gameVehicleID] = clock + every
+	end
 	return true
 end
 
-local function makeCheck(original)
+--== positions ===============================================================
+
+local function letPositionThrough(gameVehicleID)
+	local kind = limited[gameVehicleID]
+	local through = not kind or due("pos", gameVehicleID, kind)
+	tellMeter("pos", kind ~= nil, through)
+	return through
+end
+
+local function positionCheck(original)
 	return function(data, gameVehicleID, ...)
-		local ok, through = pcall(letThrough, gameVehicleID)
+		local ok, through = pcall(letPositionThrough, gameVehicleID)
 		if not ok or through then return original(data, gameVehicleID, ...) end
 	end
 end
 
-local function unwrap(why)
-	if not wrapped then return end
-	if wrapped.module.sendVehiclePosRot == wrapped.check then
-		wrapped.module.sendVehiclePosRot = wrapped.original
+--== lights and inputs =======================================================
+
+-- The text to send now for this call, or nil while it is held. A car with no rule sends
+-- at once, together with anything held for it from when it had one.
+local function gate(update, data, gameVehicleID)
+	local kind = limited[gameVehicleID]
+	local pending = held[update][gameVehicleID]
+	if not kind and not pending then
+		tellMeter(update, false, true)
+		return data
 	end
-	wrapped = nil
-	limited = {}
-	log("D", logTag, "position check removed (" .. why .. ")")
+	local decoded = jsonDecode(data)
+	if type(decoded) ~= "table" then
+		tellMeter(update, kind ~= nil, true)
+		return data
+	end
+	pending = pending or {}
+	for key, value in pairs(decoded) do pending[key] = value end
+	held[update][gameVehicleID] = pending
+	local now = not kind or due(update, gameVehicleID, kind)
+	tellMeter(update, kind ~= nil, now)
+	if not now then return nil end
+	held[update][gameVehicleID] = nil
+	return jsonEncode(pending)
+end
+
+local function mergeCheck(update, original)
+	return function(data, gameVehicleID, ...)
+		local ok, text = pcall(gate, update, data, gameVehicleID)
+		if not ok then return original(data, gameVehicleID, ...) end
+		if text then return original(text, gameVehicleID, ...) end
+	end
+end
+
+-- Sends each held set whose spacing has passed, so the last change of a car is never
+-- left waiting for its next one.
+local function flushHeld()
+	local meter = extensions.mileage_perfMeter
+	for update, byCar in pairs(held) do
+		local w = wraps[update]
+		for gameVehicleID, pending in pairs(byCar) do
+			local kind = limited[gameVehicleID]
+			if not w then
+				byCar[gameVehicleID] = nil
+			elseif not kind or due(update, gameVehicleID, kind) then
+				byCar[gameVehicleID] = nil
+				if meter and meter.flushed then meter.flushed(update) end
+				w.original(jsonEncode(pending), gameVehicleID)
+			end
+		end
+	end
+end
+
+--== wrapping ================================================================
+
+local function isActive() return next(wraps) ~= nil end
+
+local function clearState()
+	limited, lastSent, held = {}, {pos = {}, elec = {}, inp = {}}, {elec = {}, inp = {}}
+end
+
+local function unwrap(why)
+	if not isActive() then return end
+	for _, target in ipairs(TARGETS) do
+		local w = wraps[target.update]
+		if w and w.module[target.field] == w.check then w.module[target.field] = w.original end
+	end
+	wraps = {}
+	clearState()
+	log("D", logTag, "send checks removed (" .. why .. ")")
 end
 
 local function wrap()
-	local module = positionGE
-	if wrapped and wrapped.module == module and module.sendVehiclePosRot == wrapped.check then return end
-	-- BeamMP reloaded its module: the old table is no longer used and is left as it is.
-	wrapped, limited = nil, {}
 	local compat = extensions.mileage_compat
-	local original = compat and compat.pickOrWarn(module, "positionGE", "sendVehiclePosRot",
-		"every car's position is sent at BeamMP's own rate")
-	if not original then return end
-	local check = makeCheck(original)
-	wrapped = {module = module, original = original, check = check}
-	module.sendVehiclePosRot = check
+	local added = {}
+	for _, target in ipairs(TARGETS) do
+		local module = rawget(_G, target.global)
+		local w = wraps[target.update]
+		if not (w and w.module == module and type(module) == "table" and module[target.field] == w.check) then
+			-- BeamMP reloaded its module: the old table is no longer used and is left as it is.
+			wraps[target.update] = nil
+			local original = compat and compat.pickOrWarn(module, target.global, target.field, target.missing)
+			if original then
+				local check = target.update == "pos" and positionCheck(original) or mergeCheck(target.update, original)
+				wraps[target.update] = {module = module, original = original, check = check}
+				module[target.field] = check
+				added[target.update] = true
+			end
+		end
+	end
+	if next(added) == nil then return end
+	clearState()
 	sinceClassify, sinceParkedCheck, failureLogged = CLASSIFY_EVERY, 0, false
-	log("I", logTag, string.format("position check active - still parked cars send once a second, " ..
-		"traffic over %d m from other players twice a second", FAR_DISTANCE))
+	if added.pos then
+		log("I", logTag, string.format("position check active - still parked cars send once a second, " ..
+			"traffic over %d m from other players twice a second, other traffic 20 times a second", FAR_DISTANCE))
+	end
+	if added.elec or added.inp then
+		log("I", logTag, "lights and inputs check active - traffic's changes are merged and sent 5 and 10 times " ..
+			"a second near players, once a second far away or parked")
+	end
 end
 
 local function failed(err)
 	limited = {}
 	if failureLogged then return end
 	failureLogged = true
-	log("E", logTag, "position check failed, every position is sent: " .. tostring(err))
+	log("E", logTag, "send check failed, every update is sent: " .. tostring(err))
 end
 
 --== hooks ===================================================================
@@ -177,7 +308,7 @@ function M.onCareerActive(active)
 end
 
 function M.onUpdate(dtReal)
-	if not wrapped then return end
+	if not isActive() then return end
 	local dt = tonumber(dtReal)
 	if not dt or dt < 0 then dt = 0 end
 	clock = clock + dt
@@ -191,6 +322,13 @@ function M.onUpdate(dtReal)
 		sinceParkedCheck = 0
 		local ok, err = pcall(checkParked)
 		if not ok then failed(err) end
+	end
+	if next(held.elec) or next(held.inp) then
+		local ok, err = pcall(flushHeld)
+		if not ok then
+			held = {elec = {}, inp = {}}
+			failed(err)
+		end
 	end
 end
 

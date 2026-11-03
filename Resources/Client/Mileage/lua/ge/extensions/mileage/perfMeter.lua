@@ -230,6 +230,13 @@ function M.sent(update, isTraffic, through)
 	if through then counts[2] = counts[2] + 1 end
 end
 
+-- One merged set of a traffic car's lights or inputs sent later, between BeamMP's calls.
+function M.flushed(update)
+	if not window then return end
+	local counts = window.sent.traffic[update]
+	if counts then counts[2] = counts[2] + 1 end
+end
+
 -- One car of another player built.
 function M.built()
 	if window then window.built = window.built + 1 end
