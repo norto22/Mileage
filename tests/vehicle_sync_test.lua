@@ -1170,3 +1170,92 @@ test("#87: a traffic car my friend spawns while I am on the server is not asked 
 	same(paintRequests(), "", "paint requests after the 5 s wait")
 	os.clockhp = function() return 0 end
 end)
+
+-- Me with the real paint module, on a world where my friend's game has sent its marks.
+-- Returns my paint module and a function listing the cars I have asked for paint since
+-- the last call.
+local function paintOnMyGame()
+	local me, friend = twoPlayers()
+	frames(friend, 1)
+	me.MPVehicleGE.getGameVehicleID = function(sid)
+		local entry = me.vehicles[sid]
+		return entry and entry.gameVehicleID
+	end
+	local paint
+	as(me, function()
+		mileageEnabler = me.enabler
+		paint = dofile(PAINT)
+		paint.onExtensionLoaded()
+	end)
+	world.toServer = {}
+	local function askedSinceLast()
+		local asked = {}
+		for _, m in ipairs(world.toServer) do
+			if m.from == 0 and m.name == "requestPartPaints" then table.insert(asked, decode(m.data).serverVehicleID) end
+		end
+		world.toServer = {}
+		table.sort(asked)
+		return table.concat(asked, ",")
+	end
+	return me, friend, paint, askedSinceLast
+end
+
+-- Puts a new copy of the owner's car sid on every game under game id gid, as BeamMP does
+-- when it rebuilds a car or gives a used server id to a new one.
+local function replaceCar(sid, oldGid, gid, fields)
+	local owner = tonumber(sid:match("^(%d+)"))
+	for id, p in pairs(world.players) do
+		local veh = {owner = owner, serverVehicleID = sid, JBeam = fields.JBeam, active = true}
+		if id == owner then veh.isTraffic, veh.isParked = fields.isTraffic, fields.isParked end
+		function veh:setActive(on) self.active = on == 1 end
+		function veh:getActive() return self.active end
+		function veh:queueLuaCommand() end
+		function veh:setField() end
+		function veh:setDynDataFieldbyName(name, _, value) self[name] = value end
+		p.objects[oldGid] = nil
+		p.objects[gid] = veh
+		p.vehicles[sid] = {gameVehicleID = gid, jbeam = fields.JBeam, isLocal = id == owner}
+	end
+end
+
+test("#87: my friend's own car rebuilt under a new game id keeps its mark, so I ask it for paint at once", function()
+	local me, _, paint, askedSinceLast = paintOnMyGame()
+	os.clockhp = function() return 0 end
+	replaceCar("1-0", gameId(1, 0), 997, {JBeam = "pickup"})
+	onVehicleEditedHandler(1, 0, "")
+	pump()
+	as(me, paint.onVehicleDestroyed, gameId(1, 0))
+	as(me, paint.onVehicleReady, 997)
+	same(askedSinceLast(), "1-0", "paint requests on the frame the rebuilt car is ready")
+	as(me, paint.onUpdate)
+	same(askedSinceLast(), "", "paint requests on the next frame")
+end)
+
+test("#87: a new own car under a used server id is asked for paint once its owner marks it, not after the 5 s wait", function()
+	local me, friend, paint, askedSinceLast = paintOnMyGame()
+	local now = 0
+	os.clockhp = function() return now end
+	-- My friend spawns a car of their own, then deletes it; BeamMP gives its server id
+	-- to the next car they spawn, under a new game id. Neither car is traffic.
+	local first = spawn(1, 5, {JBeam = "pickup"})
+	as(me, paint.onVehicleReady, first)
+	frames(friend, 1)
+	now = 1
+	as(me, paint.onUpdate)
+	same(askedSinceLast(), "1-5", "paint requests for the first car")
+	replaceCar("1-5", first, 998, {JBeam = "vivace"})
+	onVehicleSpawnHandler(1, 5, "")
+	pump()
+	as(me, paint.onVehicleDestroyed, first)
+	now = 2
+	as(me, paint.onVehicleReady, 998)
+	same(askedSinceLast(), "", "paint requests before the new car's mark")
+	frames(friend, 1)
+	now = 3
+	as(me, paint.onUpdate)
+	same(askedSinceLast(), "1-5", "paint requests once my friend's game marked the new car")
+	now = 10
+	as(me, paint.onUpdate)
+	same(askedSinceLast(), "", "paint requests after the 5 s wait")
+	os.clockhp = function() return 0 end
+end)
