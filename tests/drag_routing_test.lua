@@ -172,6 +172,50 @@ local function realTransport(localStrip)
 	return transport, wire
 end
 
+-- The transport's receive side, with the relay's handler captured as BeamMP would call it.
+local function receivingTransport()
+	local handlers, hooked, toGame = {}, {}, {}
+	function AddEventHandler(name, fn) handlers[name] = fn end
+	function TriggerServerEvent() end
+	function jsonEncode(t) return t end
+	function jsonDecode(t) return t end
+	function log() end
+	function setExtensionUnloadMode() end
+	extensions = {
+		hook = function(name, ...) table.insert(hooked, {name = name, args = {...}}) end,
+		load = function() end,
+	}
+	gameplay_drag_mpDragHandlers = {handle = function(msgName) table.insert(toGame, msgName) end}
+	local transport = dofile(TRANSPORT)
+	transport.onExtensionLoaded()
+	return handlers, hooked, toGame
+end
+
+test("a lobby join from the relay reaches the lobby, not the game's handlers", function()
+	local handlers, hooked, toGame = receivingTransport()
+	handlers.rxDragMP({msg = "mileageDragJoin", from = "2", data = {stripId = "A", lane = 2}})
+	same(#hooked, 1, "lobby hooks")
+	same(hooked[1].name, "onMileageDragMessage", "hook")
+	same(hooked[1].args[1], "mileageDragJoin", "message")
+	same(hooked[1].args[2], 2, "sender as a number")
+	same(hooked[1].args[3].stripId, "A", "data")
+	same(#toGame, 0, "messages handed to the game")
+end)
+
+test("the game's own drag messages still go to its handlers", function()
+	local handlers, hooked, toGame = receivingTransport()
+	handlers.rxDragMP({msg = "dragRaceFinishTime", from = 2, data = {rawTime = 12.3}})
+	same(#toGame, 1, "messages handed to the game")
+	same(toGame[1], "dragRaceFinishTime", "message")
+	same(#hooked, 0, "lobby hooks")
+end)
+
+test("a message whose name is not text is not taken for a lobby message, and nothing raises", function()
+	local handlers, hooked, toGame = receivingTransport()
+	handlers.rxDragMP({msg = 5, from = 2})
+	same(#hooked, 0, "lobby hooks")
+end)
+
 test("#19: a message for the strip's leader carries the sender's strip", function()
 	local transport, wire = realTransport("B")
 	transport.send("dragRaceFinishTime", "host", {rawTime = 12.3})
