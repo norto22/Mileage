@@ -729,3 +729,54 @@ test("this player's own disqualification lets them leave the strip", function()
 	runTo(4)
 	same(#wireNamed("mileageDragLeave"), 1, "leave messages")
 end)
+
+--== the wait's time left ======================================================
+
+local function waitMessages()
+	local out = {}
+	for _, msg in ipairs(world.flashes) do
+		local n = msg:match("^Waiting for a second racer: (%d+) s$")
+		if n then table.insert(out, n) end
+	end
+	return table.concat(out, ",")
+end
+
+test("a lone leader sees the wait count down from 10 s to 1 s, once a second, then the run", function()
+	newWorld()
+	runTo(11)
+	same(waitMessages(), "10,9,8,7,6,5,4,3,2,1", "wait messages")
+	same(#world.sessions, 1, "runs started")
+	runTo(20)
+	same(waitMessages(), "10,9,8,7,6,5,4,3,2,1", "wait messages once the run is up")
+	same(#wireNamed("mileageDragWait"), 0, "wait notices sent to anyone else")
+end)
+
+test("the leader sends a lone player the time left once a second, and stops when a second player joins", function()
+	newWorld()
+	world.pos = {0, 500, 0}
+	runTo(1)
+	otherAt(2, 2)
+	runTo(4.5)
+	local notices = wireNamed("mileageDragWait")
+	same(#notices, 4, "notices by 3.5 s of waiting")
+	same(recipients(notices[1]), "2", "recipients")
+	same(notices[1].data.secondsLeft, 10, "first notice")
+	same(notices[4].data.secondsLeft, 7, "fourth notice")
+	same(waitMessages(), "", "wait messages on the leader's own screen")
+	otherAt(3, 1)
+	runTo(8)
+	same(#wireNamed("mileageDragWait"), 4, "notices after a second player joined")
+	same(heatOf(lastSession()), "1:3 2:2", "the two players' run")
+end)
+
+test("a wait notice from the strip's leader shows; from anyone else, or for another strip, nothing", function()
+	newWorld({leader = 2})
+	runTo(1)
+	fromPlayer(3, "mileageDragWait", {stripId = "A", secondsLeft = 6})
+	fromPlayer(2, "mileageDragWait", {stripId = "B", secondsLeft = 6})
+	fromPlayer(2, "mileageDragWait", {stripId = "A", secondsLeft = "lots"})
+	fromPlayer(2, "mileageDragWait", "not a table")
+	same(waitMessages(), "", "wait messages from the wrong notices")
+	fromPlayer(2, "mileageDragWait", {stripId = "A", secondsLeft = 7})
+	same(waitMessages(), "7", "wait messages")
+end)

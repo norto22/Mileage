@@ -103,7 +103,8 @@ local presence = {}
 ---                   racers = { [playerId] = true } }
 local runs = {}
 
---- Authority-side: when a lone player started waiting at a strip.
+--- Authority-side: a lone player waiting at a strip.
+--- waitingSince[stripId] = { at = when they started, shown = the seconds left last sent }
 local waitingSince = {}
 
 --- Authority-side: players dropped for not staging, and where they were when dropped.
@@ -1113,6 +1114,20 @@ local function forgetStrip(stripId)
 	stageBlocked[stripId] = nil
 end
 
+--- "Waiting for a second racer: 7 s", in the drag display's single top-centre message
+--- (the one dragSync keeps from being drawn twice). It lasts a little over a second, so
+--- each notice replaces the last and the message goes by itself when the notices stop.
+local function showWait(seconds)
+	if ui_appContainers and ui_appContainers.showApp then
+		ui_appContainers.showApp('topCenter', 'flashMessage')
+	end
+	if guihooks and guihooks.trigger then
+		guihooks.trigger('TopCenterAppsFlashMessage', {
+			msg = string.format("Waiting for a second racer: %d s", seconds), ttl = 1.2, big = false,
+		})
+	end
+end
+
 --- No run at the strip: two players get one at once, a lone player after WAIT_ALONE.
 ---
 --- The solo run matters more than it looks. With MP drag active, poi.lua stops taking its
@@ -1124,10 +1139,28 @@ local function stepWaiting(stripId, players)
 	if count >= 2 then
 		startRace(stripId, players)
 	elseif count == 1 then
-		waitingSince[stripId] = waitingSince[stripId] or now()
-		if (now() - waitingSince[stripId]) >= WAIT_ALONE then
+		local wait = waitingSince[stripId]
+		if not wait then
+			wait = {at = now()}
+			waitingSince[stripId] = wait
+		end
+		local left = WAIT_ALONE - (now() - wait.at)
+		if left <= 0 then
 			log("I", logTag, string.format("alone at strip '%s' - starting a solo run", stripId))
 			startRace(stripId, players)
+			return
+		end
+		-- The time left, once a second, to the one player waiting.
+		local seconds = math.ceil(left)
+		if seconds ~= wait.shown then
+			wait.shown = seconds
+			local playerId = next(players)
+			if playerId == localPlayerId() then
+				showWait(seconds)
+			else
+				local t = transport()
+				if t then t.send("mileageDragWait", {playerId}, {stripId = stripId, secondsLeft = seconds}) end
+			end
 		end
 	else
 		waitingSince[stripId] = nil
@@ -1326,6 +1359,15 @@ function M.onMileageDragMessage(msgName, fromPlayerId, data)
 			return
 		end
 		cancelLocalRun(data.raceId, "called off by the strip's leader")
+	elseif msgName == "mileageDragWait" then
+		-- The time left on our wait, from the leader of the strip we are at.
+		local t = transport()
+		if type(data) ~= "table" or not localContext or data.stripId ~= localContext.stripId
+			or not t or not t.getAuthorityFor or t.getAuthorityFor(data.stripId) ~= fromPlayerId then
+			return
+		end
+		local seconds = tonumber(data.secondsLeft)
+		if seconds and seconds >= 1 and seconds <= WAIT_ALONE then showWait(math.floor(seconds)) end
 	end
 end
 
