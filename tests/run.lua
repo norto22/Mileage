@@ -47,6 +47,7 @@ local files = {
 	"tests/runtime_guard_test.lua",
 	"tests/career_start_test.lua",
 	"tests/drag_routing_test.lua",
+	"tests/drag_strip_test.lua",
 	"tests/paint_hold_test.lua",
 	"tests/lua_syntax_test.lua",
 }
