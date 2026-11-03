@@ -235,6 +235,21 @@ test("a game message with the lobby's name past its start still goes to the game
 	same(#toGame, 1, "messages handed to the game")
 end)
 
+test("a name that is a table or true is not taken for a lobby message either, and nothing raises", function()
+	local handlers, hooked = receivingTransport()
+	handlers.rxDragMP({msg = {"mileageDragJoin"}, from = 2, data = {}})
+	handlers.rxDragMP({msg = true, from = 2, data = {}})
+	same(#hooked, 0, "lobby hooks")
+end)
+
+test("a name shorter than the lobby's prefix, or empty, goes to the game's handlers", function()
+	local handlers, hooked, toGame = receivingTransport()
+	handlers.rxDragMP({msg = "mile", from = 2, data = {}})
+	handlers.rxDragMP({msg = "", from = 2, data = {}})
+	same(#hooked, 0, "lobby hooks")
+	same(#toGame, 2, "messages handed to the game")
+end)
+
 test("#19: a message for the strip's leader carries the sender's strip", function()
 	local transport, wire = realTransport("B")
 	transport.send("dragRaceFinishTime", "host", {rawTime = 12.3})
