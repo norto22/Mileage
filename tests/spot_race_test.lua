@@ -999,7 +999,7 @@ World.test("the checkpoints show as markers on the road, the next red and the on
 	driveTo(world, ann, r.checkpoints[2].pos, 40)
 	driveTo(world, ann, r.checkpoints[3].pos, 40)
 	modes = markers.modes[#markers.modes]
-	same(modes.cp4, "finish", "the last checkpoint is the finish")
+	same(modes.cp4, "final", "the last checkpoint is the finish, in the game's own word for it")
 	same(modes.cp1, nil, "and the first is hidden again")
 	expect(markers.renders > 0, "drawn every frame")
 	same(markers.clears, 0, "still up")
@@ -2123,4 +2123,106 @@ World.test("a game whose traffic is all police keeps every police car and sets n
 	soloToGreen(world, ann)
 	same(table.concat(ann.amountsSet, ", "), "out " .. police[1] .. ", out " .. police[2] .. ", road 0, parked 0",
 		"both police held out of the pool, half of 2 is 1, which the police already fill")
+end)
+
+--== the race road in a race: laps, endings and a reload ==========================
+
+World.test("on a circuit the racer's line after the finish of lap 1 is the road back to checkpoint 1, not the grid's", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local r = route("city_race_1")
+	raceRoadMap(world, ann, r, false)
+	soloToGreen(world, ann, "city_race_1")
+	local n = #r.checkpoints
+	expect(metres(ann.route[1], r.grid.pos) < 0.01, "at the green the line starts at the grid")
+	for i = 1, n do driveTo(world, ann, r.checkpoints[i].pos, 40) end
+	same(#ann.route, 2, "lap 2: the closing road, the finish to checkpoint 1")
+	expect(metres(ann.route[1], r.checkpoints[n].pos) < 0.01, "from the finish")
+	expect(metres(ann.route[2], r.checkpoints[1].pos) < 0.01, "to checkpoint 1")
+	driveTo(world, ann, r.checkpoints[1].pos, 40)
+	expect(metres(ann.route[1], r.checkpoints[1].pos) < 0.01 and metres(ann.route[2], r.checkpoints[2].pos) < 0.01,
+		"then checkpoint 1 to 2 again")
+end)
+
+World.test("no checkpoint markers before the green: a race called off in its countdown never sets any up", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local r = route("highway_race")
+	raceRoadMap(world, ann, r, false)
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 0, {})
+	world:advance(2)
+	same(#world.markers.setups, 0, "none in the countdown")
+	world:as(ann, function() mileage_spotRace.giveUp() end)
+	world:pump()
+	world:advance(6)
+	same(#world.markers.setups, 0, "none after the call-off either")
+	same(world.markers.renders, 0, "nothing drawn")
+end)
+
+World.test("every ending takes the checkpoint markers and the line off: give up, leaving the route, leaving the server", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local r = route("highway_race")
+	raceRoadMap(world, ann, r, false)
+	local markers = world.markers
+	soloToGreen(world, ann)
+	expect(type(ann.route) == "table", "the line is up")
+	world:as(ann, function() mileage_spotRace.giveUp() end)
+	world:advance(1)
+	same(markers.clears, 1, "gave up: the markers go")
+	same(ann.route, nil, "and the line")
+	world:advance(70)
+	soloToGreen(world, ann)
+	expect(type(ann.route) == "table", "a new race, a new line")
+	local g = r.grid.pos
+	driveTo(world, ann, {x = g.x - r.grid.dir.y * 1500, y = g.y + r.grid.dir.x * 1500, z = g.z}, 80)
+	world:advance(11)
+	same(markers.clears, 2, "left the route: the markers go")
+	same(ann.route, nil, "and the line")
+	world:advance(70)
+	soloToGreen(world, ann)
+	world:hook(ann, "onBeamMPServerLeave")
+	same(markers.clears, 3, "left the server: the markers go")
+	same(ann.route, nil, "and the line")
+end)
+
+World.test("a reload of the race extension mid-race puts the traffic back and takes the markers off", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local r = route("highway_race")
+	raceRoadMap(world, ann, r, false)
+	withTraffic(world, ann, 6, 0, 4)
+	soloToGreen(world, ann)
+	same(table.concat(ann.amountsSet, ", "), "road 3, parked 2", "thinned at the green")
+	world:as(ann, function() mileage_spotRace.onExtensionUnloaded() end)
+	same(table.concat(ann.amountsSet, ", "), "road 3, parked 2, road 6, parked 4", "back at the reload")
+	same(world.markers.clears, 1, "the markers are gone")
+	same(ann.route, nil, "and the line")
+end)
+
+World.test("a wall on the road's line but clear of it does not close the road, along x or along y", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	logged(ann)
+	world.roadNodes = {
+		g = {pos = {x = -20, y = 0, z = 0}, links = {b = {}}},
+		b = {pos = {x = 100, y = 0, z = 0}, links = {}},
+	}
+	local along = {id = "along_x", name = "Along x", closed = false, laps = 1, length = 120,
+		grid = {pos = {x = -20, y = 0, z = 0}, dir = {x = 1, y = 0, z = 0}},
+		checkpoints = {{pos = {x = 100, y = 0, z = 0}, r = 8}}, walls = {{130, 0, 160, 0}}}
+	withRoutes(world, ann, {along})
+	local result = world:as(ann, function() return mileage_raceRoad.check() end)
+	same(result.passed, 1, "a wall beyond the end of the road, on its line, is not crossed")
+	along.walls = {{100, 0, 130, 0}}
+	world:hook(ann, "onBeamMPServerLeave")
+	result = world:as(ann, function() return mileage_raceRoad.check() end)
+	same(result.passed, 0, "a wall that touches the road's end on its line closes it")
+	world.roadNodes = {
+		g = {pos = {x = 0, y = -20, z = 0}, links = {b = {}}},
+		b = {pos = {x = 0, y = 100, z = 0}, links = {}},
+	}
+	local alongY = {id = "along_y", name = "Along y", closed = false, laps = 1, length = 120,
+		grid = {pos = {x = 0, y = -20, z = 0}, dir = {x = 0, y = 1, z = 0}},
+		checkpoints = {{pos = {x = 0, y = 100, z = 0}, r = 8}}, walls = {{0, -60, 0, -30}}}
+	withRoutes(world, ann, {alongY})
+	world:hook(ann, "onBeamMPServerLeave")
+	result = world:as(ann, function() return mileage_raceRoad.check() end)
+	same(result.passed, 1, "along y too: a wall behind the grid on the road's line is not crossed")
 end)

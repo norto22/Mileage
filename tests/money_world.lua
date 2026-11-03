@@ -971,7 +971,15 @@ function World.new(opts)
 	package.loaded["scenario/race_marker"] = {
 		init = function() end,
 		setupMarkers = function(wps) table.insert(markers.setups, wps) end,
-		setModes = function(modes) table.insert(markers.modes, modes) end,
+		-- The modes the game's default marker (sideColumnMarker) has; any other it cannot draw.
+		setModes = function(modes)
+			local known = {default = true, next = true, start = true, lap = true, recovery = true, final = true,
+				branch = true, hidden = true}
+			for name, mode in pairs(modes) do
+				if not known[mode] then error("the game's race marker has no mode " .. tostring(mode) .. " (" .. name .. ")") end
+			end
+			table.insert(markers.modes, modes)
+		end,
 		render = function() markers.renders = markers.renders + 1 end,
 		onClientEndMission = function() markers.clears = markers.clears + 1 end,
 	}

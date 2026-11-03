@@ -303,7 +303,7 @@ end
 
 -- The game's race checkpoint markers (scenario/race_marker), as freeroam's hotlapping
 -- uses them: setRaceMarkers puts one at each of wps ({name, pos, r}), setRaceMarkerModes
--- gives each a mode by name ("default", "next", "lap", "finish"; the rest are hidden),
+-- gives each a mode by name ("default", "next", "lap", "final"; the rest are hidden),
 -- renderRaceMarkers draws them each frame and clearRaceMarkers removes them. Each does
 -- nothing, returning false, where the game lacks the module.
 local function raceMarkerModule()

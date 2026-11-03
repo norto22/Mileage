@@ -651,11 +651,12 @@ local function showNextCheckpoint()
 		c.setNavigationTarget(checkpoints[race.passed % n + 1].pos)
 	end
 	if race.markers then
-		-- The checkpoint to drive to is red (blue at the finish), the one after it black.
+		-- The checkpoint to drive to is red (blue at the finish: the game's marker calls that
+		-- mode "final"), the one after it black.
 		local total = n * race.route.laps
 		local modes = {}
 		local current = race.passed % n + 1
-		modes["cp" .. current] = race.passed + 1 == total and "finish" or "default"
+		modes["cp" .. current] = race.passed + 1 == total and "final" or "default"
 		if race.passed + 2 <= total and current % n + 1 ~= current then modes["cp" .. (current % n + 1)] = "next" end
 		c.setRaceMarkerModes(modes)
 	end
