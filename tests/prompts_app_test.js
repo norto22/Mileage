@@ -969,6 +969,23 @@ test("every note in the prompts window is one line of at most 60 characters", ()
 	assert.deepStrictEqual(staticNotes.filter((t) => t.length > 60), [], "static notes in the template");
 });
 
+test("an invite the game could not join keeps its car, distance and reward line under the reason", () => {
+	const {scope} = load();
+	scope.emit("MileageAiRace", {phase: "invite", race: "ai3", host: "Taylor", car: "Ibishu Pessima", distance: 2900,
+		prize: 3000, seconds: 4, note: "You are already in a race."});
+	const v = scope.traffic.view;
+	assert.strictEqual(v.note, "You are already in a race.", "the reason replaces the note");
+	assert.strictEqual(v.line, "vs Ibishu Pessima · 2.9 km · $3,000", "the line stays");
+	assert.strictEqual(v.join, true, "Join and Decline stay");
+});
+
+test("a close for an invite that is no longer on screen leaves a result alone", () => {
+	const {scope} = load();
+	scope.emit("MileageAiRace", {phase: "result", race: "ai1", host: "x", car: "C", winner: null, places: [], you: "y"});
+	scope.emit("MileageAiRace", {phase: "inviteClosed", race: "ai1"});
+	assert.strictEqual(scope.traffic.kind, "result", "the result stays until closed");
+});
+
 //== the template ================================================================
 
 test("the template binds every text as text, never as markup", () => {
