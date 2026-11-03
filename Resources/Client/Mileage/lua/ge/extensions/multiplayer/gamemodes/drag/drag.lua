@@ -154,11 +154,33 @@ end
 ---
 --- getForegroundMissionId is the game's own test for this; phaseHandlers.lua:902 and :910
 --- use it to decide whether the mission owns the result screen.
+---
+--- Only a DRAG mission owns the strip (#22): a time trial or any other mission driven past
+--- a strip leaves multiplayer drag on. The mission's type names it, as BeamNG's "Drag Race"
+--- type does, and is read the way parkingChallenge.lua spots parking missions. A mission
+--- whose type cannot be read still owns the strip, as every mission did before.
+local loggedMissionId = nil
+
+local function isDragMission(id)
+	local list = gameplay_missions_missions
+	if not list or type(list.getMissionById) ~= "function" then return true end
+	local ok, mission = pcall(list.getMissionById, id)
+	if not ok or type(mission) ~= "table" or type(mission.missionType) ~= "string" then return true end
+	local drag = string.find(string.lower(mission.missionType), "drag", 1, true) ~= nil
+	if loggedMissionId ~= id then
+		loggedMissionId = id
+		log("I", logTag, string.format("foreground mission %s: type=%s drag=%s",
+			tostring(id), mission.missionType, tostring(drag)))
+	end
+	return drag
+end
+
 local function inForegroundMission()
 	local mm = gameplay_missions_missionManager
 	if not mm or type(mm.getForegroundMissionId) ~= "function" then return false end
 	local ok, id = pcall(mm.getForegroundMissionId)
-	return ok and id ~= nil and id ~= false
+	if not ok or id == nil or id == false then return false end
+	return isDragMission(id)
 end
 
 --- Is the career performance test running?
