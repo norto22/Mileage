@@ -506,3 +506,71 @@ test("#20: driving away from the strip after a finished race still takes the rac
 	same(lobby.getLocalStripId(), nil, "strip held after driving away")
 	same(tornDown, 1, "race displays torn down")
 end)
+
+--== #22: only a drag mission takes the strip from multiplayer drag ==========
+
+-- A foreground mission of this type, as the game's mission manager and mission list
+-- report it. missionType = nil gives a mission with no type; found = false an id the
+-- list cannot find.
+local function foregroundMission(missionType, found)
+	gameplay_missions_missionManager = {getForegroundMissionId = function() return "m1" end}
+	gameplay_missions_missions = {getMissionById = function(id)
+		if found == false or id ~= "m1" then return nil end
+		return {id = id, missionType = missionType}
+	end}
+end
+
+local function noMission()
+	gameplay_missions_missionManager = {getForegroundMissionId = function() return nil end}
+	gameplay_missions_missions = nil
+	career_modules_vehiclePerformance = nil
+end
+
+local function dragState(drag)
+	return tostring(drag.isMultiplayer()) .. " " .. tostring(drag.shouldSyncState())
+end
+
+test("#22: a non-drag mission leaves multiplayer drag on", function()
+	newGame({"A"})
+	noMission()
+	local drag = realDragMode()
+	same(dragState(drag), "true true", "multiplayer and sync with no mission")
+	foregroundMission("timeTrial")
+	same(dragState(drag), "true true", "multiplayer and sync during a time trial")
+	foregroundMission("chase")
+	same(dragState(drag), "true true", "multiplayer and sync during a chase")
+	noMission()
+end)
+
+test("#22: a drag mission and the performance test still turn multiplayer drag off", function()
+	newGame({"A"})
+	noMission()
+	local drag = realDragMode()
+	for _, missionType in ipairs({"drag", "dragRace", "Drag Race", "bmraDRAG"}) do
+		foregroundMission(missionType)
+		same(dragState(drag), "false false", "multiplayer and sync during a " .. missionType .. " mission")
+	end
+	noMission()
+	career_modules_vehiclePerformance = {isTestInProgress = function() return true end}
+	same(dragState(drag), "false false", "multiplayer and sync during the performance test")
+	noMission()
+end)
+
+test("#22: a mission whose type cannot be read still takes the strip, as before", function()
+	newGame({"A"})
+	noMission()
+	local drag = realDragMode()
+	foregroundMission(nil)
+	same(dragState(drag), "false false", "a mission with no type")
+	foregroundMission(42)
+	same(dragState(drag), "false false", "a mission whose type is not text")
+	foregroundMission("timeTrial", false)
+	same(dragState(drag), "false false", "a mission id the mission list cannot find")
+	foregroundMission("timeTrial")
+	gameplay_missions_missions = nil
+	same(dragState(drag), "false false", "no mission list")
+	foregroundMission("timeTrial")
+	gameplay_missions_missions = {getMissionById = function() error("mission list broke") end}
+	same(dragState(drag), "false false", "a mission lookup that raises")
+	noMission()
+end)
