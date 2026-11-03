@@ -1073,3 +1073,53 @@ test("a game asks for the part paints of another player's car, never of their tr
 	same(paintRequests({["1-1"] = true}), "1-0", "paint requests")
 	same(paintRequests({}, false), "1-0,1-1", "paint requests with an enabler that cannot tell traffic")
 end)
+
+test("#87: a player who joins, with the real enabler and server, asks only my friend's own car for paint", function()
+	local _, friend = twoPlayers()
+	frames(friend, 1) -- my friend's game has sent its traffic marks
+	local late = addPlayer(2, "Late")
+	late.MPVehicleGE.getGameVehicleID = function(sid)
+		local entry = late.vehicles[sid]
+		return entry and entry.gameVehicleID
+	end
+	local now = 0
+	os.clockhp = function() return now end
+	local paint
+	as(late, function()
+		mileageEnabler = late.enabler
+		paint = dofile(PAINT)
+		paint.onExtensionLoaded()
+	end)
+	-- BeamMP builds my friend's car, police car and parked car on the joining game, and
+	-- they become ready before the server's vehicle list has arrived.
+	for vid, model in pairs({[0] = "pickup", [1] = "fullsize", [2] = "covet"}) do
+		local gid = gameId(1, vid)
+		local veh = {owner = 1, serverVehicleID = "1-" .. vid, JBeam = model, active = true}
+		function veh:setActive(on) self.active = on == 1 end
+		function veh:getActive() return self.active end
+		function veh:queueLuaCommand() end
+		function veh:setField() end
+		function veh:setDynDataFieldbyName(name, _, value) self[name] = value end
+		late.objects[gid] = veh
+		late.vehicles["1-" .. vid] = {gameVehicleID = gid, jbeam = model, isLocal = false}
+		as(late, paint.onVehicleReady, gid)
+	end
+	pump()
+	same(count(late.serverRequests, "requestPartPaints"), 0, "paint requests before the vehicle list")
+	careerVehSyncRequested(2, "")
+	pump()
+	now = 0.5
+	as(late, paint.onUpdate)
+	local asked = {}
+	for _, m in ipairs(world.toServer) do
+		if m.name == "requestPartPaints" then table.insert(asked, decode(m.data).serverVehicleID) end
+	end
+	same(table.concat(asked, ","), "1-0", "cars asked for paint once the list arrived")
+	pump()
+	same(count(late.serverRequests, "requestPartPaints"), 1, "paint requests once the list arrived")
+	now = 10
+	as(late, paint.onUpdate)
+	pump()
+	same(count(late.serverRequests, "requestPartPaints"), 1, "paint requests after the 5 s wait")
+	os.clockhp = function() return 0 end
+end)

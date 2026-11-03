@@ -945,6 +945,34 @@ test("#15: every runtime patch applies with the pause menu not loaded yet, and t
 	ui_pause_actions = nil
 end)
 
+test("#15: an environment page module that appears on its own, with no actions module, is patched by the frame retry", function()
+	setup()
+	ui_pause_actions, ui_pause_providers_routeData_environment = nil, nil
+	same(patches.apply(), true, "applied")
+	local active = true
+	career_career.isActive = function() return active end
+	local restrict = false
+	local savedSettings = settings
+	settings = {getValue = function(key, default)
+		if key == "restrictScenarios" then return restrict end
+		return default
+	end}
+	local function editable() return not settings.getValue("restrictScenarios", true) end
+	local gameOverview = function() return {editable = editable()} end
+	ui_pause_providers_routeData_environment = {
+		getEnvironmentData = gameOverview,
+		getEnvironmentWeatherData = function() return {editable = editable()} end,
+	}
+	patches.onUpdate(3)
+	same(ui_pause_providers_routeData_environment.getEnvironmentData({mode = "career"}).editable, false,
+		"overview in a career once the retry ran")
+	same(ui_pause_providers_routeData_environment.getEnvironmentWeatherData({mode = "career"}).editable, false,
+		"weather in a career once the retry ran")
+	patches.revert()
+	same(ui_pause_providers_routeData_environment.getEnvironmentData, gameOverview, "overview after the revert")
+	ui_pause_providers_routeData_environment, settings, career_career.isActive = nil, savedSettings, nil
+end)
+
 test("a game without computerButtonCallback is reported and the patches are tried again", function()
 	setup()
 	career_modules_computer.computerButtonCallback = nil

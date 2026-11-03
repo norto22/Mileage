@@ -114,6 +114,32 @@ test("#109: a ping that is not a number, or pings that are not a list by name, r
 	}
 });
 
+test("#109: each ping update replaces the last, so a player who left the pings reads ?ms", () => {
+	const {scope, table} = load();
+	scope.emit("onBeamMPPlayerPings", JSON.stringify({Ann: 66, Bob: 80}));
+	scope.emit("onBeamMPPlayerPings", JSON.stringify({Bob: 100}));
+	scope.emit("onBeamMPPlayerList", PLAYERS);
+	assert.deepStrictEqual(pingTexts(table), ["?ms", "84ms"], "ping texts after the second update");
+});
+
+test("#109: the cap is 999 after taking 16 ms off, and a ping below 0 reads 0ms", () => {
+	const {scope, table} = load();
+	scope.emit("onBeamMPPlayerPings", JSON.stringify({Ann: 1014, Bob: 1015, Cy: -5, Dee: 17}));
+	scope.emit("onBeamMPPlayerList", FOUR_PLAYERS);
+	assert.deepStrictEqual(pingTexts(table), ["998ms", "999ms", "0ms", "1ms"], "ping texts");
+});
+
+test("#109: a player named like an object property reads ?ms when BeamMP sends no ping for them", () => {
+	const {scope, table} = load();
+	scope.emit("onBeamMPPlayerPings", JSON.stringify({Ann: 66}));
+	scope.emit("onBeamMPPlayerList", JSON.stringify([
+		{id: 0, name: "Ann", formatted_name: "Ann"},
+		{id: 1, name: "constructor", formatted_name: "constructor"},
+		{id: 2, name: "toString", formatted_name: "toString"},
+	]));
+	assert.deepStrictEqual(pingTexts(table), ["50ms", "?ms", "?ms"], "ping texts");
+});
+
 test("losing the connection empties the list and keeps it empty through BeamMP's updates", () => {
 	const {scope, table} = load();
 	scope.emit("onBeamMPPlayerList", PLAYERS);

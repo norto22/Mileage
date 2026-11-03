@@ -169,3 +169,70 @@ test("#15: applying twice wraps the pause modules once", function()
 	same(extensions.load == gameLoad, true, "extensions.load after one revert")
 	same(systemRail(), ALL_BUTTONS, "system buttons after one revert")
 end)
+
+test("#15: an environment page that calls another page inside it leaves the game's getValue in place", function()
+	local patches = setup()
+	local env = ui_pause_providers_routeData_environment
+	-- An overview page that reads the weather page through the module.
+	env.getEnvironmentData = function(context)
+		local weather = ui_pause_providers_routeData_environment.getEnvironmentWeatherData(context)
+		return {actionState = {enabled = weather.editable}}
+	end
+	patches.apply()
+	same(env.getEnvironmentData({mode = "career"}).actionState.enabled, false, "overview in a career")
+	same(settings.getValue, game.getValue, "settings.getValue after the nested pages ran")
+	same(settings.getValue("restrictScenarios", true), false, "the player's setting after the nested pages")
+end)
+
+test("#15: only restrict scenarios reads as on while a page runs; every other setting is the player's", function()
+	local patches = setup()
+	game.settings.otherOption = "mine"
+	local seen
+	ui_pause_providers_routeData_environment.getEnvironmentSimulationData = function(context)
+		seen = {settings.getValue("otherOption"), settings.getValue("missingOption", "default"),
+			settings.getValue("restrictScenarios", true)}
+		return {editable = false}
+	end
+	patches.apply()
+	ui_pause_providers_routeData_environment.getEnvironmentSimulationData({mode = "career"})
+	same(seen[1], "mine", "another setting")
+	same(seen[2], "default", "a setting the player never set, with its default")
+	same(seen[3], true, "restrict scenarios")
+end)
+
+test("#15: the Mods button and traffic payload are copied, not changed, and nil arguments do not raise", function()
+	local patches = setup()
+	local received = {}
+	ui_pause_actions.registerButton = function(metadata, callback)
+		table.insert(received, metadata)
+		return metadata
+	end
+	local trafficPayload
+	ui_pause_providers_routeData_environment.requestEnvironmentTrafficPayload = function(payload)
+		trafficPayload = payload
+		return {editable = payload ~= nil and payload.editable}
+	end
+	patches.apply()
+	local mods = {id = "system.mods", visible = true}
+	ui_pause_actions.registerButton(mods, function() end)
+	same(mods.visible, true, "the game's own Mods table")
+	same(received[1].visible, false, "the Mods button registered")
+	local ok, err = pcall(ui_pause_actions.registerButton, nil, nil)
+	expect(ok, "registerButton with no metadata raised: " .. tostring(err))
+	local payload = {editable = true, kind = "cars"}
+	same(ui_pause_providers_routeData_environment.requestEnvironmentTrafficPayload(payload).editable, false,
+		"traffic controls in a career")
+	same(payload.editable, true, "the page's own payload")
+	same(trafficPayload.kind, "cars", "the payload's other fields passed on")
+	ok, err = pcall(ui_pause_providers_routeData_environment.requestEnvironmentTrafficPayload, nil)
+	expect(ok, "a traffic payload of nil raised: " .. tostring(err))
+	same(trafficPayload.editable, false, "a nil payload goes on read-only")
+end)
+
+test("#15: a career check that raises leaves the menu as the game's own", function()
+	local patches = setup()
+	patches.apply()
+	career_career = {isActive = function() error("career broke") end}
+	same(systemRail(), ALL_BUTTONS, "system buttons when the career check raises")
+	same(environment(), EDITABLE, "environment pages when the career check raises")
+end)

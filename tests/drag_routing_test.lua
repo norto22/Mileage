@@ -626,3 +626,32 @@ test("#21: a non-drag mission does not hold the senders back", function()
 	same(callSenders(drag), ALL_SENT, "messages during a time trial")
 	noMission()
 end)
+
+-- The mission types 0.40.4.0 labels as drag races, and its generated time trial
+-- (lua/ge/extensions/ui/gameplaySelector/tileGenerators/missionTiles.lua:3-6).
+test("#22: the game's own drag mission types take the strip; its generated time trial does not", function()
+	newGame({"A"})
+	noMission()
+	local drag = realDragMode()
+	for _, missionType in ipairs({"dragStripRace", "dragStripAPM"}) do
+		foregroundMission(missionType)
+		same(dragState(drag), "false false", "multiplayer and sync during a " .. missionType .. " mission")
+	end
+	foregroundMission("generatedTimeTrial")
+	same(dragState(drag), "true true", "multiplayer and sync during a generatedTimeTrial mission")
+	noMission()
+end)
+
+test("#22: a mission's type is logged once per mission, not on every check", function()
+	newGame({"A"})
+	noMission()
+	local drag = realDragMode()
+	foregroundMission("timeTrial")
+	for _ = 1, 5 do drag.isMultiplayer() drag.shouldSyncState() end
+	same(countLines(logs, "type=timeTrial"), 1, "log lines for the time trial")
+	gameplay_missions_missionManager = {getForegroundMissionId = function() return "m2" end}
+	gameplay_missions_missions = {getMissionById = function(id) return {id = id, missionType = "dragRace"} end}
+	for _ = 1, 5 do drag.isMultiplayer() end
+	same(countLines(logs, "type=dragRace"), 1, "log lines for the next mission")
+	noMission()
+end)
