@@ -60,8 +60,8 @@ local wraps = {}
 -- The rule of each own car under one, by game vehicle id: "parked" | "far" | "near" |
 -- "hidden". A car not listed sends every update.
 local limited = {}
--- When each car last sent each update: lastSent[update][gameVehicleID] = clock.
-local lastSent = {pos = {}, elec = {}, inp = {}}
+-- When each car may next send each update: nextDue[update][gameVehicleID] = clock.
+local nextDue = {pos = {}, elec = {}, inp = {}}
 -- Lights and inputs changed since a car's last send, merged: held[update][gameVehicleID].
 local held = {elec = {}, inp = {}}
 
@@ -128,14 +128,11 @@ local function classify()
 	end
 	limited = rules
 	-- Cars gone from the game keep no times or held updates.
-	for _, byCar in pairs(lastSent) do
-		for gameVehicleID in pairs(byCar) do
-			if not be:getObjectByID(gameVehicleID) then byCar[gameVehicleID] = nil end
-		end
-	end
-	for _, byCar in pairs(held) do
-		for gameVehicleID in pairs(byCar) do
-			if not be:getObjectByID(gameVehicleID) then byCar[gameVehicleID] = nil end
+	for _, perUpdate in ipairs({nextDue, held}) do
+		for _, byCar in pairs(perUpdate) do
+			for gameVehicleID in pairs(byCar) do
+				if not be:getObjectByID(gameVehicleID) then byCar[gameVehicleID] = nil end
+			end
 		end
 	end
 end
@@ -160,12 +157,13 @@ end
 local function due(update, gameVehicleID, kind)
 	local every = SPACING[update][kind]
 	if not every then return false end
-	local nextAt = lastSent[update][gameVehicleID]
+	local byCar = nextDue[update]
+	local nextAt = byCar[gameVehicleID]
 	if nextAt and clock < nextAt - 1e-6 then return false end
 	if nextAt and clock - nextAt < every then
-		lastSent[update][gameVehicleID] = nextAt + every
+		byCar[gameVehicleID] = nextAt + every
 	else
-		lastSent[update][gameVehicleID] = clock + every
+		byCar[gameVehicleID] = clock + every
 	end
 	return true
 end
@@ -244,7 +242,7 @@ end
 local function isActive() return next(wraps) ~= nil end
 
 local function clearState()
-	limited, lastSent, held = {}, {pos = {}, elec = {}, inp = {}}, {elec = {}, inp = {}}
+	limited, nextDue, held = {}, {pos = {}, elec = {}, inp = {}}, {elec = {}, inp = {}}
 end
 
 local function unwrap(why)
