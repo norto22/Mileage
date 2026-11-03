@@ -97,6 +97,8 @@ local function setup(opts)
 	end
 	MPElectricsGE = opts.noElectrics and {} or {sendElectrics = recorder(game.sentElec)}
 	MPInputsGE = {sendInputs = recorder(game.sentInp)}
+	game.sentEng, game.sentPtr = {}, {}
+	MPPowertrainGE = {sendEngineData = recorder(game.sentEng), sendLivePowertrain = recorder(game.sentPtr)}
 	game.originalElec, game.originalInp = MPElectricsGE.sendElectrics, MPInputsGE.sendInputs
 	jsonDecode, jsonEncode = flatDecode, flatEncode
 	if opts.meter then
@@ -497,6 +499,36 @@ test("a hidden car's lights wait until it is shown, then go out at once", functi
 	same(state.signal_R, 1, "right signal")
 end)
 
+-- Rejects a gate that drops what it held once a car leaves its rule: the player taking a
+-- traffic car must not leave its last light change unsent.
+test("lights held for a traffic car the player climbs into go out within a second, ending in the last value", function()
+	local module = busyGame()
+	run(module, 1)
+	MPElectricsGE.sendElectrics(flatEncode({lowbeam = 1}), 30)
+	MPElectricsGE.sendElectrics(flatEncode({lowbeam = 0, signal_L = 1}), 30)
+	same(#texts(game.sentElec, 30), 1, "sent before the player climbs in")
+	game.playerVehicle = 30
+	run(module, 1)
+	same(#texts(game.sentElec, 30), 2, "the held set once the car is the player's")
+	local state = applied(texts(game.sentElec, 30))
+	same(state.lowbeam, 0, "lowbeam")
+	same(state.signal_L, 1, "left signal")
+	MPElectricsGE.sendElectrics('{"horn":1}', 30)
+	same(texts(game.sentElec, 30)[3], '{"horn":1}', "the next call goes out at once with BeamMP's own text")
+end)
+
+-- Rejects a gate with no spacing for still parked cars (their inputs would be held for
+-- good) or one that sends them every call.
+test("a still parked car's inputs go out once a second, ending in the last value", function()
+	local module = busyGame()
+	run(module, 1)
+	sendEach(module, 4, MPInputsGE.sendInputs, 40, function(frame) return flatEncode({t = frame}) end)
+	local n = #texts(game.sentInp, 40)
+	expect(n >= 4 and n <= 5, "parked inputs sent in 4 s: " .. n)
+	run(module, 1.02)
+	same(applied(texts(game.sentInp, 40)).t, 200, "the last input")
+end)
+
 test("text that is not a JSON object goes out unchanged, and a failing check sends the call through", function()
 	local module = busyGame()
 	run(module, 1)
@@ -549,4 +581,113 @@ test("the meter hears held lights as asked and the merged set sent later as let 
 	same(traffic[2], 2, "traffic lights sent, the merged set included")
 	same(own[1], 1, "own lights asked")
 	same(own[2], 1, "own lights sent")
+end)
+
+--== second review ===========================================================
+
+test("text that does not decode goes out after what was held, so an older value never follows it", function()
+	local module = busyGame()
+	run(module, 1)
+	MPInputsGE.sendInputs(flatEncode({b = 1}), 30)
+	MPInputsGE.sendInputs(flatEncode({b = 0.5}), 30)
+	-- BeamMP's newest text reaches the check in a form it cannot read.
+	MPInputsGE.sendInputs("b=0", 30)
+	run(module, 2)
+	local sent = texts(game.sentInp, 30)
+	same(sent[#sent], "b=0", "the newest text is the last one sent")
+	same(sent[#sent - 1], flatEncode({b = 0.5}), "what was held went first")
+end)
+
+test("a decoder that fails sends what was held first, then the call", function()
+	local module = busyGame()
+	run(module, 1)
+	MPInputsGE.sendInputs(flatEncode({b = 1}), 30)
+	MPInputsGE.sendInputs(flatEncode({b = 0.5}), 30)
+	local realDecode = jsonDecode
+	jsonDecode = function() error("decoder broke") end
+	MPInputsGE.sendInputs('{"b":0}', 30)
+	jsonDecode = realDecode
+	run(module, 2)
+	local sent = texts(game.sentInp, 30)
+	same(sent[#sent], '{"b":0}', "the newest text is the last one sent")
+end)
+
+test("far traffic that comes near sends its lights at the near rate from the next check", function()
+	local module = busyGame()
+	run(module, 1)
+	-- Sent while far, just before the next check: the far rule's next send is a second away.
+	MPElectricsGE.sendElectrics(flatEncode({brake = 1}), 30)
+	same(#texts(game.sentElec, 30), 1, "first change sent at once")
+	game.objects[30].pos = vec(300, 0, 0)
+	run(module, 0.06)
+	MPElectricsGE.sendElectrics(flatEncode({brake = 0}), 30)
+	run(module, 0.22)
+	same(#texts(game.sentElec, 30), 2, "the change sent within the near spacing")
+	same(applied(texts(game.sentElec, 30)).brake, 0, "the last value")
+end)
+
+--== engine and powertrain ===================================================
+
+-- Engine data is nested (one table per engine); these texts stand for tables.
+local function nestedCodec()
+	local byText, encoded = {}, {}
+	local function copy(t)
+		local c = {}
+		for k, v in pairs(t) do c[k] = type(v) == "table" and copy(v) or v end
+		return c
+	end
+	jsonDecode = function(text) return byText[text] and copy(byText[text]) end
+	jsonEncode = function(t)
+		table.insert(encoded, copy(t))
+		return "#" .. #encoded
+	end
+	local function text(t)
+		local key = "T" .. tostring(t)
+		byText[key] = t
+		return key
+	end
+	return text, encoded
+end
+
+test("a near traffic car's engine changes are merged field by field and go out 5 times a second", function()
+	local module = busyGame({meter = true})
+	run(module, 1)
+	local text, encoded = nestedCodec()
+	MPPowertrainGE.sendEngineData(text({ignLvl = 2}), 20)
+	MPPowertrainGE.sendEngineData(text({ICE = {mainEngine = {ign = 1, isStalled = false}}}), 20)
+	MPPowertrainGE.sendEngineData(text({ICE = {mainEngine = {starter = 1}}}), 20)
+	same(#texts(game.sentEng, 20), 1, "sent at once, the rest held")
+	run(module, 0.22)
+	same(#texts(game.sentEng, 20), 2, "the merged set within the spacing")
+	local merged = encoded[#encoded]
+	same(merged.ICE.mainEngine.ign, 1, "ignition kept")
+	same(merged.ICE.mainEngine.starter, 1, "starter")
+	same(merged.ICE.mainEngine.isStalled, false, "stall kept")
+	local c = game.meter["eng.traffic"]
+	same(c[1], 3, "engine updates asked")
+	same(c[2], 2, "engine updates sent")
+end)
+
+test("a far traffic car's powertrain changes go out once a second; the player's own car's at once", function()
+	local module = busyGame()
+	run(module, 1)
+	local text = nestedCodec()
+	for i = 1, 10 do
+		MPPowertrainGE.sendLivePowertrain(text({rearDiff = {mode = "m" .. i}}), 30)
+		MPPowertrainGE.sendLivePowertrain(text({rearDiff = {mode = "m" .. i}}), 1)
+		run(module, 0.1)
+	end
+	local far = #texts(game.sentPtr, 30)
+	expect(far >= 1 and far <= 2, "far traffic powertrain sends in 1 s: " .. far)
+	same(#texts(game.sentPtr, 1), 10, "the player's car sends every change")
+end)
+
+test("without MPPowertrainGE the log says so once and lights and inputs are still checked", function()
+	local module = setup()
+	MPPowertrainGE = nil
+	addCar(1, "player")
+	module.onCareerActive(true)
+	module.onCareerActive(true)
+	same(countLines(logs, "MPPowertrainGE.sendEngineData missing"), 1, "warnings")
+	expect(MPInputsGE.sendInputs ~= game.originalInp, "inputs still wrapped")
 end)

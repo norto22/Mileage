@@ -4875,7 +4875,7 @@ local perf = {reports = {}, EVERY = 20, MAX_BYTES = 2048, FRESH = 90}
 
 do
 	local COUNT, BIG = 10000000, 100000
-	local SENT_KINDS = {"pos", "elec", "inp"}
+	local SENT_KINDS = {"pos", "elec", "inp", "eng"}
 	local CAR_KINDS = {"own", "ownTraffic", "ownParked", "remote", "remoteTraffic", "hidden"}
 
 	-- A finite number clamped to [0, high] and rounded to a whole number (the Stats line

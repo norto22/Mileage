@@ -5,7 +5,7 @@
 --
 --   * frame time (average and worst) and frames longer than HITCH_SECONDS;
 --   * updates BeamMP asked to send for this game's cars and how many went through, by
---     kind (position, lights, inputs) and apart for own cars and traffic - the send
+--     kind (position, lights, inputs, engine) and apart for own cars and traffic - the send
 --     checks in mileage/positionRate.lua tell the meter through sent();
 --   * updates received for other players' cars, counted by a wrap of BeamMP's handle
 --     functions that always passes the update on;
@@ -47,8 +47,8 @@ local function newWindow()
 	return {
 		seconds = 0, frames = 0, sum = 0, worst = 0, hitches = 0,
 		sent = {
-			own = {pos = pair(), elec = pair(), inp = pair()},
-			traffic = {pos = pair(), elec = pair(), inp = pair()},
+			own = {pos = pair(), elec = pair(), inp = pair(), eng = pair()},
+			traffic = {pos = pair(), elec = pair(), inp = pair(), eng = pair()},
 		},
 		recv = {pos = 0, elec = 0, inp = 0},
 		built = 0,
@@ -148,8 +148,8 @@ local function buildReport()
 end
 
 local function sentText(group)
-	return string.format("pos %d/%d elec %d/%d inp %d/%d", group.pos[2], group.pos[1], group.elec[2],
-		group.elec[1], group.inp[2], group.inp[1])
+	return string.format("pos %d/%d elec %d/%d inp %d/%d eng %d/%d", group.pos[2], group.pos[1], group.elec[2],
+		group.elec[1], group.inp[2], group.inp[1], group.eng[2], group.eng[1])
 end
 
 local function logLine(r)

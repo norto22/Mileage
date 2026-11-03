@@ -166,6 +166,50 @@ test("the players near go from fewest to most as another player drives up", func
 	same(game.lastReport.near[2], 2, "most")
 end)
 
+-- Rejects a near count that ignores whether the car is shown: a car switched off on this
+-- game is not a player driving with this one.
+test("another player's car hidden on this game does not count as near", function()
+	local module = busyGame()
+	game.objects[31].pos = vec(400, 0, 0)
+	game.objects[31].active = false
+	frames(module, 1500, 0.02)
+	same(game.lastReport.near[1], 1, "fewest")
+	same(game.lastReport.near[2], 1, "most")
+end)
+
+-- Rejects a meter that fails or guesses a distance when this player has no car.
+test("with no car of its own the game reports no players near and still counts its cars", function()
+	local module = setup()
+	addCar(30, "remote", vec(10, 0, 0), {owner = 1})
+	module.onCareerActive(true)
+	frames(module, 1500, 0.02)
+	same(#reports(), 1, "reports")
+	same(game.lastReport.near[1], 0, "fewest")
+	same(game.lastReport.near[2], 0, "most")
+	same(game.lastReport.cars.remote, 1, "other players' cars")
+end)
+
+-- Rejects a hitch test written as >= : only a frame longer than 100 ms is a long frame.
+test("a frame of exactly 100 ms is not a long frame, one just longer is", function()
+	local module = busyGame()
+	module.onUpdate(0.1)
+	module.onUpdate(0.1001)
+	frames(module, 1500, 0.02)
+	same(game.lastReport.hitches, 1, "frames over 100 ms")
+	same(game.lastReport.worstMs, 100, "worst frame")
+end)
+
+-- Rejects a meter that raises or turns its clock back on a frame time it cannot use.
+test("a missing or negative frame time counts the frame and adds no time", function()
+	local module = busyGame()
+	module.onUpdate(nil)
+	module.onUpdate(-5)
+	frames(module, 1500, 0.02)
+	same(#reports(), 1, "reports")
+	same(game.lastReport.frames, 1502, "frames")
+	same(game.lastReport.hitches, 0, "frames over 100 ms")
+end)
+
 test("cars are counted once a second, not every frame", function()
 	local module = busyGame()
 	frames(module, 600, 1 / 60)
@@ -247,4 +291,17 @@ test("a career start while already active wraps nothing twice", function()
 	positionGE.handle("Zp:1-30:{}")
 	frames(module, 1500, 0.02)
 	same(game.lastReport.recv.pos, 1, "one position counted once")
+end)
+
+test("engine updates are counted apart, own and traffic, and appear in the log line", function()
+	local module = busyGame()
+	module.sent("eng", true, false)
+	module.sent("eng", true, true)
+	module.flushed("eng")
+	module.sent("eng", false, true)
+	frames(module, 1500, 0.02)
+	same(game.lastReport.sent.traffic.eng[1], 2, "traffic engine updates asked")
+	same(game.lastReport.sent.traffic.eng[2], 2, "traffic engine updates sent")
+	same(game.lastReport.sent.own.eng[2], 1, "own engine updates sent")
+	same(countLines(logs, "traffic pos 0/0 elec 0/0 inp 0/0 eng 2/2"), 1, "log line")
 end)

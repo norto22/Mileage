@@ -459,3 +459,35 @@ test("a report older than 90 s is not printed and a player who leaves loses thei
 	mileagePerfReport(2, perfJson())
 	expect(costLine(statsLines(), 2), "a player who joins again is not held to the old report's 20 s")
 end)
+
+-- Rejects a size check written as >= (a report of exactly the limit is a valid report).
+test("a report of exactly 2048 bytes is taken, one byte longer is not", function()
+	local function sized(n)
+		local base = perfJson():sub(1, -2) .. ',"pad":"'
+		return base .. string.rep("x", n - #base - 2) .. '"}'
+	end
+	newServer({0, 1, 2})
+	same(#sized(2048), 2048, "the long report's size")
+	mileagePerfReport(1, sized(2048))
+	expect(costLine(statsLines(), 1), "a 2048-byte report was not taken")
+	mileagePerfReport(2, sized(2049))
+	same(costLine(statsLines(), 2), nil, "a 2049-byte report was taken")
+end)
+
+-- Rejects a rate limit stamped before the report is read: a broken message must not
+-- keep a player's real report out for 20 s.
+test("a report that is not a report does not use up the player's 20 s", function()
+	newServer({0, 1})
+	mileagePerfReport(1, "not json")
+	mileagePerfReport(1, perfJson({v = 2}))
+	mileagePerfReport(1, perfJson())
+	expect(costLine(statsLines(), 1), "the valid report after a broken one was not taken")
+end)
+
+-- Rejects a freshness check written as < (only a report older than 90 s is left out).
+test("a report exactly 90 s old is still printed", function()
+	newServer({0, 1})
+	mileagePerfReport(1, perfJson())
+	server.now = 90
+	expect(costLine(statsLines(), 1), "a 90 s old report was left out")
+end)
