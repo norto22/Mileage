@@ -383,11 +383,18 @@ local function activeRaceId(raceId)
 	return active and active.id or nil
 end
 
+--- May our own lights, timers and race start go to other players? Not while a drag
+--- mission or the performance test owns the strip (#21). The game's callers check for a
+--- multiplayer race first today; this keeps the senders quiet if a game update changes one.
+local function sendersOn()
+	return enabled and not inSoloDragActivity()
+end
+
 --- Our own car's stage / pre-stage beams changed. Reported to the host, which marks the
 --- lane staged (after the same one-second hold single player uses) and re-broadcasts
 --- the lights so the other racers see them.
 function M.syncStageLightState(raceId, lane, staged)
-	if not enabled then return end
+	if not sendersOn() then return end
 	local id = activeRaceId(raceId)
 	if not id or not lane then return end
 	send("dragRaceTreeLightUpdate", "host", {
@@ -400,7 +407,7 @@ end
 
 --- Tree light changes (countdown ambers, stage lights) from display.lua.
 function M.syncTreeLightState(raceId, lane, lightState)
-	if not enabled then return end
+	if not sendersOn() then return end
 	local id = activeRaceId(raceId)
 	if not id or not lane or not lightState then return end
 	send("dragRaceTreeLightUpdate", "host", {
@@ -415,7 +422,7 @@ end
 --- whichever client's racer started, so without the gate every client would announce
 --- its own start time and they would disagree about when the race began.
 function M.notifyRaceStart(raceId)
-	if not enabled or not M.isServerHost() then return end
+	if not sendersOn() or not M.isServerHost() then return end
 	local id = activeRaceId(raceId)
 	if not id then return end
 
@@ -448,7 +455,7 @@ end
 --- A timer resolved for our car (60ft, 1/8, 1/4, dial...). Each machine times only its
 --- own vehicle; the host collects and re-broadcasts so everyone sees one board.
 function M.updateTimerValue(raceId, vehId, timerName, value)
-	if not enabled then return end
+	if not sendersOn() then return end
 	local id = activeRaceId(raceId)
 	if not id or not timerName then return end
 	-- A NAME, not the whole vehicle.
