@@ -708,6 +708,28 @@ test("the leaderboard has a Race spots tab with each route's fastest players", (
 	assert.strictEqual(scope.leaderboard.tab, "spots", "the tab is kept");
 });
 
+test("a server that allows no opponents keeps the stepper at 0 and offers a timed run", () => {
+	const {scope} = load();
+	scope.emit("MileageSpotRace", Object.assign({}, SETUP, {opponentsMax: 0}));
+	assert.strictEqual(scope.spot.view.stepper.value, 0, "none to start with");
+	assert.strictEqual(scope.spot.view.stepper.max, 0, "the server's maximum");
+	scope.spotOpponents(1);
+	assert.strictEqual(scope.spot.view.stepper.value, 0, "+ cannot pass the server's maximum");
+	assert.strictEqual(scope.spot.view.start, "Start run");
+});
+
+test("a broken race spot result or leaderboard shows what it can and keeps the app working", () => {
+	const {scope} = load();
+	scope.emit("MileageSpotRace", {phase: "result", id: "s9", routeName: "City Race 1", you: "Taylor", places: "none"});
+	assert.strictEqual(scope.spot.view.title, "City Race 1: no winner");
+	assert.deepStrictEqual([...scope.spot.view.places], [], "no places to list");
+	scope.emit("MileageLeaderboard", {wins: [], drag: {}, spots: {
+		city_race_1: {name: "City Race 1", rows: "x"}, highway_race: null}});
+	scope.showTab("spots");
+	assert.deepStrictEqual([...scope.leaderboard.spots].map((s) => s.name + ": " + s.rows.length),
+		["City Race 1: 0", "highway_race: 0"], "each route listed, by its id when the name is missing");
+});
+
 test("no text the app shows for a race spot says AI", () => {
 	const {scope} = load();
 	const texts = (v) => [v.title, v.note, v.warn, v.big, v.start].concat((v.rows || []).map((r) => r.label + " " + r.value),

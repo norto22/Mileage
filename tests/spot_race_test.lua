@@ -1156,3 +1156,192 @@ World.test("leaving the server ends the race here and releases the car", functio
 	same(ann.car.frozen, false, "released")
 	world:as(ann, function() same(mileage_spotRace.inRace(), false, "no race here") end)
 end)
+
+--== edges: checkpoint reach, finish timing, foreign messages, ranges ===============
+
+-- p races the highway race alone and drives past its first checkpoint offset metres to the
+-- side, 45 m between readings so no reading lands beside it; returns the checkpoints the
+-- server counted.
+local function pastFirstCheckpoint(world, p, offset)
+	local r = route("highway_race")
+	soloToGreen(world, p)
+	local cp, g = r.checkpoints[1].pos, r.grid.pos
+	local d = metres(g, cp)
+	local ux, uy, uz = (cp.x - g.x) / d, (cp.y - g.y) / d, (cp.z - g.z) / d
+	local flat = math.sqrt(ux * ux + uy * uy)
+	local nx, ny = -uy / flat, ux / flat
+	driveTo(world, p, {x = cp.x - ux * 60 + nx * offset, y = cp.y - uy * 60 + ny * offset, z = cp.z - uz * 60}, 45)
+	driveTo(world, p, {x = cp.x + ux * 60 + nx * offset, y = cp.y + uy * 60 + ny * offset, z = cp.z + uz * 60}, 45)
+	world:advance(1)
+	return standingsRow(world, p, p.name).passed
+end
+
+World.test("a checkpoint counts when the path between readings comes within its radius plus 10 m, and not beyond", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	same(route("highway_race").checkpoints[1].r, 9.5, "the first checkpoint's radius")
+	same(pastFirstCheckpoint(world, ann, 19), 1, "19 m to the side, inside 9.5 + 10 m: passed")
+	world:as(ann, function() mileage_spotRace.giveUp() end)
+	world:pump()
+	world:advance(2)
+	expect(last(world, ann, "result"), "that run is over")
+	same(pastFirstCheckpoint(world, ann, 20), 0, "20 m to the side, outside 9.5 + 10 m: not passed")
+end)
+
+World.test("a finish is timed where the path between two readings meets the finish, from the server's green", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local r = route("highway_race")
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 0, {})
+	ready(world, {ann})
+	expect(last(world, ann, "countdown"), "the countdown started")
+	local goAt = world.now + 5
+	world:advance(6)
+	for i = 1, #r.checkpoints - 1 do driveTo(world, ann, r.checkpoints[i].pos, 40) end
+	local a, b = r.checkpoints[#r.checkpoints - 1].pos, r.checkpoints[#r.checkpoints].pos
+	local d = metres(a, b)
+	local ux, uy, uz = (b.x - a.x) / d, (b.y - a.y) / d, (b.z - a.z) / d
+	driveTo(world, ann, {x = b.x - ux * 30, y = b.y - uy * 30, z = b.z - uz * 30}, 40)
+	-- Standing 30 m short of the finish for three readings, then 40 m in one second.
+	world:advance(3)
+	expect(world:drive(ann, b.x + ux * 10, b.y + uy * 10, b.z + uz * 10), "free to drive")
+	world:advance(1)
+	local readAt = world.now
+	world:advance(1)
+	local result = last(world, ann, "result")
+	expect(result, "the finish ended the run")
+	-- Between the reading a second earlier (30 m short) and this one (10 m past), the path
+	-- meets the finish three quarters of the way along.
+	local wanted = (readAt - 1) + 0.75 - goAt
+	expect(math.abs(result.places[1].seconds - wanted) < 1e-6,
+		string.format("finish %.3f s, wanted %.3f s", result.places[1].seconds, wanted))
+end)
+
+World.test("malformed messages, and messages about another racer or the starter's cars, change nothing", function(world)
+	local ann, bob, cat = threePlayers(world)
+	local r = route("highway_race")
+	roadsAt(world, r)
+	withClass(ann)
+	world.opponentSpeed = 30
+	local function from(p, data)
+		world:queue({way = "toServer", from = p.id, name = "mileageSpotRace", data = data})
+		world:pump()
+	end
+	for _, data in ipairs({"not json", "[]", "null", World.encode({request = "highway_race"}),
+			World.encode({ready = 5}), World.encode({progress = "x"}), World.encode({out = {why = "gone"}})}) do
+		from(cat, data)
+	end
+	from(cat, World.encode({request = {route = 7, opponents = 0}}))
+	same(last(world, cat, "refused").why, "That race spot is not on this server.", "a route that is not text")
+	from(cat, World.encode({request = {route = "highway_race", opponents = "2"}}))
+	same(last(world, cat, "refused").why, "This server allows fewer opponents.", "opponents that are not a number")
+	local refusals = #heard(world, cat, "refused")
+	from(cat, World.encode({request = {route = "highway_race", opponents = 0, invite = "Bob"}}))
+	same(#heard(world, cat, "refused"), refusals + 1, "an invite list that is not a list is refused")
+	same(#heard(world, cat, "grid"), 0, "none of it reached a grid")
+
+	request(world, ann, "highway_race", 1, {"Bob"})
+	local id = last(world, ann, "inviting").id
+	send(world, cat, {start = id})
+	send(world, cat, {cancel = id})
+	send(world, cat, {join = id})
+	same(#heard(world, ann, "grid"), 0, "only the starter can start it")
+	same(#heard(world, ann, "closed"), 0, "only the starter can call it off")
+	same(last(world, ann, "inviting").answers[1].name, "Bob", "Cat, never invited, did not join")
+	same(#last(world, ann, "inviting").answers, 1, "still only Bob asked")
+	answer(world, bob, "join")
+	expect(last(world, ann, "countdown"), "the race lines up")
+	world:advance(6)
+	local opponent = "car:" .. sentKey(world, ann, "ready")[1].opponents[1].car
+	send(world, bob, {out = {race = id, racer = "Ann", why = "left"}})
+	send(world, bob, {out = {race = id, racer = opponent, why = "stuck"}})
+	send(world, bob, {finished = {race = id, racer = "Ann", seconds = 50}})
+	send(world, cat, {gaveUp = id})
+	send(world, ann, {progress = {race = id, racer = "Ann", checkpoint = 0, lap = 9}})
+	send(world, ann, {finished = {race = id, racer = "Ann", seconds = -1}})
+	send(world, ann, {out = {race = id, racer = "Ann", why = "teleported"}})
+	world:advance(1)
+	for _, name in ipairs({"Ann", "Bob", "Ibishu Pessima"}) do
+		local row = standingsRow(world, ann, name)
+		expect(row, name .. " is in the standings")
+		same(row.out, nil, name .. " is still racing")
+		same(row.seconds, nil, name .. " has no time")
+	end
+	same(standingsRow(world, ann, "Cat"), nil, "Cat is not in the race")
+end)
+
+World.test("the owner's prize and wait are held to their ranges", function(world)
+	world:setConfig("server", "spotRacePrize", "5000000")
+	world:setConfig("server", "spotRacePrizeCooldownMinutes", "99999")
+	local ann = world:join("Ann", 1000, 0)
+	same(last(world, ann, "status").prize, 1000000, "the prize is at most $1,000,000")
+	local result = raceOne(world, ann, 30)
+	same(result.prize, 1000000, "paid at most $1,000,000")
+	world:advance(2)
+	same(ann.money, 1001000, "into Ann's career")
+	local againIn = last(world, ann, "status").againIn
+	expect(againIn <= 1440 * 60 and againIn > 1439 * 60, "the wait is at most 1440 minutes, got " .. tostring(againIn))
+end)
+
+World.test("a full grid: the starter, seven invited players and five opponents each get their own place behind the start", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local r = route("highway_race")
+	roadsAt(world, r)
+	withClass(ann)
+	local names, players = {}, {}
+	for i = 1, 7 do
+		local p = world:join("P" .. i, 1000, i)
+		table.insert(names, p.name)
+		table.insert(players, p)
+	end
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 5, names)
+	for _, p in ipairs(players) do answer(world, p, "join") end
+	local grid = last(world, ann, "grid")
+	expect(grid, "everyone joined: the grid")
+	same(#grid.opponentPoses, 5, "five opponent places for the starter's game")
+	local poses = {grid.pose}
+	for _, p in ipairs(players) do table.insert(poses, last(world, p, "grid").pose) end
+	for _, pose in ipairs(grid.opponentPoses) do table.insert(poses, pose) end
+	same(#poses, 13, "thirteen places")
+	for i, pose in ipairs(poses) do
+		local ahead = (pose.pos.x - r.grid.pos.x) * r.grid.dir.x + (pose.pos.y - r.grid.pos.y) * r.grid.dir.y
+		expect(ahead <= 0.01, "place " .. i .. " is not past the start line")
+		for j = i + 1, #poses do
+			expect(metres(pose.pos, poses[j].pos) > 3, "places " .. i .. " and " .. j .. " are apart")
+		end
+	end
+	local countdown = last(world, ann, "countdown")
+	expect(countdown, "the count starts")
+	same(#countdown.racers, 13, "thirteen racers on the grid")
+end)
+
+World.test("Join after the invite ran out sends nothing", function(world)
+	local ann, bob = threePlayers(world)
+	request(world, ann, "highway_race", 0, {"Bob"})
+	local id = last(world, bob, "invite").id
+	world:advance(31)
+	world:as(bob, function() same(mileage_spotRace.join(id), false, "no invite to join") end)
+	world:pump()
+	same(#sentKey(world, bob, "join"), 0, "nothing sent")
+end)
+
+World.test("off the route means more than 1000 m from the next checkpoint for 10 seconds", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local r = route("highway_race")
+	soloToGreen(world, ann)
+	local cp, g = r.checkpoints[1].pos, r.grid.pos
+	local d = metres(g, cp)
+	local ux, uy = (cp.x - g.x) / d, (cp.y - g.y) / d
+	local flat = math.sqrt(ux * ux + uy * uy)
+	local nx, ny = -uy / flat, ux / flat
+	driveTo(world, ann, {x = cp.x + nx * 990, y = cp.y + ny * 990, z = cp.z}, 80)
+	world:advance(15)
+	same(#sentKey(world, ann, "out"), 0, "990 m away is still on the route")
+	driveTo(world, ann, {x = cp.x + nx * 1010, y = cp.y + ny * 1010, z = cp.z}, 80)
+	world:advance(8)
+	same(#sentKey(world, ann, "out"), 0, "not yet: under 10 seconds off the route")
+	world:advance(3)
+	local out = sentKey(world, ann, "out")
+	same(#out, 1, "out after 10 seconds more than 1000 m away")
+	same(out[1].why, "left", "left the route")
+end)
