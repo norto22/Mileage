@@ -282,6 +282,69 @@ function M.setNavigationTarget(pos)
 	return ok
 end
 
+-- Shows the line along points (a list of {x, y, z}, in order) as the route on the big map
+-- and the road, with the game's one-way penalty off, so it follows a closed course the
+-- way it is raced. Returns true when it ran.
+function M.setNavigationPath(points)
+	local fn = pickOrWarn(core_groundMarkers, "core_groundMarkers", "setPath", "the race route is not shown on the map")
+	if not fn or type(points) ~= "table" or #points == 0 then return false end
+	local list = {}
+	for i, p in ipairs(points) do list[i] = vec3(p.x, p.y, p.z) end
+	local ok, err = pcall(fn, list, {dirMult = 1})
+	if not ok then log("E", "mileage.compat", "setPath failed: " .. tostring(err)) end
+	return ok
+end
+
+-- Takes the route off the big map and the road.
+function M.clearNavigation()
+	local fn = pick(core_groundMarkers, "setPath")
+	if fn then pcall(fn, nil) end
+end
+
+-- The game's race checkpoint markers (scenario/race_marker), as freeroam's hotlapping
+-- uses them: setRaceMarkers puts one at each of wps ({name, pos, r}), setRaceMarkerModes
+-- gives each a mode by name ("default", "next", "lap", "finish"; the rest are hidden),
+-- renderRaceMarkers draws them each frame and clearRaceMarkers removes them. Each does
+-- nothing, returning false, where the game lacks the module.
+local function raceMarkerModule()
+	local ok, module = pcall(require, "scenario/race_marker")
+	if ok and type(module) == "table" then return module end
+	return nil
+end
+
+function M.setRaceMarkers(wps)
+	local markers = raceMarkerModule()
+	if not markers or type(markers.setupMarkers) ~= "function" then return false end
+	local list = {}
+	for i, wp in ipairs(wps) do
+		list[i] = {name = wp.name, pos = vec3(wp.pos.x, wp.pos.y, wp.pos.z), radius = wp.r}
+	end
+	local ok, err = pcall(function()
+		if type(markers.init) == "function" then markers.init() end
+		markers.setupMarkers(list)
+	end)
+	if not ok then log("E", "mileage.compat", "race markers failed: " .. tostring(err)) end
+	return ok
+end
+
+function M.setRaceMarkerModes(modes)
+	local markers = raceMarkerModule()
+	if not markers or type(markers.setModes) ~= "function" then return false end
+	return (pcall(markers.setModes, modes))
+end
+
+function M.renderRaceMarkers(dt)
+	local markers = raceMarkerModule()
+	if not markers or type(markers.render) ~= "function" then return false end
+	return (pcall(markers.render, dt, dt))
+end
+
+function M.clearRaceMarkers()
+	local markers = raceMarkerModule()
+	if not markers or type(markers.onClientEndMission) ~= "function" then return false end
+	return (pcall(markers.onClientEndMission))
+end
+
 -- Moves veh to pos facing rot, clear of anything in the way. Returns true when it ran.
 function M.safeTeleport(veh, pos, rot)
 	local fn = pickOrWarn(spawn, "spawn", "safeTeleport", "a race cannot move a car to the start")

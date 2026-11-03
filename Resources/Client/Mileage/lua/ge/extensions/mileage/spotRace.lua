@@ -61,6 +61,13 @@ local function compat()
 	return nil
 end
 
+-- mileage/raceRoad: the race road of a route (see there).
+local function raceRoad()
+	local r = extensions.mileage_raceRoad
+	if type(r) == "table" and type(r.usable) == "function" and type(r.legAfter) == "function" then return r end
+	return {usable = function() return nil end, legAfter = function() return nil end}
+end
+
 local function routes()
 	local r = extensions.mileage_spotRoutes
 	if type(r) == "table" and type(r.routes) == "table" then return r.routes end
@@ -349,13 +356,37 @@ local function opponentsListed(dt)
 	return true
 end
 
--- Green: each opponent drives the route's checkpoints, every lap, at its class's push.
+-- The road nodes of a lap of the race road, in order, with no node twice in a row. On a
+-- route of more than one lap the path starts at checkpoint 1's node and ends on it again
+-- (the closing road from the finish), as the game's race driving needs to repeat laps.
+local function roadNames(road, route)
+	local names = {}
+	local function add(list)
+		for _, name in ipairs(list) do
+			if names[#names] ~= tostring(name) then table.insert(names, tostring(name)) end
+		end
+	end
+	if route.laps > 1 and road.closing and #road.legs > 1 then
+		for i = 2, #road.legs do add(road.legs[i].nodes) end
+		add(road.closing.nodes)
+	else
+		for i = 1, #road.legs do add(road.legs[i].nodes) end
+	end
+	return names
+end
+
+-- Green: each opponent drives the route, every lap, at its class's push: every node of
+-- the race road where there is one, else the road node nearest each checkpoint.
 local function driveOpponents()
 	local c = compat()
 	local names = {}
-	for _, checkpoint in ipairs(race.route.checkpoints) do
-		local node = c and c.getClosestRoadNode(checkpoint.pos)
-		if node and names[#names] ~= tostring(node) then table.insert(names, tostring(node)) end
+	if race.road then
+		names = roadNames(race.road, race.route)
+	else
+		for _, checkpoint in ipairs(race.route.checkpoints) do
+			local node = c and c.getClosestRoadNode(checkpoint.pos)
+			if node and names[#names] ~= tostring(node) then table.insert(names, tostring(node)) end
+		end
 	end
 	if #names > 1 and race.route.laps > 1 then
 		-- The game's race driving repeats laps only on a path that ends on its first node
@@ -444,8 +475,18 @@ end
 
 --== the race ================================================================
 
+-- Takes the checkpoint markers and the line off the screen.
+local function clearGuidance()
+	if not race or not (race.markers or race.lineSet) then return end
+	local c = compat()
+	if c and race.markers then c.clearRaceMarkers() end
+	if c and race.lineSet then c.clearNavigation() end
+	race.markers, race.lineSet = nil, nil
+end
+
 local function endHere()
 	if race and race.frozen then setFrozen(false) end
+	clearGuidance()
 	restoreTraffic()
 	deleteOpponents()
 	race = nil
@@ -491,6 +532,12 @@ local function onGrid(message)
 			return
 		end
 		race = {id = message.id, route = route, starter = starter, phase = "grid", passed = 0, offFor = 0, opponents = {}}
+		-- The race road is worked out now, with the cars waiting on the grid; where this
+		-- game's check does not pass for the route, the game's own navigation is used.
+		race.road = raceRoad().usable(route)
+		if not race.road then
+			log("W", logTag, tostring(route.id) .. ": no race road that passes the check; using the game's navigation")
+		end
 		setup, pending, invite, starting = nil, false, nil, nil
 		setFrozen(true)
 		if starter and type(message.opponentPoses) == "table" and #message.opponentPoses > 0 then
@@ -594,8 +641,24 @@ local function showNextCheckpoint()
 	if race.shownFor == race.passed then return end
 	race.shownFor = race.passed
 	local c = compat()
+	if not c then return end
 	local checkpoints = race.route.checkpoints
-	if c then c.setNavigationTarget(checkpoints[race.passed % #checkpoints + 1].pos) end
+	local n = #checkpoints
+	local leg = race.road and raceRoad().legAfter(race.road, race.passed, n)
+	if leg and c.setNavigationPath(leg.points) then
+		race.lineSet = true
+	else
+		c.setNavigationTarget(checkpoints[race.passed % n + 1].pos)
+	end
+	if race.markers then
+		-- The checkpoint to drive to is red (blue at the finish), the one after it black.
+		local total = n * race.route.laps
+		local modes = {}
+		local current = race.passed % n + 1
+		modes["cp" .. current] = race.passed + 1 == total and "finish" or "default"
+		if race.passed + 2 <= total and current % n + 1 ~= current then modes["cp" .. (current % n + 1)] = "next" end
+		c.setRaceMarkerModes(modes)
+	end
 end
 
 local function checkOwnCar(dt)
@@ -640,6 +703,14 @@ local function updateRace(dt)
 			local veh = playerVehicle()
 			race.lastPos = veh and point(veh:getPosition()) or nil
 			setFrozen(false)
+			local c = compat()
+			if c then
+				local wps = {}
+				for i, checkpoint in ipairs(race.route.checkpoints) do
+					wps[i] = {name = "cp" .. i, pos = checkpoint.pos, r = checkpoint.r}
+				end
+				race.markers = c.setRaceMarkers(wps)
+			end
 			showNextCheckpoint()
 			driveOpponents()
 			thinTraffic()
@@ -652,9 +723,16 @@ local function updateRace(dt)
 	end
 	if race.phase ~= "racing" then return end
 	race.elapsed = race.elapsed + dt
+	if race.markers then
+		local c = compat()
+		if c then c.renderRaceMarkers(dt) end
+	end
 	if not race.ended then checkOwnCar(dt) end
 	watchOpponents(dt)
-	if race.ended and race.thinned then ownRaceOver() end
+	if race.ended then
+		clearGuidance()
+		if race.thinned then ownRaceOver() end
+	end
 end
 
 --- Gives up the race under way: before the green the starter calls it off for everyone.
@@ -802,6 +880,9 @@ function M.onBeamMPServerLeave()
 end
 
 function M.onExtensionUnloaded()
+	-- A reload mid-race must not leave the traffic thinned or the markers up.
+	clearGuidance()
+	restoreTraffic()
 	deleteOpponents()
 end
 

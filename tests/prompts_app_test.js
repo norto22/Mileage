@@ -560,6 +560,14 @@ test("the set-up card's prize grows with the opponents and the friends picked", 
 	assert.strictEqual(prize(), "Prize for first place: Again in 5 min", "the wait as before");
 });
 
+test("the set-up card's grown prize is rounded down to whole dollars, as the server pays it", () => {
+	const {scope} = load();
+	scope.emit("MileageSpotRace", Object.assign({}, SETUP, {prize: 1001}));
+	const prize = () => rowsOf(scope.spot.view).filter((r) => r.startsWith("Prize"))[0];
+	scope.spotOpponents(-1);
+	assert.strictEqual(prize(), "Prize for first place: $1,501 for 3 racers", "1001 x 1.5 = 1501.5, rounded down");
+});
+
 test("a car changed since its last performance test is told its rivals may not match; a tested one is not", () => {
 	const {scope} = load();
 	scope.emit("MileageSpotRace", Object.assign({}, SETUP, {untested: true}));

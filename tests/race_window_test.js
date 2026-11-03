@@ -164,6 +164,28 @@ test("while the window is on the page the prompts app leaves it the live race; s
 	assert.strictEqual(prompts.spot.view.title, "R", "with the window gone, the prompts window shows the race again");
 });
 
+test("a street race's stake and lining up stay in the prompts window while the window is on the page", () => {
+	const {scopes, emit} = load([SOURCE, PROMPTS]);
+	const [windowScope, prompts] = scopes;
+	emit("MileageRace", {phase: "staking", race: "r1", other: "Ann", stake: 500});
+	assert.strictEqual(windowScope.live, null, "the stake is not a live race");
+	assert.ok(prompts.race, "the stake shows in the prompts window");
+	emit("MileageRace", {phase: "lining up", race: "r1", other: "Ann"});
+	assert.strictEqual(windowScope.live, null, "lining up is not a live race");
+	assert.ok(prompts.race, "lining up shows in the prompts window");
+});
+
+test("a race spot's first panel before the standings arrive shows no made-up place", () => {
+	const {scope} = load();
+	scope.emit("MileageSpotRace", {phase: "racing", id: "s1", routeName: "City Race 1", lap: 1, laps: 2, checkpoint: 0,
+		checkpoints: 13, elapsed: 0.4});
+	const v = scope.live.view;
+	const shown = [v.big, v.label, v.time].concat([...v.line]);
+	assert.deepStrictEqual(shown.filter((t) => /undefined|NaN/.test(String(t))), [], "no undefined place or gap");
+	assert.strictEqual(v.big, "", "no place yet");
+	assert.strictEqual(lineOf(v), "Lap 1/2 · CP 0/13");
+});
+
 test("the window asks the game for the race under way when it loads", () => {
 	const {lua} = load();
 	assert.ok(lua.includes("if mileage_spotRace then mileage_spotRace.sendState() end"));
@@ -177,6 +199,27 @@ test("the template binds every text as text, and the app is placed at the top ri
 	const app = JSON.parse(fs.readFileSync("Resources/Client/Mileage/ui/modules/apps/Mileage-Race/app.json", "utf8"));
 	assert.strictEqual(app.directive, "mileagerace");
 	assert.deepStrictEqual(app.css, {right: "0px", top: "64px", width: "280px", height: "90px"});
+});
+
+test("a long opponent name is cut short with an ellipsis and the clock keeps its own room", () => {
+	const css = fs.readFileSync("Resources/Client/Mileage/ui/modules/apps/Mileage-Race/app.css", "utf8");
+	const rule = (selector) => {
+		const match = css.match(new RegExp("\\n" + selector.replace(".", "\\.") + " \\{([^}]*)\\}"));
+		assert.ok(match, selector + " has a rule");
+		return match[1];
+	};
+	const big = rule(".mr-big");
+	assert.ok(/min-width:\s*0/.test(big) && /overflow:\s*hidden/.test(big) && /text-overflow:\s*ellipsis/.test(big) &&
+		/flex:\s*0 1 auto/.test(big), "the big text shrinks and ends in an ellipsis");
+	assert.ok(/min-width:\s*0/.test(rule(".mr-label")) && /text-overflow:\s*ellipsis/.test(rule(".mr-label")),
+		"so does the route name");
+	assert.ok(/flex:\s*none/.test(rule(".mr-time")), "the clock never shrinks or leaves the strip");
+	// The text a traffic race puts there is as long as a car's name.
+	const {scope} = load();
+	scope.emit("MileageRace", {phase: "racing", race: "a1", rolling: true, other: "Ibishu Pessima Custom Edition",
+		reward: 750, elapsed: 5, distance: 1000});
+	assert.strictEqual(scope.live.view.big, "vs Ibishu Pessima Custom Edition");
+	assert.strictEqual(scope.live.view.time, "0:05.0");
 });
 
 test("every top-level declaration can be evaluated twice", () => {

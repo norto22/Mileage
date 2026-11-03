@@ -25,17 +25,26 @@
 .mr-counting {
 	justify-content: center;
 }
+/* The big text (a place, a countdown, "vs <car>") gives way to a long name with an ellipsis
+   so the clock, which keeps its own room, always stays in the strip. */
 .mr-big {
+	flex: 0 1 auto;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
 	font-weight: bold;
 	font-size: 26px;
 	line-height: 1;
 	font-variant-numeric: tabular-nums;
 }
 .mr-label {
+	flex: 0 100 auto;
+	min-width: 0;
 	overflow: hidden;
 	text-overflow: ellipsis;
 }
 .mr-time {
+	flex: none;
 	margin-left: auto;
 	font-weight: bold;
 	font-variant-numeric: tabular-nums;

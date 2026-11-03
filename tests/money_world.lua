@@ -669,8 +669,16 @@ function World:loadGame(p)
 	}
 	p.globals.vec3 = function(x, y, z) return {x = x, y = y, z = z} end
 	p.globals.quatFromDir = function(dir, up) return {dir = dir, up = up} end
-	p.globals.core_groundMarkers = {getTargetPos = function() return p.route end,
-		setPath = function(pos) p.route = pos end}
+	-- setPath takes one position or a list of them (and options); getTargetPos is where it ends.
+	p.globals.core_groundMarkers = {
+		getTargetPos = function()
+			local route = p.route
+			if type(route) == "table" and route.x == nil then return route[#route] end
+			return route
+		end,
+		setPath = function(pos, options)
+			p.route, p.routeOptions = pos, options
+		end}
 	p.globals.gameplay_missions_missionManager = {getForegroundMissionId = function() return p.mission end}
 	p.globals.MPCoreNetwork = {isMPSession = function() return true end}
 	p.globals.gameplay_drag_core = {getData = function() return p.dragData end}
@@ -956,6 +964,17 @@ function World.new(opts)
 	World.restoreIo()
 	function log() end
 	function setExtensionUnloadMode() end
+	-- The game's race checkpoint markers (scenario/race_marker), as a game loads them: what
+	-- was set up, the modes given, how many frames drew them and how often they were cleared.
+	local markers = {setups = {}, modes = {}, renders = 0, clears = 0}
+	self.markers = markers
+	package.loaded["scenario/race_marker"] = {
+		init = function() end,
+		setupMarkers = function(wps) table.insert(markers.setups, wps) end,
+		setModes = function(modes) table.insert(markers.modes, modes) end,
+		render = function() markers.renders = markers.renders + 1 end,
+		onClientEndMission = function() markers.clears = markers.clears + 1 end,
+	}
 	settings = {getValue = function() return nil end, setValue = function() end}
 	installDisk(self)
 	self.serverFS = FS

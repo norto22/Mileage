@@ -90,7 +90,17 @@ local function crosses(ax, ay, bx, by, w)
 	local d2 = orient(w[1], w[2], w[3], w[4], bx, by)
 	local d3 = orient(ax, ay, bx, by, w[1], w[2])
 	local d4 = orient(ax, ay, bx, by, w[3], w[4])
-	if d1 == 0 and d2 == 0 then return false end
+	if d1 == 0 and d2 == 0 then
+		-- On one line: they cross where their spans along it overlap or touch.
+		local along = math.abs(bx - ax) >= math.abs(by - ay) and 1 or 2
+		local a1, a2 = math.min(ax, bx), math.max(ax, bx)
+		local w1, w2 = math.min(w[1], w[3]), math.max(w[1], w[3])
+		if along == 2 then
+			a1, a2 = math.min(ay, by), math.max(ay, by)
+			w1, w2 = math.min(w[2], w[4]), math.max(w[2], w[4])
+		end
+		return a1 <= w2 and w1 <= a2
+	end
 	return d1 * d2 <= 0 and d3 * d4 <= 0
 end
 
@@ -301,8 +311,15 @@ function M.road(route)
 	local kept = cache[route.id]
 	if kept == nil then
 		local ok, road = pcall(work, route)
-		if not ok then log("E", logTag, route.id .. ": the race road could not be worked out: " .. tostring(road)) end
-		kept = ok and road or false
+		if not ok then
+			log("E", logTag, route.id .. ": the race road could not be worked out: " .. tostring(road))
+			kept = false
+		elseif road then
+			kept = road
+		else
+			-- The game has no road map yet (the level is still loading): ask again next time.
+			return nil
+		end
 		cache[route.id] = kept
 	end
 	return kept or nil
@@ -310,16 +327,18 @@ end
 
 --== the check ===============================================================
 
--- Where along the segment a-b it comes nearest centre: the distance.
-local function nearest(a, b, centre)
+-- How near the segment a-b comes to centre, from s0 along it on (0 at a, 1 at b), and where
+-- (so the next checkpoint on the same segment is only looked for beyond it, as the server
+-- counts checkpoints in order).
+local function nearest(a, b, centre, s0)
 	local dx, dy, dz = b.x - a.x, b.y - a.y, b.z - a.z
 	local length2 = dx * dx + dy * dy + dz * dz
-	local s = 0
+	local s = s0 or 0
 	if length2 > 0 then
 		s = ((centre.x - a.x) * dx + (centre.y - a.y) * dy + (centre.z - a.z) * dz) / length2
-		s = math.max(0, math.min(1, s))
+		s = math.max(s0 or 0, math.min(1, s))
 	end
-	return distance({x = a.x + dx * s, y = a.y + dy * s, z = a.z + dz * s}, centre)
+	return distance({x = a.x + dx * s, y = a.y + dy * s, z = a.z + dz * s}, centre), s
 end
 
 -- The whole race as points: the grid to the finish, then the closing leg and a lap again
@@ -340,7 +359,9 @@ end
 
 local function checkRoute(route)
 	local road = M.road(route)
-	if not road then return {id = route.id, ok = false, problems = {"the game has no road map here"}} end
+	if not road then
+		return {id = route.id, ok = false, noMap = true, problems = {"the game has no road map here"}}
+	end
 	local problems = {}
 	for i, leg in ipairs(road.legs) do
 		if leg.unreached then
@@ -356,16 +377,19 @@ local function checkRoute(route)
 	end
 	local laps = math.max(1, route.laps or 1)
 	local points = racePoints(road, laps)
-	local at, passed = 2, 0
+	local at, passed, along = 2, 0, 0
 	for lap = 1, laps do
 		for i, checkpoint in ipairs(route.checkpoints) do
 			local reach = (checkpoint.r or 0) + CHECKPOINT_SLACK
 			local found, closest = false, nil
 			while at <= #points do
-				local d = nearest(points[at - 1], points[at], checkpoint.pos)
+				local d, s = nearest(points[at - 1], points[at], checkpoint.pos, along)
 				closest = math.min(closest or d, d)
-				if d <= reach then found = true break end
-				at = at + 1
+				if d <= reach then
+					found, along = true, s
+					break
+				end
+				at, along = at + 1, 0
 			end
 			if not found then
 				table.insert(problems, string.format("lap %d misses checkpoint %d%s", lap, i,
@@ -387,12 +411,40 @@ local function checkRoute(route)
 		checkpoints = passed, metres = total, ratio = ratio}
 end
 
+-- Whether each route's road passed the check, by route id.
+local usable = {}
+
+--- The race road of a route, but only where this game's own check passes for that route
+--- (every leg on a road that crosses no wall, every checkpoint in order every lap, a length
+--- in reason); nil otherwise, and the race keeps the game's own navigation for it.
+function M.usable(route)
+	if type(route) ~= "table" or type(route.id) ~= "string" then return nil end
+	if usable[route.id] == nil then
+		local ok, result = pcall(checkRoute, route)
+		if ok and result.noMap then return nil end
+		usable[route.id] = ok and result.ok == true
+	end
+	if not usable[route.id] then return nil end
+	return M.road(route)
+end
+
+--- The leg of a road that leads to the next checkpoint after this many have been passed
+--- over the whole race: the road from the grid to checkpoint 1 first, then from each
+--- checkpoint to the next, and from the finish back to checkpoint 1 on a later lap.
+function M.legAfter(road, passed, checkpoints)
+	local n = checkpoints
+	local k = passed % n + 1
+	if passed > 0 and k == 1 then return road.closing end
+	return road.legs[k]
+end
+
 --- Works out and checks the race road of every route, logging one line each and a
 --- summary. Returns {passed, total, routes = {{id, ok, problems}, ...}}.
 function M.check()
 	local results, passed = {}, 0
 	for _, route in ipairs(routes()) do
 		local result = checkRoute(route)
+		if not result.noMap then usable[route.id] = result.ok == true end
 		table.insert(results, result)
 		if result.ok then
 			passed = passed + 1
@@ -415,7 +467,7 @@ function M.onCareerActive(active)
 end
 
 function M.onBeamMPServerLeave()
-	cache, roadMap = {}, nil
+	cache, roadMap, usable = {}, nil, {}
 end
 
 M.onInit = function() setExtensionUnloadMode(M, 'manual') end
