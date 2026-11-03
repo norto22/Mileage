@@ -379,7 +379,6 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 	// Why the first place was not paid, when the server has a prize.
 	var SPOT_WITHHELD = {
 		alone: "No prize: nobody else raced. Your time counts for the leaderboard.",
-		slow: "No prize: no other racer drove at race pace.",
 		"car won": "No prize: only a player who finishes first is paid.",
 		unseen: "Unranked: the server could not follow every car, so no prize, win or leaderboard time.",
 	};
@@ -394,11 +393,15 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 		return moClock(seconds, 2);
 	}
 
-	function spotPrizeRow(data) {
+	// The owner's prize is for a race of two; each racer past two adds half of it again, as
+	// the server pays it. racers: the grid as set, every friend picked counted as joining.
+	function spotPrizeRow(data, racers) {
 		var prize = Number(data.prize) || 0, again = Number(data.againIn) || 0;
 		if (prize <= 0) return {label: "Prize", value: "None on this server"};
 		if (again > 0) return {label: "Prize for first place", value: "Again in " + Math.ceil(again / 60) + " min"};
-		return {label: "Prize for first place", value: moDollars(prize)};
+		if (racers < 2) return {label: "Prize for first place", value: moDollars(prize) + " with a rival"};
+		return {label: "Prize for first place",
+			value: moDollars(Math.floor(prize * (1 + 0.5 * (racers - 2)))) + " for " + racers + " racers"};
 	}
 
 	function setupView(s) {
@@ -407,8 +410,8 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 		rows.push({label: "Best time here", value: typeof route.best === "number" ?
 			spotTime(route.best) + " by " + String(route.bestBy || "") : "No times yet"});
 		if (typeof route.mine === "number") rows.push({label: "Your best", value: spotTime(route.mine)});
-		rows.push(spotPrizeRow(s));
 		var invited = s.players.filter(function (p) { return p.on; }).length;
+		rows.push(spotPrizeRow(s, 1 + s.opponents + invited));
 		var solo = s.opponents === 0 && invited === 0;
 		var note = s.note ? String(s.note) : (solo ?
 			"No opponents and nobody invited: this run sets a time for the leaderboard but pays no prize." :
