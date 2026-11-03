@@ -162,6 +162,7 @@ local function captureBaseline()
 		elseif c.fileName == "propAnimation/googlyEyes" then
 			tags[c.eyeBeamTag or "eyeBeam"] = true
 			tags[c.eyeLimiterBeamTag or "eyeLimiterBeam"] = true
+			tags[c.eyeAttachmentBeamTag or "eyeAttachmentBeam"] = true
 		end
 	end
 	if next(names) == nil and next(tags) == nil then return end

@@ -2127,14 +2127,14 @@ local function copyWithControllers()
 		data = {hydraulicsData = {{beamName = "susp", groupName = "g"}}, frontHydros = {{beamName = "fh", groupName = "f"}}},
 		beamNames = {[72] = "susp", [80] = "fh"},
 		beamTags = {[73] = "chain", [74] = "chain", [75] = "seg", [76] = {"other", "seg"}, [77] = "sensor",
-			[78] = "eyeBeam", [79] = "eyeLimiterBeam"}})
+			[78] = "eyeBeam", [79] = "eyeLimiterBeam", [81] = "eyeAttachmentBeam"}})
 	inVehicle(copy, copy.ext.applyDamage, 0, {7, 0.9, 0, 0.2}, {})
 	return copy
 end
 
 test("beams the car's controllers lengthen on their own never start a resync, their breaks still do", function()
 	local copy = copyWithControllers()
-	for cid = 72, 80 do copy.restLen[cid] = 1.03 end
+	for cid = 72, 81 do copy.restLen[cid] = 1.03 end
 	copy.beamstate.damage = copy.beamstate.damage + 10
 	tick(copy, 5)
 	same(resetRequests(copy).resync, 0, "resyncs for the controllers' lengths")
