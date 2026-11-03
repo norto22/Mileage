@@ -1972,3 +1972,134 @@ test("a set longer than 5 s is not asked for again while its parts still arrive"
 	same(requestsFor("0-0"), 1, "requests from the copy's game")
 	same(copy.commits, 1, "commits")
 end)
+
+--== whole-shape edges ========================================================
+
+-- The full send for everyone of a new owner `car`, raw, after `seconds` of ticks.
+local function newOwnerFullSend(car, seconds)
+	inVehicle(car, car.ext.setRole, "owner")
+	tick(car, seconds or 2)
+	return rawMessages(car)
+end
+
+test("a full send of exactly 500 points is one part, of 501 points two parts with every point once", function()
+	for _, count in ipairs({500, 501}) do
+		local car = soloCar({nodes = count})
+		dent(car, 7, 0.8)
+		local sent = newOwnerFullSend(car)
+		local wanted = count == 500 and 1 or 2
+		same(#sent, wanted, count .. " points: parts")
+		same(sent[1]:sub(1, 20), '{"c":0,"p":1,"t":' .. wanted .. ',"', count .. " points: the first part")
+		local seen, total = {}, 0
+		for _, m in ipairs(sent) do
+			for _, id in ipairs(pointIds(jsonToLua(m))) do
+				expect(not seen[id], count .. " points: point " .. id .. " sent twice")
+				seen[id], total = true, total + 1
+			end
+		end
+		same(total, count, count .. " points: points in the full send")
+	end
+end)
+
+test("a full send of 401 changed beams on a car of 100 points is two parts, and the copy applies every beam once", function()
+	local owner = soloCar({beams = 401, nodes = 100})
+	for cid = 0, 400 do dent(owner, cid, 0.8) end
+	inVehicle(owner, owner.ext.setRole, "owner")
+	tick(owner, 2)
+	local parts = takeMessages(owner)
+	same(#parts, 2, "parts")
+	same(#parts[1].b / 4, 400, "beams in the first part")
+	same(#parts[2].b / 4, 1, "beams in the second part")
+	same(#parts[1].n / 4 + #parts[2].n / 4, 100, "points in the two parts")
+	same(parts[2].p .. "/" .. parts[2].t, "2/2", "the second part's number")
+	local copy = copyCar({beams = 401, nodes = 100})
+	applyPart(copy, parts[1])
+	same(copy.commits, 0, "commits after the first part")
+	applyPart(copy, parts[2])
+	same(copy.commits, 1, "commits")
+	same(copy.restLen[0], 0.8, "the copy's beam 0")
+	same(copy.restLen[400], 0.8, "the copy's beam 400, alone in the second part")
+end)
+
+test("a car whose whole shape needs more than 64 parts sends no part, logs it once, and still sends its dents", function()
+	local car = soloCar({nodes = 32001})
+	dent(car, 7, 0.8)
+	local sent = newOwnerFullSend(car)
+	inVehicle(car, car.ext.answerFull)
+	tick(car, 2)
+	for _, m in ipairs(rawMessages(car)) do table.insert(sent, m) end
+	local numbered, dents = 0, 0
+	for _, m in ipairs(sent) do
+		if m:find('"p":', 1, true) then numbered = numbered + 1 end
+		local ids = beamIds(jsonToLua(m))
+		if ids[1] == 7 then dents = dents + 1 end
+	end
+	same(numbered, 0, "numbered parts sent")
+	same(countLines(logs, "and is not sent whole"), 1, "warnings")
+	same(dents, 1, "messages with the dent on beam 7")
+end)
+
+test("a part that names another number of parts than the set it follows applies nothing", function()
+	local parts, copy = wholeAnswerAndCopy()
+	applyPart(copy, parts[1])
+	inVehicle(copy, copy.ext.applyDamage, 0, parts[2].b, parts[2].n, 2, 3)
+	applyPart(copy, parts[2])
+	same(#copy.applyLog, 0, "changes to the copy")
+	same(countLines(copy.game.geQueue, "shapeApplied"), 0, "waits ended")
+end)
+
+test("a whole set completed while the copy's direction cannot be read applies nothing and keeps the copy waiting", function()
+	local parts, copy = wholeAnswerAndCopy()
+	applyPart(copy, parts[1])
+	copy.fwd = {x = 0, y = 0, z = 0}
+	applyPart(copy, parts[2])
+	same(#copy.applyLog, 0, "changes to the copy")
+	same(copy.commits, 0, "commits")
+	same(countLines(copy.game.geQueue, "shapeApplied"), 0, "waits ended")
+end)
+
+test("a cleared notice also drops the dents held for an incomplete set", function()
+	local parts, copy = wholeAnswerAndCopy()
+	applyPart(copy, parts[1])
+	inVehicle(copy, copy.ext.applyDamage, 0, {3, 0.75, 0, 0.3}, {})
+	inVehicle(copy, copy.ext.applyDamage, 1, {}, {})
+	applyPart(copy, parts[2])
+	same(copy.restLen[3], 1, "the copy's beam 3 after the owner's reset")
+	same(#copy.applyLog, 0, "changes to the copy")
+end)
+
+test("a hydraulic beam in a whole shape reaches the copy broken, its length left to the copy", function()
+	local owner = soloCar({beams = 100, hydros = {70}})
+	dent(owner, 7, 0.8)
+	owner.restLen[70], owner.broken[70] = 1.04, true
+	inVehicle(owner, owner.ext.setRole, "owner")
+	tick(owner, 2)
+	local parts = takeMessages(owner)
+	same(#parts, 1, "parts")
+	same(table.concat(beamIds(parts[1]), ","), "7,70", "beams in the whole shape")
+	local copy = copyCar({beams = 100, hydros = {70}})
+	applyPart(copy, parts[1])
+	same(copy.commits, 1, "commits")
+	same(copy.broken[70], true, "the copy's hydraulic beam 70 broken")
+	same(copy.restLen[70], 1, "the copy's hydraulic beam 70 length")
+	same(copy.restLen[7], 0.8, "the copy's beam 7")
+end)
+
+test("every part of the biggest whole shape fits a 32 KB message", function()
+	-- 5-digit point and beam ids, every coordinate at the 20 m a copy accepts, every beam
+	-- at the longest length a copy accepts, broken, at the largest deformation.
+	local car = soloCar({nodes = 20500, beams = 20500})
+	for cid = 1, 20499 do car.nodePos[cid] = fromCarFrame(car, -19.999, -19.999, -19.999) end
+	for cid = 0, 20499 do
+		car.restLen[cid], car.broken[cid] = 99.9999, true
+		car.beamstate.deformedBeams[cid] = 9.999
+	end
+	car.beamstate.damage = 1e6
+	local sent = newOwnerFullSend(car, 30)
+	same(#sent, 52, "parts")
+	local longest = 0
+	for _, m in ipairs(sent) do
+		longest = math.max(longest, #('{"v":"999-999",' .. m:sub(2)))
+	end
+	expect(longest <= 32768, "the longest part with its car id: " .. longest .. " bytes")
+end)
