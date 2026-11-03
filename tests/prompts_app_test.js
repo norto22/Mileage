@@ -608,6 +608,61 @@ test("the result lists every racer with a time or why not, opponents by their mo
 	assert.ok(scope.spot.view.note.includes("The starter left"));
 });
 
+const INVITE = {phase: "invite", id: "s7-1793", from: "Taylor", opponents: 3, prize: 2000, seconds: 30,
+	route: {id: "city_race_1", name: "City Race 1", laps: 2, length: 4100, closed: true}};
+
+test("an invite shows who asks, the spot, the route, the opponents and the prize, with Join, Decline and a bar", () => {
+	const {scope, lua, clock} = load();
+	scope.emit("MileageSpotRace", INVITE);
+	const v = scope.spot.view;
+	assert.strictEqual(v.title, "Taylor invites you to a race");
+	assert.deepStrictEqual(rowsOf(v), ["Race spot: City Race 1", "Route: Circuit, 2 laps, 4.1 km",
+		"Opponents: 3 cars, plus Taylor", "Prize for first place: $2,000"]);
+	assert.strictEqual(v.join, true);
+	assert.strictEqual(v.note, "Joining moves your car to the start grid.");
+	assert.ok(/ng-style="\{width: barWidth\(spot\)\}"/.test(TEMPLATE), "the time bar is on the card");
+	clock.now += 15000;
+	assert.strictEqual(scope.barWidth(scope.spot), "50%", "half the time left");
+	scope.spotJoin();
+	assert.strictEqual(lua[lua.length - 1], "if mileage_spotRace then mileage_spotRace.join(" + b64("s7-1793") + ") end");
+	scope.emit("MileageSpotRace", Object.assign({}, INVITE, {seconds: 15, note: "Joined. Your car moves to the start grid when the race starts."}));
+	assert.strictEqual(scope.barWidth(scope.spot), "50%", "the bar keeps running after Join");
+	assert.strictEqual(scope.spot.view.note, "Joined. Your car moves to the start grid when the race starts.");
+	scope.spotDecline();
+	assert.strictEqual(scope.spot, null, "Decline takes the card away");
+	assert.strictEqual(lua[lua.length - 1], "if mileage_spotRace then mileage_spotRace.decline(" + b64("s7-1793") + ") end");
+});
+
+test("an invite without a prize leaves the prize out, and a closed invite goes", () => {
+	const {scope} = load();
+	scope.emit("MileageSpotRace", Object.assign({}, INVITE, {prize: 0, opponents: 1}));
+	assert.deepStrictEqual(rowsOf(scope.spot.view).slice(2), ["Opponents: 1 car, plus Taylor"]);
+	scope.emit("MileageSpotRace", {phase: "inviteClosed", id: "other"});
+	assert.ok(scope.spot, "another invite's closing changes nothing");
+	scope.emit("MileageSpotRace", {phase: "inviteClosed", id: "s7-1793"});
+	assert.strictEqual(scope.spot, null);
+	scope.emit("MileageSpotRace", INVITE);
+	scope.emit("MileageSpotRace", {phase: "closed", id: "s7-1793", why: "The race started without you."});
+	assert.strictEqual(scope.spot.view.title, "Invite over");
+	assert.strictEqual(scope.spot.view.note, "The race started without you.");
+});
+
+test("the starter's card shows who joined, with Start now and Call off", () => {
+	const {scope, lua} = load();
+	scope.emit("MileageSpotRace", {phase: "inviting", id: "s7", routeName: "City Race 1", opponents: 3, seconds: 19,
+		answers: [{name: "Jordan", answer: "waiting"}, {name: "Kim", answer: "declined"}, {name: "Sam", answer: "joined"}]});
+	const v = scope.spot.view;
+	assert.strictEqual(v.title, "Race spot: City Race 1");
+	assert.deepStrictEqual(rowsOf(v), ["Jordan: Waiting…", "Kim: Declined", "Sam: Joined", "Opponents: 3 cars on the grid"]);
+	assert.strictEqual(v.note, "Starts when everyone has answered, or in 19 s.");
+	scope.spotStartNow();
+	assert.strictEqual(lua[lua.length - 1], "if mileage_spotRace then mileage_spotRace.startNow() end");
+	scope.spotCallOff();
+	assert.strictEqual(lua[lua.length - 1], "if mileage_spotRace then mileage_spotRace.callOff() end");
+	scope.emit("MileageSpotRace", {phase: "closed", id: "s7", why: "The starter called it off."});
+	assert.strictEqual(scope.spot.view.title, "Race called off");
+});
+
 test("no text the app shows for a race spot says AI", () => {
 	const {scope} = load();
 	const texts = (v) => [v.title, v.note, v.warn, v.big, v.start].concat((v.rows || []).map((r) => r.label + " " + r.value),

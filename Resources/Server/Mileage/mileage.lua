@@ -3358,6 +3358,9 @@ local REFUSED = {
 }
 -- Why a racer has no time, as games send it: the starter for an opponent, a racer for itself.
 local OUT_WHY = {gone = true, stuck = true, spawn = true, left = true}
+-- What a player dropped before the green is told.
+local DROPPED = {gaveUp = "You left the race.", notReady = "Your car was not on the grid in time.",
+	left = "You left the route."}
 
 local spotRaces = {}
 local spotSeq = 0
@@ -3450,8 +3453,8 @@ local function inviteAnswers(race)
 end
 
 local function sendInviting(race)
-	sendTo(race.starter, {phase = "inviting", id = race.id, answers = inviteAnswers(race),
-		seconds = math.max(0, race.phaseEnds - signalTimer:GetCurrent())})
+	sendTo(race.starter, {phase = "inviting", id = race.id, route = race.route.id, opponents = race.opponentsWanted,
+		answers = inviteAnswers(race), seconds = math.max(0, race.phaseEnds - signalTimer:GetCurrent())})
 end
 
 -- Ends a race that never started racing, for everyone in it and everyone still invited.
@@ -3833,7 +3836,7 @@ local function dropOut(race, racer, why)
 	end
 	race.racers[racer.key] = nil
 	if race.invited[racer.key] then race.invited[racer.key] = "declined" end
-	sendTo(racer.key, {phase = "closed", id = race.id, why = why == "quit" and "You left." or "You left the race."})
+	sendTo(racer.key, {phase = "closed", id = race.id, why = DROPPED[why] or "You left the race."})
 	if race.phase == "inviting" then
 		sendInviting(race)
 		if everyoneAnswered(race) then startGrid(race) end

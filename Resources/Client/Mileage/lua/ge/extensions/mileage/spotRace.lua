@@ -41,8 +41,10 @@ local clock = 0
 local setup = nil
 -- A request sent and not yet answered.
 local pending = false
+-- The starter's race while its invites are open: the race id.
+local starting = nil
 -- The race this game is in: {id, route, starter, phase, frozen, countdownLeft, elapsed,
--- passed, lastPos, offFor, ended, rows, inviting}.
+-- passed, lastPos, offFor, ended, rows, opponents, listing, spawnWait, aggression}.
 local race = nil
 -- An open invite: {id, from, route, opponents, prize, left, sent}.
 local invite = nil
@@ -214,7 +216,6 @@ function M.request(routeId, opponents, inviteJson)
 	end
 	pending = true
 	setup.note = nil
-	setup.requested = {route = route, opponents = math.floor(opponents)}
 	send({request = {route = route.id, opponents = math.floor(opponents), invite = names}})
 	setupCard()
 	return true
@@ -397,7 +398,7 @@ local function onGrid(message)
 			return
 		end
 		race = {id = message.id, route = route, starter = starter, phase = "grid", passed = 0, offFor = 0, opponents = {}}
-		setup, pending, invite = nil, false, nil
+		setup, pending, invite, starting = nil, false, nil, nil
 		setFrozen(true)
 		if starter and type(message.opponentPoses) == "table" and #message.opponentPoses > 0 then
 			spawnOpponents(message.opponentPoses, veh, be:getPlayerVehicleID(0))
@@ -568,17 +569,15 @@ end
 
 --- The starter starts the race now, without waiting for the other invites.
 function M.startNow()
-	local id = setup and setup.inviting
-	if not id then return false end
-	send({start = id})
+	if not starting then return false end
+	send({start = starting})
 	return true
 end
 
 --- The starter calls the race off while the invites are open.
 function M.callOff()
-	local id = setup and setup.inviting
-	if not id then return false end
-	send({cancel = id})
+	if not starting then return false end
+	send({cancel = starting})
 	return true
 end
 
@@ -626,7 +625,7 @@ local function rxMileageSpotRace(data)
 			mine = type(message.mine) == "table" and message.mine or {}}
 		local spots = extensions.mileage_raceSpots
 		if type(spots) == "table" and type(spots.statusChanged) == "function" then spots.statusChanged() end
-		if setup and not setup.inviting then setupCard() end
+		if setup then setupCard() end
 	elseif phase == "refused" then
 		pending = false
 		if setup then
@@ -634,11 +633,10 @@ local function rxMileageSpotRace(data)
 			setupCard()
 		end
 	elseif phase == "inviting" and type(message.id) == "string" then
-		pending = false
-		local requested = setup and setup.requested
-		if setup then setup.inviting = message.id end
-		message.routeName = requested and requested.route.name or ""
-		message.opponents = requested and requested.opponents or 0
+		-- The set-up card gives way to the starter's card of who has answered.
+		pending, setup, starting = false, nil, message.id
+		local route = routeById(message.route)
+		message.routeName = route and route.name or ""
 		ui(message)
 	elseif phase == "invite" and type(message.id) == "string" then
 		if race then return end
@@ -648,7 +646,7 @@ local function rxMileageSpotRace(data)
 	elseif phase == "closed" then
 		if race and race.id == message.id then endHere() end
 		if invite and invite.id == message.id then invite = nil end
-		if setup and setup.inviting == message.id then setup = nil end
+		if starting == message.id then starting = nil end
 		pending = false
 		ui(message)
 	elseif phase == "grid" and type(message.id) == "string" then
@@ -687,7 +685,7 @@ end
 
 local function reset()
 	endHere()
-	setup, pending, invite, lastCard = nil, false, nil, nil
+	setup, pending, invite, starting, lastCard = nil, false, nil, nil, nil
 	status = {known = false, allowed = false, prize = 0, againUntil = 0, opponentsMax = 0, busy = {}, best = {}, mine = {}}
 end
 
