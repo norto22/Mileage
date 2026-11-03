@@ -306,27 +306,60 @@ local function onVehicleActiveChanged(gameVehicleID, active)
 	end
 end
 
+-- The ghost setting last queued to each car, by game vehicle id. It is queued only when
+-- it differs: to every car once a second (GHOST_EVERY, and on the next frame after the
+-- server's settings change), and at once to a car just built, reset or whose vehicle Lua
+-- restarted (ready again), which is forgotten so it gets the setting again.
+local GHOST_EVERY = 1
+local appliedGhost = {}
+local sinceGhosts = GHOST_EVERY
+
+local function applyGhost(gameVehicleID)
+	if worldReadyState ~= 2 or not clientConfig then return end
+	local veh = gameVehicleID and be:getObjectByID(gameVehicleID)
+	if not veh then return end
+	local ghost = nil
+	if not MPVehicleGE.isOwn(gameVehicleID) then
+		if veh.JBeam == "unicycle" then
+			ghost = clientConfig.remoteUnicycleGhost
+		else
+			ghost = clientConfig.remoteVehicleGhost
+		end
+	elseif veh.JBeam == "unicycle" then
+		ghost = clientConfig.localUnicycleGhost
+	end
+	if ghost ~= nil and appliedGhost[gameVehicleID] ~= ghost then
+		appliedGhost[gameVehicleID] = ghost
+		veh:queueLuaCommand(string.format('mileageEnabler.setGhost(%s)', tostring(ghost)))
+	end
+end
+
+local function applyGhosts()
+	local vehicles = MPVehicleGE.getVehicles()
+	for serverVehicleID in pairs(vehicles) do
+		applyGhost(vehicles[serverVehicleID].gameVehicleID)
+	end
+end
+
+local function forgetGhost(gameVehicleID)
+	if not gameVehicleID then return end
+	appliedGhost[gameVehicleID] = nil
+	applyGhost(gameVehicleID)
+end
+
 local function onVehicleSpawned(gameVehicleID)
 	if not gameVehicleID then return end
 	local veh = be:getObjectByID(gameVehicleID)
 	if veh then
 		veh:queueLuaCommand('mileageEnabler.onVehicleReady()')
 	end
+	applyGhost(gameVehicleID)
 	if MPVehicleGE.isOwn(gameVehicleID) then return end
 	-- A car BeamMP builds after its state arrived takes the kept state.
 	local serverVehicleID = MPVehicleGE.getServerVehicleID(gameVehicleID)
 	if not (serverVehicleID and applyKnownState(serverVehicleID)) then
 		requestVehicleStates()
 	end
-end
-
--- The ghost setting last queued to each car, by game vehicle id. onUpdate queues it only
--- when it differs; a car whose vehicle Lua restarted (ready again) or was reset is
--- forgotten, so it gets the setting again.
-local appliedGhost = {}
-
-local function forgetGhost(gameVehicleID)
-	if gameVehicleID then appliedGhost[gameVehicleID] = nil end
 end
 
 local function onVehicleReady(gameVehicleID)
@@ -755,6 +788,7 @@ end
 local function rxCareerSync(data)
 	local arrived = os.clockhp()
 	clientConfig = jsonDecode(data)
+	sinceGhosts = GHOST_EVERY
 	if not clientConfig then
 		log("E", logTag, "rxCareerSync: could not decode client config")
 		failCareerStart("could not read the server's Mileage settings")
@@ -814,6 +848,7 @@ local function rxClientConfigUpdate(data)
 	-- The shared settings carry no traffic share; this player's last one is kept.
 	if decoded.trafficShare == nil and clientConfig then decoded.trafficShare = clientConfig.trafficShare end
 	clientConfig = decoded
+	sinceGhosts = GHOST_EVERY
 	settingsCheck()
 	actionsCheck()
 end
@@ -871,26 +906,11 @@ local function onUpdate(dtReal, dtSim, dtRaw)
 	updateListRequest(dtReal)
 	if worldReadyState ~= 2 or not clientConfig then return end
 	updateTrafficMarks(dtReal)
-	local vehicles = MPVehicleGE.getVehicles()
-	for serverVehicleID in pairs(vehicles) do
-		local gameVehicleID = vehicles[serverVehicleID].gameVehicleID
-		local veh = be:getObjectByID(gameVehicleID)
-		if veh then
-			local ghost = nil
-			if not MPVehicleGE.isOwn(gameVehicleID) then
-				if veh.JBeam == "unicycle" then
-					ghost = clientConfig.remoteUnicycleGhost
-				else
-					ghost = clientConfig.remoteVehicleGhost
-				end
-			elseif veh.JBeam == "unicycle" then
-				ghost = clientConfig.localUnicycleGhost
-			end
-			if ghost ~= nil and appliedGhost[gameVehicleID] ~= ghost then
-				appliedGhost[gameVehicleID] = ghost
-				veh:queueLuaCommand(string.format('mileageEnabler.setGhost(%s)', tostring(ghost)))
-			end
-		end
+	local dt = tonumber(dtReal)
+	if dt and dt > 0 then sinceGhosts = sinceGhosts + dt end
+	if sinceGhosts >= GHOST_EVERY then
+		sinceGhosts = 0
+		applyGhosts()
 	end
 end
 
@@ -941,6 +961,7 @@ local function onBeamMPServerLeave()
 	sinceMarks = 0
 	trafficFocusPinned = false
 	appliedGhost = {}
+	sinceGhosts = GHOST_EVERY
 end
 
 --Access

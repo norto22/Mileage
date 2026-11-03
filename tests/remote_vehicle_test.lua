@@ -217,7 +217,7 @@ test("a car that is ready again or reset gets its ghost setting again", function
 	end
 end)
 
-test("a changed ghost setting from the server is sent once to each car", function()
+test("a changed ghost setting is sent once to each car within a second", function()
 	local enabler, objects = startedEnabler()
 	enabler.onUpdate(0.016)
 	local i = 1
@@ -227,10 +227,48 @@ test("a changed ghost setting from the server is sent once to each car", functio
 		if n == "clientConfig" then v.remoteVehicleGhost = true; break end
 		i = i + 1
 	end
-	enabler.onUpdate(0.016)
-	enabler.onUpdate(0.016)
+	for _ = 1, 62 do enabler.onUpdate(1 / 60) end
 	same(ghostCommands(objects[9]), 2, "setGhost commands on car 9")
 	same(objects[9].queued[2], "mileageEnabler.setGhost(true)", "the new setting")
+end)
+
+-- How often the stand-in game is asked for a car while fn runs.
+local function lookups(fn)
+	local realBe = be
+	local n = 0
+	be = setmetatable({getObjectByID = function(self, id) n = n + 1; return realBe.getObjectByID(self, id) end},
+		{__index = realBe})
+	fn()
+	be = realBe
+	return n
+end
+
+test("over a second of frames the ghost check goes over the cars once, not every frame", function()
+	local enabler = startedEnabler()
+	enabler.onUpdate(1 / 60)
+	local n = lookups(function() for _ = 1, 60 do enabler.onUpdate(1 / 60) end end)
+	-- Four cars, once for the ghost check and once for the traffic marks.
+	expect(n <= 8, "cars looked up in a second: " .. n)
+end)
+
+test("a car built between checks gets its ghost setting in the frame it is built", function()
+	local enabler, objects, vehicles = startedEnabler()
+	enabler.onUpdate(1 / 60)
+	enabler.onUpdate(1 / 60)
+	local veh = {id = 11, JBeam = "pickup", active = true, queued = {}, fields = {}}
+	function veh:queueLuaCommand(cmd) table.insert(self.queued, cmd) end
+	function veh:getActive() return self.active end
+	function veh:setActive(on) self.active = on == 1 end
+	function veh:setDynDataFieldbyName() end
+	objects[11] = veh
+	vehicles["1-2"] = {gameVehicleID = 11}
+	local realServerId = MPVehicleGE.getServerVehicleID
+	MPVehicleGE.getServerVehicleID = function(id) if id == 11 then return "1-2" end return realServerId(id) end
+	enabler.onVehicleSpawned(11)
+	same(ghostCommands(veh), 1, "setGhost commands on the new car")
+	same(veh.queued[2], "mileageEnabler.setGhost(false)", "the server's setting")
+	enabler.onUpdate(1 / 60)
+	same(ghostCommands(veh), 1, "setGhost commands after the next frame")
 end)
 
 test("another player's unicycle follows remoteUnicycleGhost even when it is off and cars are ghosted", function()
