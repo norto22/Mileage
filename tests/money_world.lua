@@ -411,6 +411,9 @@ World.CLIENT_FILES = {
 	{"mileage_leaderboard", CLIENT .. "mileage/leaderboard.lua"},
 	{"mileage_raceEvents", CLIENT .. "mileage/raceEvents.lua"},
 	{"mileage_aiRace", CLIENT .. "mileage/aiRace.lua"},
+	{"mileage_spotRoutes", CLIENT .. "mileage/spotRoutes.lua"},
+	{"mileage_spotRace", CLIENT .. "mileage/spotRace.lua"},
+	{"mileage_raceSpots", CLIENT .. "mileage/raceSpots.lua"},
 }
 
 local function fileExists(path)
@@ -601,6 +604,11 @@ function World:loadGame(p)
 		end,
 	}
 	p.globals.gameplay_traffic = {getTrafficData = function() return p.trafficData end}
+	-- The game's place list and marker caches, and its prompt at a marker.
+	p.poiClears, p.markerClears, p.promptCloses = p.poiClears or 0, p.markerClears or 0, p.promptCloses or 0
+	p.globals.gameplay_rawPois = {clear = function() p.poiClears = p.poiClears + 1 end}
+	p.globals.gameplay_markerInteraction = {clearCache = function() p.markerClears = p.markerClears + 1 end}
+	p.globals.ui_missionInfo = {closeDialogue = function() p.promptCloses = p.promptCloses + 1 end}
 	p.globals.mileageEnabler = {isRemoteTraffic = function(sid) return world.traffic[sid] ~= nil end}
 	p.globals.core_vehicles = {getModel = function(jbeam)
 		local models = {pessima = {Brand = "Ibishu", Name = "Pessima"}, pickup = {Brand = "Gavril", Name = "D-Series"}}

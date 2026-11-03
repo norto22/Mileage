@@ -37,6 +37,7 @@ local files = {
 	"tests/race_events_test.lua",
 	"tests/ai_race_test.lua",
 	"tests/race_spots_test.lua",
+	"tests/spot_race_test.lua",
 	"tests/money_oracle_test.lua",
 	"tests/money_edges_test.lua",
 	"tests/runtime_guard_test.lua",

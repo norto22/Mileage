@@ -67,6 +67,14 @@ local defaultConfig = {
 		allowAiRaces = true,
 		aiRacePrize = 0,
 		aiRacePrizeCooldownMinutes = 10,
+		-- Race spots at the game's West Coast routes: a player starts a race there against up
+		-- to spotRaceOpponentsMax opponents (0 to 5) and invited players. spotRacePrize is paid
+		-- to a player who finishes first overall, 0 to 1000000 (0 is off); one player earns it
+		-- at most once per cooldown (0 to 1440 min).
+		allowSpotRaces = true,
+		spotRacePrize = 0,
+		spotRacePrizeCooldownMinutes = 10,
+		spotRaceOpponentsMax = 5,
 		-- The shortest race allowed, in metres from start to finish (0 to 20000), and the
 		-- time after which a race nobody finished ends with both stakes back (1 to 120 min).
 		raceMinDistance = 500,
@@ -154,7 +162,7 @@ local ledger = {
 
 local STATS_SECONDS = 60
 local STATS_FEATURES = {"damage", "carStates", "trafficMarks", "trafficShare", "paint", "prefabs", "drag",
-	"payments", "transfers", "offers", "races", "leaderboard", "events", "aiRaces", "alive", "trafficLights",
+	"payments", "transfers", "offers", "races", "leaderboard", "events", "aiRaces", "spotRaces", "alive", "trafficLights",
 	"notifications", "config"}
 
 -- totals[feature] and slots[second % STATS_SECONDS].counts[feature]:
@@ -695,6 +703,7 @@ function onInit()
 	MP.RegisterEvent("mileageOfferAnswer","mileageOfferAnswer")
 	MP.RegisterEvent("mileageRaceReport","mileageRaceReport")
 	MP.RegisterEvent("mileageAiRace","mileageAiRace")
+	MP.RegisterEvent("mileageSpotRace","mileageSpotRace")
 	MP.RegisterEvent("mileageDragTime","mileageDragTime")
 	MP.RegisterEvent("mileageLeaderboard","mileageLeaderboard")
 
@@ -1759,13 +1768,15 @@ end
 -- Where the server sees the player's own car (not traffic) nearest to point, {x, y, z}, or
 -- nil when it cannot read one: where a race against a traffic car starts, and who is near
 -- it. A player may own a parked car far away; the one they drive is the one near the race.
-local function carPosition(player_id, point)
+-- skip: server vehicle ids not to count (a spot race's opponents, before their mark arrives).
+local function carPosition(player_id, point, skip)
 	if type(MP.GetPlayerVehicles) ~= "function" or type(MP.GetPositionRaw) ~= "function" then return nil end
 	local ok, vehicles = pcall(MP.GetPlayerVehicles, player_id)
 	if not ok or type(vehicles) ~= "table" then return nil end
 	local best, bestMetres = nil, nil
 	for vehicleId in pairs(vehicles) do
-		if not isTraffic(tostring(player_id) .. "-" .. tostring(vehicleId)) then
+		local serverVehicleID = tostring(player_id) .. "-" .. tostring(vehicleId)
+		if not isTraffic(serverVehicleID) and not (skip and skip[serverVehicleID]) then
 			local readOk, raw = pcall(MP.GetPositionRaw, player_id, vehicleId)
 			local at = readOk and positionOf(raw) or nil
 			if at then
@@ -2533,6 +2544,7 @@ function Event(arguments)
 end
 
 Money.eventsCareerStarted = eventsCareerStarted
+Money.gridPoses = gridPoses
 -- In a running event race, and so not free for a street race.
 Money.inEvent = function(name) return live ~= nil and live.joined[name] == true end
 -- In a street race or a running event race.
@@ -3069,7 +3081,30 @@ end
 -- Race spots at the game's West Coast routes (all but the drag strip). The routes ship
 -- with Mileage: the block below is written by tools/build_spots.py from the game's route
 -- files, and the game's copy (mileage/spotRoutes.lua) holds the same data, so no route a
--- game sends is ever used.
+-- game sends is ever used; a request names a route id.
+--
+-- A player at a spot's start asks for a race (mileageSpotRace {request = {route,
+-- opponents, invite}}). Phases, each advanced by the one-second tick:
+--   inviting   every invited player has INVITE_SECONDS to join or decline; the starter
+--              may start now or call it off
+--   grid       each player's game moves its car to its grid place and says ready; the
+--              starter's game also spawns its opponents on theirs and lists them
+--   countdown  SPOT_COUNTDOWN_SECONDS, every car held
+--   racing     until every racer finished or dropped out, AFTER_FIRST_SECONDS after the
+--              first finish, or the time limit
+-- The server times every racer, opponents included, from its own readings of their cars:
+-- a checkpoint is passed when the path between two readings comes within its radius plus
+-- CHECKPOINT_SLACK, and a finish is its own crossing of the last checkpoint of the last
+-- lap. What a game reports only shows sooner and never decides a place. A race in which
+-- the server could not read some racer's car is shown but unranked: no prize, win or time.
+--
+-- spotRaces[id] = {id, starter, route, phase, phaseEnds, goAt, deadline, opponentsWanted,
+-- invited = {[name] = "waiting" | "joined" | "declined"}, racers = {[key] = racer}, order,
+-- firstFinishAt, paceUntil, cars = {[serverVehicleID] = true}}
+-- racer = {key, name, car (server vehicle id, opponents only), model, slot, pose, ready,
+-- passed, passedAt, finish, out, reported, last, lastAt, readAt, driven, seen, stillAt,
+-- stillSince}; a racer's key is the player's name or "car:<server vehicle id>".
+-- Nothing is kept across a server start.
 
 do
 -- BEGIN GENERATED SPOT ROUTES
@@ -3284,7 +3319,708 @@ local SPOT_ROUTES = {
 }
 -- END GENERATED SPOT ROUTES
 
+local startTransfer, careerStarted, playerIdByName = Money.startTransfer, Money.careerStarted, Money.playerIdByName
+local SERVER_PARTY = Money.SERVER
+
+local INVITE_SECONDS = 30
+local GRID_SECONDS = 20
+local SPOT_COUNTDOWN_SECONDS = 5
+local AFTER_FIRST_SECONDS = 60
+local START_METRES = 50
+local INVITES_MAX = 7
+local OPPONENTS_HIGH = 5
+local PRIZE_HIGH = 1000000
+local CHECKPOINT_SLACK = 10
+-- Readings that arrive late after the first finish still count towards distance driven.
+local LATE_SECONDS = 2
+-- Another racer must have driven at least this, on average over the winner's time, as the
+-- server read it, for the prize: opponents held still or held back pay nothing.
+local PACE_MPS = 8
+-- An opponent the server sees standing this long is out; the starter's game saying it is
+-- out counts only once the server sees it standing STILL_CLAIM_SECONDS, or cannot read it.
+local STILL_METRES, STILL_SECONDS, STILL_CLAIM_SECONDS = 15, 20, 10
+local MODEL_MAX_LENGTH = 40
+
+local REFUSED = {
+	off = "Race spots are off on this server.",
+	career = "Your career has not started on this server yet.",
+	busy = "You are already in a race.",
+	route = "That race spot is not on this server.",
+	far = "Drive into the start marker first.",
+	taken = "A race is starting at this spot; try again in a moment.",
+	opponents = "This server allows fewer opponents.",
+	invites = "Invite at most 7 players.",
+	invitee = "A player you invited cannot race now.",
+}
+-- Why a racer has no time, as games send it: the starter for an opponent, a racer for itself.
+local OUT_WHY = {gone = true, stuck = true, spawn = true, left = true}
+
+local spotRaces = {}
+local spotSeq = 0
+-- When each player last earned the spot prize (os.time); not kept across starts.
+local spotPrizeEarnedAt = {}
+
+local routesById = {}
+for _, route in ipairs(SPOT_ROUTES) do routesById[route.id] = route end
+
+local function prizeAgainIn(name)
+	local earned = spotPrizeEarnedAt[name]
+	if not earned then return 0 end
+	return math.max(0, serverNumber("spotRacePrizeCooldownMinutes", 0, 1440) * 60 - (os.time() - earned))
+end
+
+local function racerNames(race)
+	local names = {}
+	for key, racer in pairs(race.racers) do
+		if not racer.car then table.insert(names, key) end
+	end
+	table.sort(names, function(a, b)
+		if a == race.starter or b == race.starter then return a == race.starter end
+		return a < b
+	end)
+	return names
+end
+
+local function spotRaceOf(name)
+	for _, race in pairs(spotRaces) do
+		local racer = race.racers[name]
+		if racer and not racer.car then return race end
+	end
+	return nil
+end
+
+-- Players in any race, for the set-up card's invite list.
+local function busyNames()
+	local names = {}
+	for _, name in pairs(MP.GetPlayers() or {}) do
+		if Money.busy and Money.busy(name) then table.insert(names, name) end
+	end
+	table.sort(names)
+	return names
+end
+
+local function sendStatus(player_id)
+	local name = MP.GetPlayerName(player_id)
+	local bests = Money.spotBests and Money.spotBests(name) or {}
+	sendJson("spotRaces", player_id, "rxMileageSpotRace", {phase = "status", allowed = serverSwitch("allowSpotRaces"),
+		prize = serverNumber("spotRacePrize", 0, PRIZE_HIGH), againIn = name and prizeAgainIn(name) or 0,
+		opponentsMax = serverNumber("spotRaceOpponentsMax", 0, OPPONENTS_HIGH), busy = busyNames(),
+		best = bests.best or {}, mine = bests.mine or {}})
+end
+
+local function sendTo(name, message)
+	local id = playerIdByName(name)
+	if id then sendJson("spotRaces", id, "rxMileageSpotRace", message) end
+end
+
+local function sendRacers(race, message)
+	for _, name in ipairs(racerNames(race)) do sendTo(name, message) end
+end
+
+local function routeSummary(route)
+	return {id = route.id, name = route.name, laps = route.laps, length = route.length, closed = route.closed,
+		checkpoints = #route.checkpoints}
+end
+
+local function modelText(model)
+	local text = type(model) == "string" and model:gsub("%c", " "):match("^%s*(.-)%s*$"):sub(1, MODEL_MAX_LENGTH) or ""
+	if text == "" then return "car" end
+	return text
+end
+
+local function flatMetres(a, b)
+	local dx, dy = a.x - b.x, a.y - b.y
+	return math.sqrt(dx * dx + dy * dy)
+end
+
+-- A point well ahead of the start, the way it faces: gridPoses lines up towards it.
+local function aheadOf(grid)
+	return {x = grid.pos.x + grid.dir.x * 100, y = grid.pos.y + grid.dir.y * 100, z = grid.pos.z}
+end
+
+local function inviteAnswers(race)
+	local answers = {}
+	for name, answer in pairs(race.invited) do table.insert(answers, {name = name, answer = answer}) end
+	table.sort(answers, function(a, b) return a.name < b.name end)
+	return answers
+end
+
+local function sendInviting(race)
+	sendTo(race.starter, {phase = "inviting", id = race.id, answers = inviteAnswers(race),
+		seconds = math.max(0, race.phaseEnds - signalTimer:GetCurrent())})
+end
+
+-- Ends a race that never started racing, for everyone in it and everyone still invited.
+local function closeRace(race, why)
+	spotRaces[race.id] = nil
+	for name, answer in pairs(race.invited) do
+		if answer == "waiting" then sendTo(name, {phase = "closed", id = race.id, why = why}) end
+	end
+	sendRacers(race, {phase = "closed", id = race.id, why = why})
+	print(string.format("[Mileage] Spot race %s at %s called off: %s", race.id, race.route.id, why))
+end
+
+--== the grid and the countdown ===============================================
+
+local function startCountdown(race)
+	local now = signalTimer:GetCurrent()
+	race.phase = "countdown"
+	race.goAt = now + SPOT_COUNTDOWN_SECONDS
+	race.deadline = race.goAt + serverNumber("raceTimeLimitMinutes", 1, 120) * 60
+	local names = {}
+	for _, racer in ipairs(race.order) do
+		if race.racers[racer.key] then table.insert(names, {name = racer.name, car = racer.car ~= nil}) end
+	end
+	sendRacers(race, {phase = "countdown", id = race.id, seconds = SPOT_COUNTDOWN_SECONDS, route = race.route.id,
+		racers = names})
+end
+
+-- Every player in the race gets a grid place behind the start facing the route: the
+-- starter first, then joined players, then the opponents the starter's game spawns.
+local function startGrid(race)
+	for name, answer in pairs(race.invited) do
+		if answer == "waiting" then
+			race.invited[name] = "declined"
+			sendTo(name, {phase = "closed", id = race.id, why = "The race started without you."})
+		end
+	end
+	local names = racerNames(race)
+	local poses = Money.gridPoses(race.route.grid.pos, aheadOf(race.route.grid), #names + race.opponentsWanted)
+	race.phase = "grid"
+	race.phaseEnds = signalTimer:GetCurrent() + GRID_SECONDS
+	race.order = {}
+	for i, name in ipairs(names) do
+		local racer = race.racers[name]
+		racer.slot, racer.pose = i, poses[i]
+		table.insert(race.order, racer)
+		local message = {phase = "grid", id = race.id, route = race.route.id, pose = poses[i], starter = race.starter}
+		if name == race.starter then
+			message.opponentPoses = {}
+			for j = #names + 1, #poses do table.insert(message.opponentPoses, poses[j]) end
+		end
+		sendTo(name, message)
+	end
+	race.opponentSlots = #names
+end
+
+local function allReady(race)
+	for _, name in ipairs(racerNames(race)) do
+		if not race.racers[name].ready then return false end
+	end
+	return true
+end
+
+-- The starter's game lists the opponents it spawned: only its own cars, at most as many as
+-- it asked for, each once.
+local function addOpponents(race, player_id, list)
+	if type(list) ~= "table" then return end
+	local slot = race.opponentSlots
+	for _, entry in ipairs(list) do
+		if slot - race.opponentSlots >= race.opponentsWanted then break end
+		local car = type(entry) == "table" and entry.car
+		if Money.ownsVehicle(player_id, car) and not race.cars[car] then
+			slot = slot + 1
+			local racer = {key = "car:" .. car, name = modelText(entry.model), car = car, model = modelText(entry.model),
+				slot = slot, ready = true, passed = 0}
+			race.cars[car] = true
+			race.racers[racer.key] = racer
+			table.insert(race.order, racer)
+		end
+	end
+end
+
+--== the server's own timing ===================================================
+
+-- The point on the path from a to b nearest centre, from s0 on (0 at a, 1 at b): its place
+-- along the path and its distance from centre.
+local function nearestOnPath(a, b, centre, s0)
+	local dx, dy, dz = b.x - a.x, b.y - a.y, b.z - a.z
+	local length2 = dx * dx + dy * dy + dz * dz
+	local s = s0
+	if length2 > 0 then
+		s = ((centre.x - a.x) * dx + (centre.y - a.y) * dy + (centre.z - a.z) * dz) / length2
+		s = math.max(s0, math.min(1, s))
+	end
+	local px, py, pz = a.x + dx * s - centre.x, a.y + dy * s - centre.y, a.z + dz * s - centre.z
+	return s, math.sqrt(px * px + py * py + pz * pz)
+end
+
+local function totalCheckpoints(race)
+	return #race.route.checkpoints * race.route.laps
+end
+
+-- The checkpoints the path from a to b passes, in order; readAt is when the server last read
+-- the old position, now the new one, so a time is never earlier than the car could be there.
+local function passCheckpoints(race, racer, a, b, readAt, now)
+	local checkpoints, total, s0 = race.route.checkpoints, totalCheckpoints(race), 0
+	while racer.passed < total do
+		local checkpoint = checkpoints[racer.passed % #checkpoints + 1]
+		local s, metres = nearestOnPath(a, b, checkpoint.pos, s0)
+		if metres > checkpoint.r + CHECKPOINT_SLACK then return end
+		racer.passed = racer.passed + 1
+		racer.passedAt = readAt + s * (now - readAt) - race.goAt
+		if racer.passed == total then
+			racer.finish = racer.passedAt
+			if not race.firstFinishAt then
+				race.firstFinishAt = now
+				race.paceUntil = now + LATE_SECONDS
+			end
+			return
+		end
+		s0 = s
+	end
+end
+
+local function readingOf(race, racer)
+	if racer.car then return Money.vehiclePosition(racer.car) end
+	local id = playerIdByName(racer.name)
+	if not id then return nil end
+	return Money.carPosition(id, racer.last or racer.pose.pos, race.cars)
+end
+
+-- One reading of a racer's car. Only a changed one counts; a step too long for the time
+-- since the last (a reset or a teleport) passes no checkpoint and adds no distance.
+local function readRacer(race, racer, now)
+	if racer.finish and racer.seen then
+		-- Distance after a finish still counts for the pace check, until paceUntil.
+		if not race.paceUntil or now > race.paceUntil then return end
+	elseif racer.out then
+		return
+	end
+	local at = readingOf(race, racer)
+	if not at then return end
+	racer.seen = true
+	local last, lastAt, readAt = racer.last, racer.lastAt, racer.readAt
+	racer.readAt = now
+	if not racer.stillAt or Money.metresBetween(at, racer.stillAt) >= STILL_METRES then
+		racer.stillAt, racer.stillSince = at, now
+	end
+	if last and last.x == at.x and last.y == at.y and last.z == at.z then return end
+	racer.last, racer.lastAt = at, now
+	if not last then
+		racer.driven = racer.driven or 0
+		return
+	end
+	local metres = flatMetres(last, at)
+	if metres > Money.MAX_SPEED_MPS * (now - lastAt + LATE_SECONDS) then return end
+	if not race.paceUntil or now <= race.paceUntil then racer.driven = (racer.driven or 0) + metres end
+	if not racer.finish then passCheckpoints(race, racer, last, at, readAt, now) end
+end
+
+--== the result ================================================================
+
+-- Standings: finished racers by time, then by laps and checkpoints done and the time of the
+-- last, racers out last. Positions from the server's readings, or, where it has none for a
+-- racer, from that racer's game.
+local function standings(race)
+	local rows = {}
+	local n = #race.route.checkpoints
+	for _, racer in ipairs(race.order) do
+		if race.racers[racer.key] then
+			local passed = racer.seen and racer.passed or math.max(racer.passed, racer.reportedPassed or 0)
+			table.insert(rows, {name = racer.name, car = racer.car ~= nil, passed = passed,
+				lap = math.min(race.route.laps, math.floor(passed / n) + 1), checkpoint = passed % n,
+				at = racer.passedAt, seconds = racer.finish or (not racer.seen and racer.reported) or nil,
+				out = racer.out})
+		end
+	end
+	table.sort(rows, function(a, b)
+		if (a.out ~= nil) ~= (b.out ~= nil) then return a.out == nil end
+		if (a.seconds ~= nil) ~= (b.seconds ~= nil) then return a.seconds ~= nil end
+		if a.seconds and a.seconds ~= b.seconds then return a.seconds < b.seconds end
+		if a.passed ~= b.passed then return a.passed > b.passed end
+		if a.at and b.at and a.at ~= b.at then return a.at < b.at end
+		if a.car ~= b.car then return a.car end
+		return a.name < b.name
+	end)
+	return rows
+end
+
+local function ranked(race)
+	for _, racer in pairs(race.racers) do
+		if not racer.seen then return false end
+	end
+	return true
+end
+
+-- Why the first place is not paid, or nil: the race was not seen, a car won, nobody else
+-- raced, nobody else drove at race pace, or the winner's wait is not over. A win counts on
+-- the leaderboard unless the race was unseen, a car won, or nobody else really raced.
+local function withheldFor(race, first)
+	if not ranked(race) then return "unseen" end
+	if first.car then return "car won" end
+	local others, atPace = 0, false
+	for key, racer in pairs(race.racers) do
+		if key ~= first.name then
+			others = others + 1
+			if (racer.driven or 0) >= PACE_MPS * first.seconds then atPace = true end
+		end
+	end
+	if others == 0 then return "alone" end
+	if not atPace then return "slow" end
+	if serverNumber("spotRacePrize", 0, PRIZE_HIGH) > 0 and prizeAgainIn(first.name) > 0 then return "wait" end
+	return nil
+end
+
+local function placesText(places)
+	local parts = {}
+	for i, place in ipairs(places) do
+		local time = place.seconds and string.format("%.1f s", place.seconds) or ("out: " .. tostring(place.out or "racing"))
+		table.insert(parts, string.format("%d. %s %s", i, consoleText(place.name), time))
+	end
+	return #parts > 0 and table.concat(parts, ", ") or "no racers"
+end
+
+local function endRace(race, why)
+	spotRaces[race.id] = nil
+	local places = standings(race)
+	local first = places[1]
+	if first and not first.seconds then first = nil end
+	local winner, paid, withheld = nil, 0, nil
+	local isRanked = ranked(race)
+	if first and why ~= "starterLeft" then
+		withheld = withheldFor(race, first)
+		if not first.car then winner = first.name end
+		local real = withheld ~= "unseen" and withheld ~= "car won" and withheld ~= "alone" and withheld ~= "slow"
+		if winner and real and Money.leaderboardWin then Money.leaderboardWin(winner) end
+		local prize = serverNumber("spotRacePrize", 0, PRIZE_HIGH)
+		if winner and not withheld and prize > 0 then
+			paid = prize
+			spotPrizeEarnedAt[winner] = os.time()
+			startTransfer({kind = "prize", from = SERVER_PARTY, to = winner, amount = paid, giveLabel = "Race spot prize"})
+		end
+	end
+	-- Every player's own server-timed finish in a race the server could follow.
+	local bests = {}
+	if isRanked and why ~= "starterLeft" then
+		for _, racer in pairs(race.racers) do
+			if not racer.car and racer.finish and Money.spotTime then
+				bests[racer.name] = Money.spotTime(race.route.id, racer.name, racer.finish)
+			end
+		end
+	end
+	for _, name in ipairs(racerNames(race)) do
+		local id = playerIdByName(name)
+		if id then
+			sendJson("spotRaces", id, "rxMileageSpotRace", {phase = "result", id = race.id, route = race.route.id,
+				places = places, winner = winner, carWon = first ~= nil and first.car, prize = paid, withheld = withheld,
+				prizeOffered = serverNumber("spotRacePrize", 0, PRIZE_HIGH), ranked = isRanked, best = bests[name],
+				why = why, you = name, againIn = prizeAgainIn(name)})
+			sendStatus(id)
+		end
+	end
+	print(string.format("[Mileage] Spot race %s at %s: %s; %s", race.id, race.route.id, placesText(places),
+		winner and (consoleText(winner) .. " wins" .. (paid > 0 and string.format(", $%d prize", paid) or "")
+			.. (withheld and " (no prize: " .. withheld .. ")" or "")) or ("no winner (" .. why .. ")")))
+end
+
+-- Every racer finished or is out, or a racer the server cannot read reported a finish.
+local function allDone(race)
+	for _, racer in pairs(race.racers) do
+		if not racer.out and not racer.finish and not (not racer.seen and racer.reported) then return false end
+	end
+	return true
+end
+
+--== the messages ==============================================================
+
+local function refuse(player_id, why)
+	sendJson("spotRaces", player_id, "rxMileageSpotRace", {phase = "refused", why = REFUSED[why] or why})
+end
+
+local function isWholeIn(n, low, high)
+	return type(n) == "number" and n == n and n % 1 == 0 and n >= low and n <= high
+end
+
+local function requestProblem(player_id, name, request)
+	if not serverSwitch("allowSpotRaces") then return "off" end
+	if not careerStarted(player_id) then return "career" end
+	if Money.busy and Money.busy(name) then return "busy" end
+	local routeId = request.route
+	if type(routeId) ~= "string" or #routeId < 1 or #routeId > 64 or not routeId:match("^[%w_]+$")
+			or not routesById[routeId] then
+		return "route"
+	end
+	local route = routesById[routeId]
+	if not isWholeIn(request.opponents, 0, serverNumber("spotRaceOpponentsMax", 0, OPPONENTS_HIGH)) then
+		return "opponents"
+	end
+	local invite = request.invite or {}
+	if type(invite) ~= "table" or #invite > INVITES_MAX then return "invites" end
+	for _, other in ipairs(invite) do
+		local id = type(other) == "string" and playerIdByName(other)
+		if not id or other == name or not MP.IsPlayerConnected(id) or not careerStarted(id)
+				or (Money.busy and Money.busy(other)) then
+			return "invitee"
+		end
+	end
+	for _, race in pairs(spotRaces) do
+		if race.route.spot == route.spot and race.phase ~= "racing" then return "taken" end
+	end
+	local at = Money.carPosition(player_id, route.grid.pos)
+	if at and Money.metresBetween(at, route.grid.pos) > START_METRES then return "far" end
+	return nil
+end
+
+local function startRequest(player_id, name, request)
+	local route = routesById[request.route]
+	spotSeq = spotSeq + 1
+	local now = signalTimer:GetCurrent()
+	local race = {id = "s" .. spotSeq .. "-" .. os.time(), starter = name, route = route, phase = "inviting",
+		phaseEnds = now + INVITE_SECONDS, opponentsWanted = request.opponents, invited = {},
+		racers = {[name] = {key = name, name = name, passed = 0}}, order = {}, cars = {}}
+	spotRaces[race.id] = race
+	local invited = {}
+	for _, other in ipairs(request.invite or {}) do
+		if not race.invited[other] then
+			race.invited[other] = "waiting"
+			table.insert(invited, other)
+		end
+	end
+	print(string.format("[Mileage] Spot race %s: %s at %s, %d opponents, %d invited", race.id, consoleText(name),
+		route.id, race.opponentsWanted, #invited))
+	if #invited == 0 then
+		startGrid(race)
+		return
+	end
+	local prize = serverNumber("spotRacePrize", 0, PRIZE_HIGH)
+	for _, other in ipairs(invited) do
+		sendTo(other, {phase = "invite", id = race.id, from = name, route = routeSummary(route),
+			opponents = race.opponentsWanted, prize = prize, seconds = INVITE_SECONDS})
+	end
+	sendInviting(race)
+end
+
+local function everyoneAnswered(race)
+	for _, answer in pairs(race.invited) do
+		if answer == "waiting" then return false end
+	end
+	return true
+end
+
+local function answerInvite(player_id, name, id, join)
+	local race = spotRaces[id]
+	if not race or race.phase ~= "inviting" or race.invited[name] ~= "waiting" then
+		sendJson("spotRaces", player_id, "rxMileageSpotRace", {phase = "closed", id = id,
+			why = "The invite is over."})
+		return
+	end
+	if join and (not careerStarted(player_id) or (Money.busy and Money.busy(name))) then
+		join = false
+		sendJson("spotRaces", player_id, "rxMileageSpotRace", {phase = "closed", id = id,
+			why = "Finish your race first, then join."})
+	end
+	race.invited[name] = join and "joined" or "declined"
+	if join then race.racers[name] = {key = name, name = name, passed = 0} end
+	sendInviting(race)
+	if everyoneAnswered(race) then startGrid(race) end
+end
+
+-- A racer drops out; before the green the starter dropping out calls the race off.
+local function dropOut(race, racer, why)
+	if race.phase == "racing" then
+		racer.out = racer.out or why
+		return
+	end
+	if racer.key == race.starter then
+		closeRace(race, why == "quit" and "The starter left." or "The starter gave up.")
+		return
+	end
+	race.racers[racer.key] = nil
+	if race.invited[racer.key] then race.invited[racer.key] = "declined" end
+	sendTo(racer.key, {phase = "closed", id = race.id, why = why == "quit" and "You left." or "You left the race."})
+	if race.phase == "inviting" then
+		sendInviting(race)
+		if everyoneAnswered(race) then startGrid(race) end
+	elseif race.phase == "grid" and allReady(race) then
+		startCountdown(race)
+	end
+end
+
+-- A racer this sender may speak for: its own name, or, for the starter, its opponents.
+local function racerFor(race, name, key)
+	local racer = race.racers[key]
+	if not racer then return nil end
+	if racer.car then return name == race.starter and racer or nil end
+	return key == name and racer or nil
+end
+
+local function onReady(player_id, name, message)
+	local race = spotRaces[message.race]
+	local racer = race and race.racers[name]
+	if not racer or race.phase ~= "grid" or racer.ready then return end
+	racer.ready = true
+	if name == race.starter then addOpponents(race, player_id, message.opponents) end
+	if allReady(race) then startCountdown(race) end
+end
+
+local function onProgress(name, message)
+	local race = spotRaces[message.race]
+	if not race or race.phase ~= "racing" or type(message.racer) ~= "string" then return end
+	local racer = racerFor(race, name, message.racer)
+	if not racer or not isWholeIn(message.checkpoint, 1, #race.route.checkpoints)
+			or not isWholeIn(message.lap, 1, race.route.laps) then
+		return
+	end
+	local passed = (message.lap - 1) * #race.route.checkpoints + message.checkpoint
+	if passed > (racer.reportedPassed or 0) then racer.reportedPassed = passed end
+end
+
+local function onFinished(name, message)
+	local race = spotRaces[message.race]
+	if not race or race.phase ~= "racing" or type(message.racer) ~= "string" then return end
+	local racer = racerFor(race, name, message.racer)
+	local seconds = message.seconds
+	if not racer or racer.reported or type(seconds) ~= "number" or seconds ~= seconds or seconds <= 0 then return end
+	local sinceGo = signalTimer:GetCurrent() - race.goAt
+	local metres = race.route.length or 0
+	if seconds > sinceGo + 3 or seconds < metres / Money.MAX_SPEED_MPS then return end
+	racer.reported = seconds
+end
+
+local function onOut(name, message, now)
+	local race = spotRaces[message.race]
+	if not race or type(message.racer) ~= "string" or not OUT_WHY[message.why] then return end
+	local racer = racerFor(race, name, message.racer)
+	if not racer or racer.out or racer.finish then return end
+	if racer.car then
+		-- The server takes the starter's word only for a car it sees standing or cannot read.
+		local readable = Money.vehiclePosition(racer.car) ~= nil
+		if readable and race.phase == "racing" and (not racer.stillSince or now - racer.stillSince < STILL_CLAIM_SECONDS) then
+			return
+		end
+		racer.out = message.why
+		return
+	end
+	if message.why == "left" then dropOut(race, racer, "left") end
+end
+
+-- A game: {status = true}, {request = {route, opponents, invite = {names}}}, {join = id},
+-- {decline = id}, {start = id}, {cancel = id}, {gaveUp = id}, {ready = {race, opponents =
+-- {{car, model}}}}, {progress = {race, racer, checkpoint, lap, at}}, {finished = {race,
+-- racer, seconds}} or {out = {race, racer, why}}.
+function mileageSpotRace(player_id, data)
+	received("spotRaces")
+	local message = decodeTable(data)
+	local name = MP.GetPlayerName(player_id)
+	if not message or not name then return end
+	local now = signalTimer:GetCurrent()
+	if message.status ~= nil then
+		sendStatus(player_id)
+	elseif type(message.request) == "table" then
+		local why = requestProblem(player_id, name, message.request)
+		if why then refuse(player_id, why) else startRequest(player_id, name, message.request) end
+	elseif type(message.join) == "string" then
+		answerInvite(player_id, name, message.join, true)
+	elseif type(message.decline) == "string" then
+		answerInvite(player_id, name, message.decline, false)
+	elseif type(message.start) == "string" then
+		local race = spotRaces[message.start]
+		if race and race.starter == name and race.phase == "inviting" then startGrid(race) end
+	elseif type(message.cancel) == "string" then
+		local race = spotRaces[message.cancel]
+		if race and race.starter == name and race.phase ~= "racing" then closeRace(race, "The starter called it off.") end
+	elseif type(message.gaveUp) == "string" then
+		local race = spotRaces[message.gaveUp]
+		local racer = race and race.racers[name]
+		if racer and not racer.finish then dropOut(race, racer, "gaveUp") end
+	elseif type(message.ready) == "table" then
+		onReady(player_id, name, message.ready)
+	elseif type(message.progress) == "table" then
+		onProgress(name, message.progress)
+	elseif type(message.finished) == "table" then
+		onFinished(name, message.finished)
+	elseif type(message.out) == "table" then
+		onOut(name, message.out, now)
+	end
+end
+
+local function racingTick(race, now)
+	for _, racer in pairs(race.racers) do
+		readRacer(race, racer, now)
+		if racer.car and not racer.out and not racer.finish and racer.stillSince
+				and now - racer.stillSince >= STILL_SECONDS then
+			racer.out = "stuck"
+		end
+	end
+	if allDone(race) then
+		endRace(race, "finished")
+	elseif race.firstFinishAt and now - race.firstFinishAt >= AFTER_FIRST_SECONDS then
+		endRace(race, "finished")
+	elseif now >= race.deadline then
+		endRace(race, "timeout")
+	else
+		sendRacers(race, {phase = "standings", id = race.id, rows = standings(race)})
+	end
+end
+
+local function spotRacesTick()
+	local now = signalTimer:GetCurrent()
+	for _, race in pairs(spotRaces) do
+		if race.phase == "inviting" then
+			if now >= race.phaseEnds then startGrid(race) end
+		elseif race.phase == "grid" then
+			if now >= race.phaseEnds then
+				if not race.racers[race.starter].ready then
+					closeRace(race, "The starter's car was not ready.")
+				else
+					for _, name in ipairs(racerNames(race)) do
+						if not race.racers[name].ready then dropOut(race, race.racers[name], "notReady") end
+					end
+					if spotRaces[race.id] and race.phase == "grid" then startCountdown(race) end
+				end
+			end
+		elseif race.phase == "countdown" then
+			if now >= race.goAt then
+				race.phase = "racing"
+				for _, racer in pairs(race.racers) do readRacer(race, racer, now) end
+			end
+		elseif race.phase == "racing" then
+			racingTick(race, now)
+		end
+	end
+end
+
+local function spotRacesPlayerLeft(name)
+	for _, race in pairs(spotRaces) do
+		if race.invited[name] == "waiting" then
+			race.invited[name] = "declined"
+			sendInviting(race)
+			if everyoneAnswered(race) then startGrid(race) end
+		end
+		local racer = race.racers[name]
+		if spotRaces[race.id] and racer and not racer.car then
+			if name == race.starter and race.phase == "racing" then
+				-- Its opponents leave with the starter's game: nobody can win.
+				endRace(race, "starterLeft")
+			elseif not racer.finish then
+				dropOut(race, racer, "quit")
+			end
+		end
+	end
+end
+
+-- A player in a spot race is racing for every other race (Money.busy reads this).
+local inOtherRace = Money.inRace
+Money.inRace = function(name)
+	return spotRaceOf(name) ~= nil or (inOtherRace ~= nil and inOtherRace(name))
+end
+-- A car racing at a spot, which a race against a traffic car may not take.
+Money.carInSpotRace = function(serverVehicleID)
+	for _, race in pairs(spotRaces) do
+		if race.cars[serverVehicleID] then return true end
+	end
+	return false
+end
 Money.spotRoutes = SPOT_ROUTES
+Money.spotRacesCareerStarted = sendStatus
+Money.sendSpotRaceStatus = function()
+	for id in pairs(MP.GetPlayers() or {}) do
+		if careerStarted(id) then sendStatus(id) end
+	end
+end
+Money.spotRacesTick = spotRacesTick
+Money.spotRacesPlayerLeft = spotRacesPlayerLeft
 end
 
 -- Loads what the money, racing, leaderboard and event sections keep between starts.
@@ -3755,6 +4491,7 @@ function careerSyncRequested(player_id, data)
 		Money.transfersCareerStarted(player_id)
 		Money.eventsCareerStarted(player_id)
 		Money.aiRacesCareerStarted(player_id)
+		Money.spotRacesCareerStarted(player_id)
 	end
 end
 
@@ -3773,6 +4510,7 @@ function careerStartResult(player_id, data)
 		Money.transfersCareerStarted(player_id)
 		Money.eventsCareerStarted(player_id)
 		Money.aiRacesCareerStarted(player_id)
+		Money.spotRacesCareerStarted(player_id)
 	elseif result.started == false then
 		dropUnstartedPlayer(player_id, "career start failed: " .. consoleText(result.reason or "no reason given"))
 	end
@@ -3955,6 +4693,7 @@ function tick()
 	Money.racesTick()
 	Money.eventsTick()
 	Money.aiRacesTick()
+	Money.spotRacesTick()
 	ticksSinceAlive = ticksSinceAlive + 1
 	if ticksSinceAlive >= ALIVE_EVERY_TICKS then
 		ticksSinceAlive = 0
@@ -4006,6 +4745,7 @@ function onPlayerDisconnectHandler(player_id)
 		Money.racesPlayerLeft(name)
 		Money.eventsPlayerLeft(name)
 		Money.aiRacesPlayerLeft(name)
+		Money.spotRacesPlayerLeft(name)
 	end
 	loadedPrefabs[player_id] = nil
 	ledger.send[player_id] = nil
@@ -4095,6 +4835,7 @@ function SetConfig(arguments)
 	sendJson("config", -1, "rxClientConfigUpdate", Config.client)
 	Money.sendFeatures(-1)
 	Money.sendAiRaceStatus()
+	Money.sendSpotRaceStatus()
 	-- Offers of a feature switched off close on the next tick.
 	-- An amount, a switch or a total may have changed everyone's share.
 	sharesChanged()

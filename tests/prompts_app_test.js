@@ -488,6 +488,144 @@ test("no text the app shows for a traffic race says AI", () => {
 	assert.ok(!/\bAI\b/.test(TEMPLATE.replace(/mileage_aiRace|aiRace/g, "")), "nor the page");
 });
 
+//== races at race spots ===========================================================
+
+const SETUP = {phase: "setup", spot: "city_race_1", spotName: "City Race 1", allowed: true, prize: 2000, againIn: 0,
+	opponentsMax: 5, you: "Taylor", note: null, routes: [{id: "city_race_1", name: "City Race 1", laps: 2, length: 4100,
+		closed: true, best: 221.27, bestBy: "Sam", mine: 232.8}],
+	players: [{name: "Sam", busy: false}, {name: "Jordan", busy: false}, {name: "Alex", busy: true}]};
+
+const rowsOf = (view) => [...(view.rows || [])].map((r) => r.label + ": " + r.value);
+
+test("the set-up card shows the route, the bests, the prize, the opponents and who to invite", () => {
+	const {scope} = load();
+	scope.emit("MileageSpotRace", SETUP);
+	const v = scope.spot.view;
+	assert.strictEqual(v.title, "Race spot: City Race 1");
+	assert.deepStrictEqual(rowsOf(v), ["Route: Circuit, 2 laps, 4.1 km", "Best time here: 3:41.27 by Sam",
+		"Your best: 3:52.80", "Prize for first place: $2,000"]);
+	assert.strictEqual(v.stepper.value, 3, "three opponents to start with");
+	assert.strictEqual(v.stepper.max, 5);
+	assert.strictEqual(v.layouts, null, "one route, no layout choice");
+	assert.deepStrictEqual(v.players.map((p) => p.name + (p.busy ? " busy" : "")), ["Sam", "Jordan", "Alex busy"]);
+	assert.strictEqual(v.start, "Start race");
+});
+
+test("Start sends the route, the opponents and the invited players, encoded", () => {
+	const {scope, lua} = load();
+	scope.emit("MileageSpotRace", SETUP);
+	scope.spotOpponents(1);
+	scope.spotPick(scope.spot.view.players[0]);
+	scope.spotPick(scope.spot.view.players[2]);
+	scope.spotStart();
+	assert.strictEqual(lua[lua.length - 1], "if mileage_spotRace then mileage_spotRace.request(" + b64("city_race_1") +
+		", 4, " + b64('["Sam"]') + ") end", "a busy player cannot be picked");
+	assert.strictEqual(scope.spot.view.startOff, true, "pressed once");
+	const sent = lua.length;
+	scope.spotStart();
+	assert.strictEqual(lua.length, sent, "not sent twice");
+});
+
+test("the opponents stay within 0 and the server's maximum; none and nobody invited is a timed run", () => {
+	const {scope} = load();
+	scope.emit("MileageSpotRace", Object.assign({}, SETUP, {opponentsMax: 2, prize: 0}));
+	assert.strictEqual(scope.spot.view.stepper.value, 2, "the maximum when it is below three");
+	scope.spotOpponents(1);
+	assert.strictEqual(scope.spot.view.stepper.value, 2);
+	for (let i = 0; i < 4; i++) scope.spotOpponents(-1);
+	assert.strictEqual(scope.spot.view.stepper.value, 0);
+	assert.strictEqual(scope.spot.view.start, "Start run");
+	assert.ok(scope.spot.view.note.includes("sets a time for the leaderboard but pays no prize"));
+	assert.ok(rowsOf(scope.spot.view).includes("Prize: None on this server"));
+});
+
+test("the race track's card offers its layouts and keeps the choice when the card is sent again", () => {
+	const {scope, lua} = load();
+	const track = Object.assign({}, SETUP, {spot: "race_track", spotName: "Race Track", routes: [
+		{id: "race_track", name: "Race Track", laps: 2, length: 8065, closed: true},
+		{id: "race_track_chicane", name: "Race Track Chicane", laps: 2, length: 8069, closed: true},
+		{id: "race_track_short", name: "Race Track Short", laps: 2, length: 4885, closed: true}]});
+	scope.emit("MileageSpotRace", track);
+	assert.deepStrictEqual(scope.spot.view.layouts.map((l) => l.name), ["Race Track", "Race Track Chicane", "Race Track Short"]);
+	scope.spotLayout(2);
+	assert.ok(rowsOf(scope.spot.view).includes("Route: Circuit, 2 laps, 4.9 km"));
+	assert.ok(rowsOf(scope.spot.view).includes("Best time here: No times yet"));
+	scope.emit("MileageSpotRace", Object.assign({}, track, {note: "Drive into the start marker first."}));
+	assert.strictEqual(scope.spot.view.layouts[2].on, true, "still the short layout");
+	assert.strictEqual(scope.spot.view.note, "Drive into the start marker first.", "the server's reason shows");
+	scope.spotStart();
+	assert.ok(lua[lua.length - 1].includes(b64("race_track_short")));
+});
+
+test("the countdown, the race panel and the off-route warning", () => {
+	const {scope} = load();
+	scope.emit("MileageSpotRace", {phase: "countdown", id: "s1", routeName: "City Race 1", count: 3, you: "Taylor",
+		racers: [{name: "Taylor"}, {name: "Sam"}, {name: "Ibishu Pessima", car: true}, {name: "ETK 800", car: true}]});
+	assert.strictEqual(scope.spot.view.big, "3");
+	assert.deepStrictEqual(rowsOf(scope.spot.view), ["Grid: You, Sam, 2 cars"]);
+	scope.emit("MileageSpotRace", {phase: "racing", id: "s1", routeName: "City Race 1", place: 2, of: 5, lap: 1, laps: 2,
+		checkpoint: 7, checkpoints: 13, elapsed: 72.4, ahead: "Ibishu Pessima", gap: 1.8, you: "Taylor"});
+	assert.deepStrictEqual(rowsOf(scope.spot.view), ["Place: 2 / 5", "Lap: 1 / 2", "Checkpoint: 7 / 13", "Time: 1:12.4",
+		"Ahead: Ibishu Pessima, 1.8 s"]);
+	assert.strictEqual(scope.spot.view.giveUp, true);
+	scope.emit("MileageSpotRace", {phase: "racing", id: "s1", routeName: "City Race 1", lap: 1, laps: 2, checkpoint: 7,
+		checkpoints: 13, elapsed: 80, offRoute: 6, nextMetres: 1200, you: "Taylor"});
+	assert.strictEqual(scope.spot.view.warn, "You are off the route. Head back to checkpoint 7 within 6 s or your race ends.");
+	assert.ok(rowsOf(scope.spot.view).includes("Next checkpoint: 1.2 km away"));
+});
+
+test("Give up and Cancel reach the game", () => {
+	const {scope, lua} = load();
+	scope.emit("MileageSpotRace", {phase: "go", id: "s1", routeName: "City Race 1"});
+	scope.spotGiveUp();
+	assert.strictEqual(lua[lua.length - 1], "if mileage_spotRace then mileage_spotRace.giveUp() end");
+	scope.emit("MileageSpotRace", SETUP);
+	scope.spotCancel();
+	assert.strictEqual(scope.spot, null);
+	assert.strictEqual(lua[lua.length - 1], "if mileage_spotRace then mileage_spotRace.closeSetup() end");
+});
+
+test("the result lists every racer with a time or why not, opponents by their model", () => {
+	const {scope} = load();
+	scope.emit("MileageSpotRace", {phase: "result", id: "s1", routeName: "City Race 1", you: "Taylor", winner: "Taylor",
+		prize: 0, prizeOffered: 0, places: [
+			{name: "Taylor", seconds: 229.02}, {name: "Ibishu Pessima", car: true, seconds: 230.77},
+			{name: "Sam", seconds: 235.1}, {name: "ETK 800", car: true, out: "stuck"}, {name: "Jordan", out: "left"},
+			{name: "Alex", out: "quit"}, {name: "Gavril Grand Marshal", car: true}]});
+	const v = scope.spot.view;
+	assert.strictEqual(v.title, "You won City Race 1");
+	assert.deepStrictEqual(v.places.map((p) => p.place + " " + p.name + " " + p.value), [
+		"1 You 3:49.02", "2 Ibishu Pessima 3:50.77", "3 Sam 3:55.10", "- ETK 800 Stuck", "- Jordan Left the route",
+		"- Alex Left the server", "- Gavril Grand Marshal Did not finish"]);
+	assert.strictEqual(v.places[0].me, true);
+	assert.strictEqual(v.close, true);
+	scope.emit("MileageSpotRace", {phase: "result", id: "s2", routeName: "City Race 1", you: "Taylor", carWon: true,
+		places: [{name: "Ibishu Pessima", car: true, seconds: 230}, {name: "Taylor", seconds: 231.4}]});
+	assert.strictEqual(scope.spot.view.title, "Ibishu Pessima won City Race 1");
+	scope.emit("MileageSpotRace", {phase: "result", id: "s3", routeName: "City Race 1", you: "Taylor", why: "starterLeft",
+		places: [{name: "Taylor"}]});
+	assert.strictEqual(scope.spot.view.title, "City Race 1: no winner");
+	assert.ok(scope.spot.view.note.includes("The starter left"));
+});
+
+test("no text the app shows for a race spot says AI", () => {
+	const {scope} = load();
+	const texts = (v) => [v.title, v.note, v.warn, v.big, v.start].concat((v.rows || []).map((r) => r.label + " " + r.value),
+		(v.places || []).map((p) => p.name + " " + p.value)).filter((t) => typeof t === "string");
+	const shown = [];
+	scope.emit("MileageSpotRace", SETUP);
+	shown.push(...texts(scope.spot.view));
+	scope.emit("MileageSpotRace", {phase: "countdown", id: "s1", routeName: "R", count: 2, racers: [{name: "ETK 800", car: true}]});
+	shown.push(...texts(scope.spot.view));
+	["alone", "slow", "car won", "wait", "unseen"].forEach((withheld) => {
+		scope.emit("MileageSpotRace", {phase: "result", id: "s1", routeName: "R", you: "T", winner: "T", prizeOffered: 100,
+			withheld, places: [{name: "T", seconds: 10}, {name: "ETK 800", car: true, out: "gone"}]});
+		shown.push(...texts(scope.spot.view));
+	});
+	assert.ok(shown.length > 20, "views checked: " + shown.length);
+	assert.deepStrictEqual(shown.filter((t) => /\bAI\b/.test(t)), []);
+});
+
 //== the template ================================================================
 
 test("the template binds every text as text, never as markup", () => {
