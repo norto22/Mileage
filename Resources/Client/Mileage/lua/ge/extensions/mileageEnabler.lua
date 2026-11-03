@@ -14,7 +14,8 @@
 --     mapping machine-dependent.
 --   * A join keeps one loading screen up until the career has started, and tells the
 --     server whether it started (see "Join" below).
---   * patchTopBar is gated: ui_topBar does not exist in 0.39.
+--   * The pause menu's Mods entry and editable environment are kept out of the career
+--     by mileage_patches (#15).
 --   * Menu hooks come from mileage_patches (runtime wrappers around the game's
 --     career modules).
 
@@ -186,6 +187,15 @@ local function isRemoteTraffic(serverVehicleID)
 	return type(state) == "table" and state.traffic == true
 end
 
+-- true once the server holds the owner's traffic mark for another player's car, so
+-- isRemoteTraffic's answer for it is the owner's and not just "not marked yet". A car's
+-- first state ({active = true} at spawn) carries no mark; the owner's game sends its
+-- first mark, true or false, within a second (an older Mileage marks only traffic).
+local function hasTrafficMark(serverVehicleID)
+	local state = knownStates[serverVehicleID]
+	return type(state) == "table" and type(state.traffic) == "boolean"
+end
+
 -- Career constantly hides/shows vehicles (garage, shopping, missions). A vehicle
 -- hidden locally must be hidden for everyone, so the server keeps the
 -- authoritative active-state map and we apply it to everything we do not own. The
@@ -247,14 +257,11 @@ local function sendTrafficMarks()
 				seen[serverVehicleID] = true
 				local mark = isTrafficCar(gameVehicleID, veh)
 				local sent = sentMarks[serverVehicleID]
-				-- A car never marked counts as unmarked, as the server has it. A car rebuilt
-				-- under a new game id keeps the server's old mark, so its mark is sent again.
-				local previous = false
-				if sent and sent.gameVehicleID == gameVehicleID then
-					previous = sent.mark
-				elseif sent then
-					previous = nil
-				end
+				-- Every car's first mark is sent, false too: other games wait for it before
+				-- asking the car for its paint (#87). A car rebuilt under a new game id keeps
+				-- the server's old mark, so its mark is sent again.
+				local previous = nil
+				if sent and sent.gameVehicleID == gameVehicleID then previous = sent.mark end
 				if mark ~= previous then
 					changed = changed or {}
 					changed[serverVehicleID] = mark
@@ -471,22 +478,7 @@ local function onComputerOpenedMP()
 	inComputerMenus = false
 end
 
---Patch BeamMP behavior and topBar
-
--- 0.39 deleted ui/topBar.lua and ui/topBar/ outright. The replacement stack
--- (menuManager + router + uiStateManager + pause/) has no removeEntry
--- equivalent -- the entry list now lives behind the router / pause-V2 layer.
--- Gated rather than removed so the old path still works if BeamNG restores it.
-local function patchTopBar()
-	if not compat.hasLegacyTopBar() then return end
-	ui_topBar.removeEntry("environment")
-	ui_topBar.removeEntry("mods")
-	ui_topBar.removeEntry("vehicleconfig")
-	ui_topBar.removeEntry("vehicles")
-	local entries = ui_topBar.getEntries()
-	ui_topBar.updateEntries(entries)
-	ui_topBar.updateVisibleItems()
-end
+--Patch BeamMP behavior
 
 -- The mirrored driver side on remote vehicles is corrected by BeamMP itself
 -- (beammp_multiplayer installs core_camera.getDriverData). BeamMP re-asserts
@@ -871,10 +863,6 @@ local function onWorldReadyState(state)
 	end
 end
 
-local function onClientPostStartMission(levelPath)
-	patchTopBar()
-end
-
 local function onUpdate(dtReal, dtSim, dtRaw)
 	updateWaitingStart()
 	updateCareerStart()
@@ -959,6 +947,7 @@ end
 M.getClientConfig = getClientConfig
 M.isTrafficCar = isTrafficCar
 M.isRemoteTraffic = isRemoteTraffic
+M.hasTrafficMark = hasTrafficMark
 M.reapplyRemoteStates = reapplyRemoteStates
 
 M.onCareerActive = onCareerActive
@@ -981,8 +970,6 @@ M.onCareerTuningStartedMP = computerMenuHandler
 M.onPartShoppingStartedMP = computerMenuHandler
 M.onVehiclePaintingUiOpenedMP = computerMenuHandler
 M.onPerformanceTestStartedMP = computerMenuHandler
-
-M.onClientPostStartMission = onClientPostStartMission
 
 M.onWorldReadyState = onWorldReadyState
 M.onUpdate = onUpdate

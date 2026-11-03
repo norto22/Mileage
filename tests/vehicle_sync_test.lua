@@ -519,7 +519,11 @@ test("marks go out at most once a second, only when they change, and only for th
 	frames(friend, 0.5)
 	same(marksSent(friend), 1, "marks after a second")
 	frames(me, 2)
-	same(marksSent(me), 0, "marks from a game with no traffic")
+	-- #87: a game with no traffic still sends its cars' first marks, false, once, so other
+	-- games know at once that they can ask those cars for their paint.
+	same(marksSent(me), 1, "marks from a game with no traffic")
+	frames(me, 2)
+	same(marksSent(me), 1, "marks from a game with no traffic once nothing changed")
 	frames(friend, 3)
 	same(marksSent(friend), 1, "marks while nothing changed")
 	world.broadcasts = {}
@@ -1072,4 +1076,186 @@ end
 test("a game asks for the part paints of another player's car, never of their traffic", function()
 	same(paintRequests({["1-1"] = true}), "1-0", "paint requests")
 	same(paintRequests({}, false), "1-0,1-1", "paint requests with an enabler that cannot tell traffic")
+end)
+
+test("#87: a player who joins, with the real enabler and server, asks only my friend's own car for paint", function()
+	local _, friend = twoPlayers()
+	frames(friend, 1) -- my friend's game has sent its traffic marks
+	local late = addPlayer(2, "Late")
+	late.MPVehicleGE.getGameVehicleID = function(sid)
+		local entry = late.vehicles[sid]
+		return entry and entry.gameVehicleID
+	end
+	local now = 0
+	os.clockhp = function() return now end
+	local paint
+	as(late, function()
+		mileageEnabler = late.enabler
+		paint = dofile(PAINT)
+		paint.onExtensionLoaded()
+	end)
+	-- BeamMP builds my friend's car, police car and parked car on the joining game, and
+	-- they become ready before the server's vehicle list has arrived.
+	for vid, model in pairs({[0] = "pickup", [1] = "fullsize", [2] = "covet"}) do
+		local gid = gameId(1, vid)
+		local veh = {owner = 1, serverVehicleID = "1-" .. vid, JBeam = model, active = true}
+		function veh:setActive(on) self.active = on == 1 end
+		function veh:getActive() return self.active end
+		function veh:queueLuaCommand() end
+		function veh:setField() end
+		function veh:setDynDataFieldbyName(name, _, value) self[name] = value end
+		late.objects[gid] = veh
+		late.vehicles["1-" .. vid] = {gameVehicleID = gid, jbeam = model, isLocal = false}
+		as(late, paint.onVehicleReady, gid)
+	end
+	pump()
+	same(count(late.serverRequests, "requestPartPaints"), 0, "paint requests before the vehicle list")
+	careerVehSyncRequested(2, "")
+	pump()
+	now = 0.5
+	as(late, paint.onUpdate)
+	local asked = {}
+	for _, m in ipairs(world.toServer) do
+		if m.name == "requestPartPaints" then table.insert(asked, decode(m.data).serverVehicleID) end
+	end
+	same(table.concat(asked, ","), "1-0", "cars asked for paint once the list arrived")
+	pump()
+	same(count(late.serverRequests, "requestPartPaints"), 1, "paint requests once the list arrived")
+	now = 10
+	as(late, paint.onUpdate)
+	pump()
+	same(count(late.serverRequests, "requestPartPaints"), 1, "paint requests after the 5 s wait")
+	os.clockhp = function() return 0 end
+end)
+
+test("#87: a traffic car my friend spawns while I am on the server is not asked for paint before its mark", function()
+	local me, friend = twoPlayers()
+	frames(friend, 1)
+	me.MPVehicleGE.getGameVehicleID = function(sid)
+		local entry = me.vehicles[sid]
+		return entry and entry.gameVehicleID
+	end
+	local now = 0
+	os.clockhp = function() return now end
+	local paint
+	as(me, function()
+		mileageEnabler = me.enabler
+		paint = dofile(PAINT)
+		paint.onExtensionLoaded()
+	end)
+	local function paintRequests()
+		local asked = {}
+		for _, m in ipairs(world.toServer) do
+			if m.from == 0 and m.name == "requestPartPaints" then table.insert(asked, decode(m.data).serverVehicleID) end
+		end
+		table.sort(asked)
+		return table.concat(asked, ",")
+	end
+	-- The server tells every game of each new car with {active = true}; the owner's game
+	-- marks its traffic a moment later, once a second.
+	local police = spawn(1, 3, {JBeam = "fullsize", isTraffic = "true", ai = true})
+	local own = spawn(1, 4, {JBeam = "pickup"})
+	world.toServer = {}
+	as(me, paint.onVehicleReady, police)
+	as(me, paint.onVehicleReady, own)
+	same(paintRequests(), "", "paint requests before the owner's marks")
+	frames(friend, 1)
+	world.toServer = {}
+	now = 1
+	as(me, paint.onUpdate)
+	same(paintRequests(), "1-4", "paint requests once the owner marked both cars")
+	world.toServer = {}
+	now = 10
+	as(me, paint.onUpdate)
+	same(paintRequests(), "", "paint requests after the 5 s wait")
+	os.clockhp = function() return 0 end
+end)
+
+-- Me with the real paint module, on a world where my friend's game has sent its marks.
+-- Returns my paint module and a function listing the cars I have asked for paint since
+-- the last call.
+local function paintOnMyGame()
+	local me, friend = twoPlayers()
+	frames(friend, 1)
+	me.MPVehicleGE.getGameVehicleID = function(sid)
+		local entry = me.vehicles[sid]
+		return entry and entry.gameVehicleID
+	end
+	local paint
+	as(me, function()
+		mileageEnabler = me.enabler
+		paint = dofile(PAINT)
+		paint.onExtensionLoaded()
+	end)
+	world.toServer = {}
+	local function askedSinceLast()
+		local asked = {}
+		for _, m in ipairs(world.toServer) do
+			if m.from == 0 and m.name == "requestPartPaints" then table.insert(asked, decode(m.data).serverVehicleID) end
+		end
+		world.toServer = {}
+		table.sort(asked)
+		return table.concat(asked, ",")
+	end
+	return me, friend, paint, askedSinceLast
+end
+
+-- Puts a new copy of the owner's car sid on every game under game id gid, as BeamMP does
+-- when it rebuilds a car or gives a used server id to a new one.
+local function replaceCar(sid, oldGid, gid, fields)
+	local owner = tonumber(sid:match("^(%d+)"))
+	for id, p in pairs(world.players) do
+		local veh = {owner = owner, serverVehicleID = sid, JBeam = fields.JBeam, active = true}
+		if id == owner then veh.isTraffic, veh.isParked = fields.isTraffic, fields.isParked end
+		function veh:setActive(on) self.active = on == 1 end
+		function veh:getActive() return self.active end
+		function veh:queueLuaCommand() end
+		function veh:setField() end
+		function veh:setDynDataFieldbyName(name, _, value) self[name] = value end
+		p.objects[oldGid] = nil
+		p.objects[gid] = veh
+		p.vehicles[sid] = {gameVehicleID = gid, jbeam = fields.JBeam, isLocal = id == owner}
+	end
+end
+
+test("#87: my friend's own car rebuilt under a new game id keeps its mark, so I ask it for paint at once", function()
+	local me, _, paint, askedSinceLast = paintOnMyGame()
+	os.clockhp = function() return 0 end
+	replaceCar("1-0", gameId(1, 0), 997, {JBeam = "pickup"})
+	onVehicleEditedHandler(1, 0, "")
+	pump()
+	as(me, paint.onVehicleDestroyed, gameId(1, 0))
+	as(me, paint.onVehicleReady, 997)
+	same(askedSinceLast(), "1-0", "paint requests on the frame the rebuilt car is ready")
+	as(me, paint.onUpdate)
+	same(askedSinceLast(), "", "paint requests on the next frame")
+end)
+
+test("#87: a new own car under a used server id is asked for paint once its owner marks it, not after the 5 s wait", function()
+	local me, friend, paint, askedSinceLast = paintOnMyGame()
+	local now = 0
+	os.clockhp = function() return now end
+	-- My friend spawns a car of their own, then deletes it; BeamMP gives its server id
+	-- to the next car they spawn, under a new game id. Neither car is traffic.
+	local first = spawn(1, 5, {JBeam = "pickup"})
+	as(me, paint.onVehicleReady, first)
+	frames(friend, 1)
+	now = 1
+	as(me, paint.onUpdate)
+	same(askedSinceLast(), "1-5", "paint requests for the first car")
+	replaceCar("1-5", first, 998, {JBeam = "vivace"})
+	onVehicleSpawnHandler(1, 5, "")
+	pump()
+	as(me, paint.onVehicleDestroyed, first)
+	now = 2
+	as(me, paint.onVehicleReady, 998)
+	same(askedSinceLast(), "", "paint requests before the new car's mark")
+	frames(friend, 1)
+	now = 3
+	as(me, paint.onUpdate)
+	same(askedSinceLast(), "1-5", "paint requests once my friend's game marked the new car")
+	now = 10
+	as(me, paint.onUpdate)
+	same(askedSinceLast(), "", "paint requests after the 5 s wait")
+	os.clockhp = function() return 0 end
 end)

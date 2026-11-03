@@ -238,3 +238,161 @@ test("#49: a car whose only held paint is replaced by one applied at once frees 
 	same(painted(74), "vehicle/hood:red", "paint of a car held after the place was freed")
 	same(painted(10), "vehicle/hood:green", "paint of the car that was painted at once")
 end)
+
+--== #87: a paint request waits for the owner's traffic mark of the car =======
+
+-- The enabler as it is today: game.states[serverVehicleID] is the server's state of
+-- another player's car, once it has arrived; its traffic field is the owner's mark.
+local function withStates()
+	game.states = {}
+	mileageEnabler = {
+		hasTrafficMark = function(sid) return game.states[sid] ~= nil and type(game.states[sid].traffic) == "boolean" end,
+		isRemoteTraffic = function(sid) return game.states[sid] ~= nil and game.states[sid].traffic == true end,
+	}
+end
+
+-- The cars a paint request went out for, sorted, as "a,b".
+local function requestedFor()
+	local out = {}
+	for _, m in ipairs(game.sent) do
+		if m.name == "requestPartPaints" then table.insert(out, m.data.serverVehicleID) end
+	end
+	table.sort(out)
+	return table.concat(out, ",")
+end
+
+-- Another player's car listed, built and ready on this game.
+local function ready(paint, sid, gid)
+	game.listed[sid] = gid
+	game.built[gid] = true
+	paint.onVehicleReady(gid)
+end
+
+test("#87: a car that becomes ready before its mark is asked for paint only once it is known not to be traffic", function()
+	local paint = setup()
+	withStates()
+	ready(paint, "2-5", 25) -- the other player's traffic car
+	ready(paint, "2-1", 21) -- their own car
+	paint.onUpdate()
+	same(requestedFor(), "", "requests before the server's states")
+	game.states["2-5"] = {traffic = true}
+	game.states["2-1"] = {traffic = false}
+	game.now = 0.5
+	paint.onUpdate()
+	same(requestedFor(), "2-1", "requests once the states arrived")
+	game.now = 10
+	paint.onUpdate()
+	same(requestedFor(), "2-1", "requests later on")
+end)
+
+test("#87: a car whose state is already known is asked at once, or not at all for traffic", function()
+	local paint = setup()
+	withStates()
+	game.states["2-5"] = {traffic = true}
+	game.states["2-1"] = {active = true, traffic = false}
+	ready(paint, "2-5", 25)
+	ready(paint, "2-1", 21)
+	same(requestedFor(), "2-1", "requests on the frame the cars became ready")
+end)
+
+test("#87: a car with no state after 5 s is asked anyway, once; at 4.9 s it is not", function()
+	local paint = setup()
+	withStates()
+	ready(paint, "2-1", 21)
+	game.now = 4.9
+	paint.onUpdate()
+	same(requestedFor(), "", "requests at 4.9 s")
+	game.now = 5
+	paint.onUpdate()
+	same(requestedFor(), "2-1", "requests at 5 s")
+	game.now = 20
+	paint.onUpdate()
+	same(requestedFor(), "2-1", "requests later on")
+end)
+
+test("#87: the 5 s wait counts from the first ready, and a car ready twice is asked once", function()
+	local paint = setup()
+	withStates()
+	ready(paint, "2-1", 21)
+	game.now = 3
+	paint.onVehicleReady(21)
+	game.now = 5
+	paint.onUpdate()
+	same(requestedFor(), "2-1", "requests 5 s after the first ready")
+end)
+
+test("#87: a car removed while its request waits is never asked", function()
+	local paint = setup()
+	withStates()
+	ready(paint, "2-1", 21)
+	ready(paint, "2-2", 22)
+	game.listed["2-1"] = nil -- gone from BeamMP's list
+	paint.onVehicleDestroyed(22) -- destroyed on this game
+	game.states["2-1"] = {active = true, traffic = false}
+	game.states["2-2"] = {active = true, traffic = false}
+	game.now = 10
+	paint.onUpdate()
+	same(requestedFor(), "", "requests for removed cars")
+end)
+
+test("#87: leaving the server forgets every waiting request", function()
+	local paint = setup()
+	withStates()
+	ready(paint, "2-1", 21)
+	paint.onBeamMPServerLeave()
+	game.states["2-1"] = {active = true, traffic = false}
+	game.now = 10
+	paint.onUpdate()
+	same(requestedFor(), "", "requests after leaving")
+end)
+
+test("#87: a waiting request goes out while the world is still loading", function()
+	local paint = setup()
+	withStates()
+	worldReadyState = 1
+	ready(paint, "2-1", 21)
+	game.states["2-1"] = {active = true, traffic = false}
+	paint.onUpdate()
+	same(requestedFor(), "2-1", "requests while joining")
+	worldReadyState = 2
+end)
+
+test("#87: an enabler that cannot say whether a state arrived asks at once, and never for traffic", function()
+	local paint = setup()
+	mileageEnabler = {isRemoteTraffic = function(sid) return sid == "2-5" end}
+	ready(paint, "2-5", 25)
+	ready(paint, "2-1", 21)
+	same(requestedFor(), "2-1", "requests on the frame the cars became ready")
+	game.now = 10
+	paint.onUpdate()
+	same(requestedFor(), "2-1", "requests later on")
+end)
+
+test("#87: a car rebuilt under a new game id while waiting is asked once, and the old id's removal does not drop it", function()
+	local paint = setup()
+	withStates()
+	ready(paint, "2-1", 21)
+	-- BeamMP rebuilds the car: same server id, a new game id; the old object goes.
+	game.built[21] = nil
+	ready(paint, "2-1", 31)
+	paint.onVehicleDestroyed(21)
+	game.states["2-1"] = {active = true, traffic = false}
+	game.now = 0.5
+	paint.onUpdate()
+	same(requestedFor(), "2-1", "requests for the rebuilt car")
+	game.now = 10
+	paint.onUpdate()
+	same(requestedFor(), "2-1", "requests later on")
+end)
+
+test("#87: a car marked traffic while it waits is never asked, even after 5 s", function()
+	local paint = setup()
+	withStates()
+	ready(paint, "2-5", 25)
+	game.now = 1
+	game.states["2-5"] = {active = true, traffic = true}
+	paint.onUpdate()
+	game.now = 30
+	paint.onUpdate()
+	same(requestedFor(), "", "requests for a traffic car")
+end)

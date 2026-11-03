@@ -506,3 +506,152 @@ test("#20: driving away from the strip after a finished race still takes the rac
 	same(lobby.getLocalStripId(), nil, "strip held after driving away")
 	same(tornDown, 1, "race displays torn down")
 end)
+
+--== #22: only a drag mission takes the strip from multiplayer drag ==========
+
+-- A foreground mission of this type, as the game's mission manager and mission list
+-- report it. missionType = nil gives a mission with no type; found = false an id the
+-- list cannot find.
+local function foregroundMission(missionType, found)
+	gameplay_missions_missionManager = {getForegroundMissionId = function() return "m1" end}
+	gameplay_missions_missions = {getMissionById = function(id)
+		if found == false or id ~= "m1" then return nil end
+		return {id = id, missionType = missionType}
+	end}
+end
+
+local function noMission()
+	gameplay_missions_missionManager = {getForegroundMissionId = function() return nil end}
+	gameplay_missions_missions = nil
+	career_modules_vehiclePerformance = nil
+end
+
+local function dragState(drag)
+	return tostring(drag.isMultiplayer()) .. " " .. tostring(drag.shouldSyncState())
+end
+
+test("#22: a non-drag mission leaves multiplayer drag on", function()
+	newGame({"A"})
+	noMission()
+	local drag = realDragMode()
+	same(dragState(drag), "true true", "multiplayer and sync with no mission")
+	foregroundMission("timeTrial")
+	same(dragState(drag), "true true", "multiplayer and sync during a time trial")
+	foregroundMission("chase")
+	same(dragState(drag), "true true", "multiplayer and sync during a chase")
+	noMission()
+end)
+
+test("#22: a drag mission and the performance test still turn multiplayer drag off", function()
+	newGame({"A"})
+	noMission()
+	local drag = realDragMode()
+	for _, missionType in ipairs({"drag", "dragRace", "Drag Race", "bmraDRAG"}) do
+		foregroundMission(missionType)
+		same(dragState(drag), "false false", "multiplayer and sync during a " .. missionType .. " mission")
+	end
+	noMission()
+	career_modules_vehiclePerformance = {isTestInProgress = function() return true end}
+	same(dragState(drag), "false false", "multiplayer and sync during the performance test")
+	noMission()
+end)
+
+test("#22: a mission whose type cannot be read still takes the strip, as before", function()
+	newGame({"A"})
+	noMission()
+	local drag = realDragMode()
+	foregroundMission(nil)
+	same(dragState(drag), "false false", "a mission with no type")
+	foregroundMission(42)
+	same(dragState(drag), "false false", "a mission whose type is not text")
+	foregroundMission("timeTrial", false)
+	same(dragState(drag), "false false", "a mission id the mission list cannot find")
+	foregroundMission("timeTrial")
+	gameplay_missions_missions = nil
+	same(dragState(drag), "false false", "no mission list")
+	foregroundMission("timeTrial")
+	gameplay_missions_missions = {getMissionById = function() error("mission list broke") end}
+	same(dragState(drag), "false false", "a mission lookup that raises")
+	noMission()
+end)
+
+--== #21: the drag senders stay quiet while a mission owns the strip ===========
+
+-- Calls each of the four senders once for race A-1 at strip A, with player 2 there too.
+-- Returns the names of what went out, in order, with where each went.
+local function callSenders(drag)
+	sent = {}
+	drag.syncStageLightState("A-1", 1, true)
+	drag.syncTreeLightState("A-1", 1, {stageLights = {stageLight = true}})
+	drag.updateTimerValue("A-1", 7, "time_60", 2.1)
+	drag.notifyRaceStart("A-1")
+	local out = {}
+	for _, m in ipairs(sent) do table.insert(out, m.msg .. ">" .. idList(m.to)) end
+	return table.concat(out, " ")
+end
+
+local ALL_SENT = "dragRaceTreeLightUpdate>host dragRaceTreeLightUpdate>host dragRaceTimerUpdateRequest>host "
+	.. "dragRaceStart>2 dragRaceStart>local"
+
+test("#21: no drag light, timer or race start goes out while a drag mission owns the strip", function()
+	local lobby = newGame({"A"})
+	arrive(lobby, 2, "A")
+	noMission()
+	local drag = realDragMode()
+	foregroundMission("dragRace")
+	same(callSenders(drag), "", "messages during a drag mission")
+	noMission()
+	career_modules_vehiclePerformance = {isTestInProgress = function() return true end}
+	same(callSenders(drag), "", "messages during the performance test")
+	noMission()
+end)
+
+test("#21: once the mission ends the race start for the same race still goes out", function()
+	local lobby = newGame({"A"})
+	arrive(lobby, 2, "A")
+	noMission()
+	local drag = realDragMode()
+	foregroundMission("dragRace")
+	callSenders(drag)
+	noMission()
+	same(callSenders(drag), ALL_SENT, "messages after the mission")
+end)
+
+test("#21: a non-drag mission does not hold the senders back", function()
+	local lobby = newGame({"A"})
+	arrive(lobby, 2, "A")
+	noMission()
+	local drag = realDragMode()
+	foregroundMission("timeTrial")
+	same(callSenders(drag), ALL_SENT, "messages during a time trial")
+	noMission()
+end)
+
+-- The mission types 0.40.4.0 labels as drag races, and its generated time trial
+-- (lua/ge/extensions/ui/gameplaySelector/tileGenerators/missionTiles.lua:3-6).
+test("#22: the game's own drag mission types take the strip; its generated time trial does not", function()
+	newGame({"A"})
+	noMission()
+	local drag = realDragMode()
+	for _, missionType in ipairs({"dragStripRace", "dragStripAPM"}) do
+		foregroundMission(missionType)
+		same(dragState(drag), "false false", "multiplayer and sync during a " .. missionType .. " mission")
+	end
+	foregroundMission("generatedTimeTrial")
+	same(dragState(drag), "true true", "multiplayer and sync during a generatedTimeTrial mission")
+	noMission()
+end)
+
+test("#22: a mission's type is logged once per mission, not on every check", function()
+	newGame({"A"})
+	noMission()
+	local drag = realDragMode()
+	foregroundMission("timeTrial")
+	for _ = 1, 5 do drag.isMultiplayer() drag.shouldSyncState() end
+	same(countLines(logs, "type=timeTrial"), 1, "log lines for the time trial")
+	gameplay_missions_missionManager = {getForegroundMissionId = function() return "m2" end}
+	gameplay_missions_missions = {getMissionById = function(id) return {id = id, missionType = "dragRace"} end}
+	for _ = 1, 5 do drag.isMultiplayer() end
+	same(countLines(logs, "type=dragRace"), 1, "log lines for the next mission")
+	noMission()
+end)

@@ -29,6 +29,15 @@ local HOLD_SECONDS = 60
 local HOLD_MAX_CARS = 64
 local HOLD_MAX_PARTS = 512
 
+-- Paint requests for another player's car that became ready before its owner's traffic
+-- mark reached this game (#87). Their traffic and parked cars have no paints, and the mark
+-- is what says which cars those are, so the request waits for it: sent once the mark
+-- shows the car is not traffic, dropped if it is, and sent after MARK_WAIT_SECONDS with
+-- no mark, as an owner on an older Mileage (which marks only traffic) needs.
+--   waitingRequests[serverVehicleID] = {gid = <game vehicle id>, at = <first ready>}
+local waitingRequests = {}
+local MARK_WAIT_SECONDS = 5
+
 local function clampHelper(value)
 	return clamp(tonumber(value) or 0, 0, 1)
 end
@@ -285,6 +294,22 @@ local function rxRequestPartPaints(data)
 	sendPartPaints(inventoryId, requestData.serverVehicleID, requestData.originID)
 end
 
+-- Whether the owner marked another player's car as their traffic or a parked car; nil
+-- while no mark has arrived. An enabler that cannot tell (an older Mileage) gives an
+-- answer at once, as before.
+local function remoteTraffic(serverVehicleID)
+	local enabler = mileageEnabler
+	if type(enabler) ~= "table" then return false end
+	if type(enabler.hasTrafficMark) == "function" and not enabler.hasTrafficMark(serverVehicleID) then
+		return nil
+	end
+	return type(enabler.isRemoteTraffic) == "function" and enabler.isRemoteTraffic(serverVehicleID) == true
+end
+
+local function requestPaints(serverVehicleID)
+	TriggerServerEvent("requestPartPaints", jsonEncode({serverVehicleID = serverVehicleID}))
+end
+
 local function onVehicleReady(gameVehicleID)
 	local serverVehicleID = MPVehicleGE.getServerVehicleID(gameVehicleID)
 	if not serverVehicleID then return end
@@ -292,12 +317,16 @@ local function onVehicleReady(gameVehicleID)
 		applyHeldPaints(serverVehicleID, gameVehicleID)
 		-- Someone else's vehicle appeared; ask its owner for the part paints. Their
 		-- traffic and parked cars have none.
-		local enabler = mileageEnabler
-		if type(enabler) == "table" and type(enabler.isRemoteTraffic) == "function"
-				and enabler.isRemoteTraffic(serverVehicleID) then
-			return
+		local traffic = remoteTraffic(serverVehicleID)
+		if traffic == nil then
+			local waiting = waitingRequests[serverVehicleID]
+			if not waiting or waiting.gid ~= gameVehicleID then
+				waitingRequests[serverVehicleID] = {gid = gameVehicleID, at = os.clockhp()}
+			end
+		elseif not traffic then
+			waitingRequests[serverVehicleID] = nil
+			requestPaints(serverVehicleID)
 		end
-		TriggerServerEvent("requestPartPaints", jsonEncode({serverVehicleID = serverVehicleID}))
 	else
 		local inventoryId = career_modules_inventory.getInventoryIdFromVehicleId(gameVehicleID)
 		if inventoryId then sendPartPaints(inventoryId, serverVehicleID) end
@@ -306,6 +335,27 @@ end
 
 local function onVehicleDestroyed(vehId)
 	ensuredPartConditionsByVeh[vehId] = nil
+	for serverVehicleID, waiting in pairs(waitingRequests) do
+		if waiting.gid == vehId then waitingRequests[serverVehicleID] = nil end
+	end
+end
+
+-- Sends or drops each waiting request once the car's mark is known or the wait is over.
+-- A car no longer in BeamMP's list under the same game id is forgotten.
+local function updateWaitingRequests(now)
+	for serverVehicleID, waiting in pairs(waitingRequests) do
+		if MPVehicleGE.getGameVehicleID(serverVehicleID) ~= waiting.gid then
+			waitingRequests[serverVehicleID] = nil
+		else
+			local traffic = remoteTraffic(serverVehicleID)
+			if traffic == true then
+				waitingRequests[serverVehicleID] = nil
+			elseif traffic == false or now - waiting.at >= MARK_WAIT_SECONDS then
+				waitingRequests[serverVehicleID] = nil
+				requestPaints(serverVehicleID)
+			end
+		end
+	end
 end
 
 -- Re-broadcast after anything that can change a part's paint.
@@ -334,6 +384,8 @@ local function onUpdate()
 	for serverVehicleID, entry in pairs(heldPaints) do
 		if now - entry.at > HOLD_SECONDS then dropHeld(serverVehicleID) end
 	end
+	-- A request needs no loaded world, and a game that is joining has none yet.
+	updateWaitingRequests(now)
 
 	if worldReadyState ~= 2 then return end
 
@@ -353,6 +405,7 @@ end
 -- Leaving the server: nothing held belongs to the next server's cars.
 local function onBeamMPServerLeave()
 	heldPaints, heldCars = {}, 0
+	waitingRequests = {}
 end
 
 local function onExtensionLoaded()

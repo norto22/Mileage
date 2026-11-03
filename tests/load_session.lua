@@ -434,7 +434,6 @@ local function runSession(root)
 			requestExitLoadingScreen = function() end,
 			navigateToPlay = function() end,
 			releaseCareerTrafficScreen = function() end,
-			hasLegacyTopBar = function() return false end,
 			reportJoin = function() return true end,
 		}
 		-- The career's start: the traffic meter is armed, the career sets up traffic with

@@ -74,12 +74,70 @@ test("#51: the ping button shows each player's ping and does nothing when clicke
 	scope.emit("onBeamMPPlayerPings", JSON.stringify({Ann: 40}));
 	scope.emit("onBeamMPPlayerList", PLAYERS);
 	const pings = table.rows.slice(1).map((row) => row.cells[2].children[0]);
-	assert.deepStrictEqual(pings.map((btn) => btn.children[0].text), ["40ms", "?ms"], "ping texts");
+	assert.deepStrictEqual(pings.map((btn) => btn.children[0].text), ["24ms", "?ms"], "ping texts (#109: 16 ms lower)");
 	for (const btn of pings) {
 		assert.strictEqual(btn.getAttribute("class"), "tp-button buttons", "button look");
 		assert.strictEqual(btn.getAttribute("onclick"), undefined, "click action");
 	}
 	assert.ok(!/teleportToPlayer/.test(fs.readFileSync(SOURCE, "utf8")), "the app names no teleport");
+});
+
+// The ping text of each player row, in order.
+function pingTexts(table) {
+	return table.rows.slice(1).map((row) => row.cells[2].children[0].children[0].text);
+}
+
+const FOUR_PLAYERS = JSON.stringify([
+	{id: 0, name: "Ann", formatted_name: "Ann"},
+	{id: 1, name: "Bob", formatted_name: "Bob"},
+	{id: 2, name: "Cy", formatted_name: "Cy"},
+	{id: 3, name: "Dee", formatted_name: "Dee"},
+]);
+
+test("#109: each ping reads 16 ms lower, never below 0 or above 999", () => {
+	const {scope, table} = load();
+	scope.emit("onBeamMPPlayerPings", JSON.stringify({Ann: 66, Bob: 1200, Cy: 10}));
+	scope.emit("onBeamMPPlayerList", FOUR_PLAYERS);
+	assert.deepStrictEqual(pingTexts(table), ["50ms", "999ms", "0ms", "?ms"], "ping texts");
+});
+
+test("#109: a ping that is not a number, or pings that are not a list by name, read ?ms", () => {
+	const {scope, table} = load();
+	scope.emit("onBeamMPPlayerPings", JSON.stringify({Ann: "fast", Bob: null, Cy: 16}));
+	scope.emit("onBeamMPPlayerList", FOUR_PLAYERS);
+	assert.deepStrictEqual(pingTexts(table), ["?ms", "?ms", "0ms", "?ms"], "ping texts");
+	for (const payload of ["[66, 70]", "42", "null"]) {
+		const app = load();
+		app.scope.emit("onBeamMPPlayerPings", payload);
+		app.scope.emit("onBeamMPPlayerList", FOUR_PLAYERS);
+		assert.deepStrictEqual(pingTexts(app.table), ["?ms", "?ms", "?ms", "?ms"], "ping texts for " + payload);
+	}
+});
+
+test("#109: each ping update replaces the last, so a player who left the pings reads ?ms", () => {
+	const {scope, table} = load();
+	scope.emit("onBeamMPPlayerPings", JSON.stringify({Ann: 66, Bob: 80}));
+	scope.emit("onBeamMPPlayerPings", JSON.stringify({Bob: 100}));
+	scope.emit("onBeamMPPlayerList", PLAYERS);
+	assert.deepStrictEqual(pingTexts(table), ["?ms", "84ms"], "ping texts after the second update");
+});
+
+test("#109: the cap is 999 after taking 16 ms off, and a ping below 0 reads 0ms", () => {
+	const {scope, table} = load();
+	scope.emit("onBeamMPPlayerPings", JSON.stringify({Ann: 1014, Bob: 1015, Cy: -5, Dee: 17}));
+	scope.emit("onBeamMPPlayerList", FOUR_PLAYERS);
+	assert.deepStrictEqual(pingTexts(table), ["998ms", "999ms", "0ms", "1ms"], "ping texts");
+});
+
+test("#109: a player named like an object property reads ?ms when BeamMP sends no ping for them", () => {
+	const {scope, table} = load();
+	scope.emit("onBeamMPPlayerPings", JSON.stringify({Ann: 66}));
+	scope.emit("onBeamMPPlayerList", JSON.stringify([
+		{id: 0, name: "Ann", formatted_name: "Ann"},
+		{id: 1, name: "constructor", formatted_name: "constructor"},
+		{id: 2, name: "toString", formatted_name: "toString"},
+	]));
+	assert.deepStrictEqual(pingTexts(table), ["50ms", "?ms", "?ms"], "ping texts");
 });
 
 test("losing the connection empties the list and keeps it empty through BeamMP's updates", () => {

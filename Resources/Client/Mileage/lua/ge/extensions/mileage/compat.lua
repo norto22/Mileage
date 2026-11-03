@@ -249,17 +249,10 @@ function M.notifyLayoutsChanged()
 	if guihooks then guihooks.trigger("UiAppLayoutsChanged") end
 end
 
---== top bar / menus =========================================================
--- ui_topBar and ui/topBar/ were deleted outright in 0.39's UI overhaul, along
--- with gameplayAppContainers / messagesTasksAppContainers / vehicleVicinityApp.
--- The replacement stack is menuManager + router + uiStateManager + pause/.
--- There is no drop-in equivalent for removeEntry/updateEntries/updateVisibleItems:
--- the entry list now lives behind the router / pause-V2 layer. Callers must
--- check this before attempting the old path.
-function M.hasLegacyTopBar()
-	return ui_topBar ~= nil and type(ui_topBar.getEntries) == "function"
-end
-
+--== menus ===================================================================
+-- ui_topBar was deleted in 0.39's UI overhaul; the replacement stack is
+-- menuManager + router + uiStateManager + pause/. The pause menu's career limits
+-- are patched in mileage/patches.lua (#15).
 function M.hasMenuManager()
 	return ui_menuManager ~= nil
 end
@@ -416,10 +409,6 @@ function M.report()
 		for _, label in ipairs(missing) do
 			log("E", "mileage.compat", "  " .. label)
 		end
-	end
-
-	if not M.hasLegacyTopBar() then
-		log("W", "mileage.compat", "ui_topBar absent (expected on 0.39+) - top bar patching is disabled")
 	end
 
 	return #missing == 0
