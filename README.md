@@ -30,7 +30,7 @@ Mileage was called CareerMP until v0.3.0. A server still running CareerMP needs 
 - Racing your traffic cars on the road (in progress, [#113](https://github.com/norto22/Mileage/issues/113))
 - A server leaderboard (in progress, [#107](https://github.com/norto22/Mileage/issues/107))
 - Three or more players at once (in progress, [#32](https://github.com/norto22/Mileage/issues/32))
-- Other players' traffic more than 1 km away hidden on your game, for smoother play when spread out (in progress, [#118](https://github.com/norto22/Mileage/issues/118))
+- Smoother play with five to eight players together and traffic on: traffic and parked cars send fewer updates, a joining player's cars are built one at a time instead of in one freeze, and other players' traffic more than 1 km away is hidden on your game (in progress, [#118](https://github.com/norto22/Mileage/issues/118), [#86](https://github.com/norto22/Mileage/issues/86))
 - Mod vehicles and longer render distance (in progress, [#100](https://github.com/norto22/Mileage/issues/100))
 - Co-op jobs with split pay ([#89](https://github.com/norto22/Mileage/issues/89))
 - Paying a player to tow or repair your car ([#91](https://github.com/norto22/Mileage/issues/91))
@@ -55,6 +55,8 @@ You need BeamNG.drive 0.40.4.0, the current BeamMP server and the West Coast, US
 1. Download `Mileage-<version>.zip` from the latest [release](https://github.com/norto22/Mileage/releases/latest) and unpack it into your BeamMP server folder.
 2. In `ServerConfig.toml`, set `MaxCars = 100` and `Map = "/levels/west_coast_usa/info.json"`.
 3. Start the server. Type `Mileage Help` in the server console for its commands.
+
+`Mileage Stats` shows what the server sent and received for each part of Mileage, and what playing together costs each player's game: its frame time, frames over 100 ms, the updates it sent and received, and its cars split into driving traffic, parked cars and players' own. Each game reports every 30 seconds and writes the same numbers to its own log under `mileage.perf`, so a session can be compared before and after a change.
 
 ## Credits
 Mileage began as [CareerMP](https://github.com/StanleyDudek/CareerMP) by **Dudekahedron** ([Dudek's Sandbox](https://discord.gg/caU5adg)). The port to BeamNG.drive 0.39, including multiplayer drag racing, is by Vlad Maksimenko ([CareerMP-0.39](https://github.com/vladmaksimenko-0/CareerMP-0.39)). Thanks to Bouboule, and to Lion and Luuk from BeamPaint, for the HTTP request examples the server plugin is built on.
