@@ -219,6 +219,7 @@ local function newWorld(opts)
 	gameplay_rawPois = {clear = function() world.poiClears = (world.poiClears or 0) + 1 end}
 	gameplay_markerInteraction = {clearCache = function() end}
 	gameplay_missions_missionManager = nil
+	career_modules_vehiclePerformance = nil
 	gameplay_drag_dragTypes_dragPracticeRace = nil
 
 	extensions = {
@@ -722,8 +723,12 @@ test("a run this player is not in is not checked, and a run with the real car lo
 	same(#warnings(), 0, "warnings for a run with the real car")
 end)
 
-test("this player's own disqualification lets them leave the strip", function()
-	twoPlayersRunning()
+test("this player's own disqualification lets them leave the strip (when they do not lead it)", function()
+	newWorld({leader = 2})
+	runTo(1)
+	runFromLeader("A-5", {{1, 1}, {2, 2}})
+	stageAll()
+	world.drag.advanceOutOfStaging()
 	racerOf(1).isDisqualified = true
 	world.pos = {0, 300, 0}
 	runTo(4)
@@ -964,4 +969,106 @@ test("lane markers: none for a lane with no stage line, one for a lane with no e
 	same(#list, 1, "places")
 	same(list[1].markerInfo.missionMarker.pos.x, 4, "the marker is lane 2's")
 	expect(list[1].markerInfo.missionMarker.rot ~= nil, "the marker still has a facing")
+end)
+
+--== a false start, and handing the strip to a mission =========================
+
+-- Where a message went on the wire, by position.
+local function wireIndex(name)
+	for i, m in ipairs(world.wire) do if m.msg == name then return i end end
+	return nil
+end
+
+test("this player jumps the start: they tell the leader they are out before they leave the strip", function()
+	newWorld({leader = 2})
+	runTo(1)
+	runFromLeader("A-5", {{1, 1}, {2, 2}})
+	stageAll()
+	world.drag.advanceOutOfStaging()
+	racerOf(1).isDisqualified = true
+	world.pos = {0, 300, 0}
+	runTo(4)
+	local outs = wireNamed("mileageDragOut")
+	same(#outs, 1, "out notices")
+	same(outs[1].to, "host", "sent to")
+	same(outs[1].data.raceId, "A-5", "run")
+	expect(wireIndex("mileageDragLeave") and wireIndex("mileageDragOut") < wireIndex("mileageDragLeave"),
+		"the out notice goes before the leave")
+end)
+
+test("the other player jumps the start and drives off: the leader's clean run goes on", function()
+	twoPlayersRunning()
+	world.cleared = 0
+	world.others[2] = nil
+	local raceId = world.lobby.getRun("A").raceId
+	fromPlayer(2, "mileageDragOut", {stripId = "A", raceId = raceId})
+	fromPlayer(2, "mileageDragLeave", {stripId = "A"})
+	runTo(3)
+	same(world.lobby.getRun("A").step, "running", "the clean car's run")
+	same(#wireNamed("mileageDragCancel"), 0, "cancels sent")
+	same(world.cleared, 0, "the leader's display taken down")
+end)
+
+test("an out notice for another run, or from a player not in the run, changes nothing", function()
+	twoPlayersRunning()
+	world.others[2] = nil
+	fromPlayer(3, "mileageDragOut", {stripId = "A", raceId = world.lobby.getRun("A").raceId})
+	fromPlayer(2, "mileageDragOut", {stripId = "A", raceId = "A-1"})
+	fromPlayer(2, "mileageDragOut", "not a table")
+	fromPlayer(2, "mileageDragLeave", {stripId = "A"})
+	runTo(3)
+	same(world.lobby.getRun("A"), nil, "run after a still-racing racer left")
+end)
+
+test("the leader jumps the start: they keep the strip until the run is over, then leave", function()
+	twoPlayersRunning()
+	racerOf(1).isDisqualified = true
+	world.pos = {0, 300, 0}
+	runTo(10)
+	same(#wireNamed("mileageDragLeave"), 0, "leave messages while the other car races")
+	same(world.lobby.getRun("A").step, "running", "step")
+	gameplay_drag_core.getRaceState(world.lobby.getRun("A").raceId).finishTimes = {[2] = 11.5}
+	runTo(10.5)
+	same(world.lobby.getRun("A").step, "result", "step once the other car finished")
+	runTo(23)
+	same(world.lobby.getRun("A"), nil, "run after the result")
+	same(#wireNamed("mileageDragLeave"), 1, "leave messages once the run is over")
+end)
+
+test("a solo false start builds the result at once, and it stays up its 12 s", function()
+	newWorld()
+	runTo(11)
+	stageAll()
+	runTo(12)
+	racerOf(1).isDisqualified = true
+	world.drag.setDisqualifiedLights(CAR)
+	same(world.finalized, 1, "results built")
+	same(world.drag.isRaceFinalized(), true, "result built")
+	world.cleared = 0
+	runTo(23.5)
+	same(world.cleared, 0, "displays taken down before 12 s")
+	runTo(24.5)
+	same(world.cleared, 1, "displays taken down after 12 s")
+end)
+
+test("one car of two disqualified: no result until the other is in", function()
+	twoPlayersRunning()
+	racerOf(1).isDisqualified = true
+	world.drag.setDisqualifiedLights(CAR)
+	same(world.finalized, 0, "results built")
+end)
+
+test("a performance test takes the strip mid-run: the leader change that follows leaves the game's drag data alone", function()
+	newWorld()
+	runTo(11)
+	expect(activeRunId() ~= nil, "a run is up")
+	career_modules_vehiclePerformance = {isTestInProgress = function() return true end}
+	world.cleared = 0
+	runTo(11.5)
+	same(#wireNamed("mileageDragLeave"), 1, "leave messages")
+	setLeader(nil)
+	runTo(12)
+	same(world.cleared, 0, "the game's drag data cleared")
+	same(activeRunId(), nil, "the multiplayer run id kept")
+	career_modules_vehiclePerformance = nil
 end)

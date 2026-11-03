@@ -558,7 +558,19 @@ local function tryFinalizeRace()
 		end
 	end
 
+	-- Every car in the race on this machine finished or was disqualified: nothing more can
+	-- arrive, so show the result now. A solo false start is the common case; it used to wait
+	-- out the void backstop and then show no result at all.
+	local allOut = next(data.racers) ~= nil
+	for _, racer in pairs(data.racers) do
+		if not (racer.isFinished or racer.isDisqualified or racer.isDesqualified) then
+			allOut = false
+			break
+		end
+	end
+
 	local allDone = allReported
+		or allOut
 		or data.isCompleted
 		or (c.allRacersFinished and c.allRacersFinished(data))
 

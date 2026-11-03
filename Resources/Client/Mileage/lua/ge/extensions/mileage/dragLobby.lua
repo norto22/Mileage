@@ -18,7 +18,7 @@
 --    note on scanForStrip.
 --
 --  * One player at each strip decides everything for that strip: it builds the queue,
---    starts races and advances heats, so there is exactly one answer to "who is racing"
+--    starts and ends runs, so there is exactly one answer to "who is racing"
 --    and "who won". Everyone else just reports where they are.
 --
 --    That authority is per strip, not per session, and is held only while the holder is
@@ -453,6 +453,13 @@ end
 local function hasLeftStrip()
 	if not localContext or not localContext.stagePos then return false end
 	if inLiveRace() then return false end
+
+	-- The leader of a run that is under way or showing its result stays, wherever its car
+	-- is. The server elects a strip's leader from who is there, so leaving would hand the
+	-- strip over, and the leader change would call off the other racer's run. A leader who
+	-- jumped the start is no longer racing, but the strip still needs them until the end.
+	local run = runs[localContext.stripId]
+	if run and run.step ~= "staging" and isAuthorityFor(localContext.stripId) then return false end
 
 	-- No resolvable vehicle is NOT the same as "left the strip". It happens routinely --
 	-- career respawn, the vehicle shop, insurance, walking mode -- and answering "left"
@@ -912,13 +919,6 @@ end
 
 --== host side: starting the countdown ========================================
 
---- The strip's authority owns the countdown, because everyone must see the same tree.
----
---- Each client reports its own staging to the authority, which marks the lane staged
---- after the same one-second hold single player uses (phaseHandlers.setRemoteStagingState).
---- Once every racer in the heat is staged, the authority picks the start time *and* the
---- random amber delay and ships both -- the shared randValue is what stops each client
---- randomising its own tree and diverging.
 --- Who in this run has not staged? Keyed by player, so it can be acted on.
 ---
 --- Players on the waiting list are not in the run and are skipped -- waiting your turn is
@@ -959,6 +959,12 @@ local function sitOutUnstaged(stripId, run)
 end
 
 --- Every racer staged: send the countdown and move the run on. True when it went.
+---
+--- The strip's authority owns the countdown, because everyone must see the same tree.
+--- Each client reports its own staging to the authority, which marks the lane staged
+--- after the same one-second hold single player uses (phaseHandlers.setRemoteStagingState).
+--- The authority then picks the start time *and* the random amber delay and ships both --
+--- the shared randValue is what stops each client randomising its own tree and diverging.
 local function tryStartCountdown(stripId, run)
 	local ph = gameplay_drag_phaseHandlers
 	local core = gameplay_drag_core
@@ -1007,8 +1013,11 @@ end
 --- Is this racer out of the run: finished, or disqualified?
 ---
 --- The leader holds only stand-ins for the other racers, and a stand-in's isFinished is
---- never set on this machine, so a finish time the racer reported counts too.
-local function racerDone(playerId, dragData, raceState)
+--- never set on this machine, so a finish time the racer reported counts too. The game
+--- never sends a disqualification to the other machines either, so a racer who jumped
+--- the start says so themselves (mileageDragOut) before they drive off.
+local function racerDone(playerId, dragData, raceState, run)
+	if run and run.out and run.out[playerId] then return true end
 	local times = raceState and raceState.finishTimes
 	if times and (times[playerId] ~= nil or times[tostring(playerId)] ~= nil) then return true end
 	local racer = dragData and dragData.racers and dragData.racers[localRacerKeyFor(playerId)]
@@ -1030,7 +1039,7 @@ local function runOver(run)
 	if dragData and dragData.isCompleted then return true end
 	local raceState = raceStateOf(run)
 	for playerId in pairs(run.racers) do
-		if not racerDone(playerId, dragData, raceState) then return false end
+		if not racerDone(playerId, dragData, raceState, run) then return false end
 	end
 	return true
 end
@@ -1050,7 +1059,20 @@ local function cancelLocalRun(raceId, why)
 	if not known then return false end
 
 	local gm = gamemode()
-	if not gm or (gm.isRaceFinalized and gm.isRaceFinalized()) then return false end
+	if not gm then return false end
+	-- A mission or the performance test owns the strip: the game's drag data and screen are
+	-- the mission's now, so forget only our multiplayer run.
+	if gm.inSoloDragActivity and gm.inSoloDragActivity() then
+		if gm.clearLocalClientActiveRace then gm.clearLocalClientActiveRace() end
+		return false
+	end
+	if gm.isRaceFinalized and gm.isRaceFinalized() then return false end
+	-- Nothing of it on screen any more (its result already went by): just forget it.
+	local data = core and core.getData and core.getData()
+	if not (data and data.racers and next(data.racers)) then
+		if gm.clearLocalClientActiveRace then gm.clearLocalClientActiveRace() end
+		return false
+	end
 	log("I", logTag, string.format("run '%s' called off (%s) - taking it off the screen", tostring(raceId), why))
 	if gm.tearDownRaceUI then gm.tearDownRaceUI() end
 	return true
@@ -1194,7 +1216,7 @@ local function stepRunning(stripId, run, players)
 	local dragData = core and core.getData and core.getData()
 	local raceState = raceStateOf(run)
 	for playerId in pairs(run.racers) do
-		if not players[playerId] and not racerDone(playerId, dragData, raceState) then
+		if not players[playerId] and not racerDone(playerId, dragData, raceState, run) then
 			endRun(stripId, run, string.format("player %s left mid-run", tostring(playerId)))
 			return
 		end
@@ -1294,8 +1316,6 @@ end
 -- The race spots' look (mileage/raceSpots.lua): a mission marker on the road.
 local MARKER_TYPE = "mileageDragLane"
 local MARKER_ICON = "mission_cup_triangle"
--- Half a lane wide, so the two lanes' rings stay apart.
-local MARKER_RADIUS = 2
 
 --- Whether the markers were last built shown, to clear the game's caches on a change.
 local markersWereShown = false
@@ -1335,8 +1355,10 @@ function M.onGetRawPoiListForLevel(levelIdentifier, elements)
 					id = id,
 					data = {type = MARKER_TYPE, id = id},
 					clusterType = "missionMarker",
+					-- No radius: the game draws every mission marker's ring at a fixed 1.5 m
+					-- (markers/missionMarker.lua:67), which keeps the two lanes' rings apart.
 					markerInfo = {missionMarker = {pos = pos, rot = laneRotation(data, laneIndex, pos),
-						radius = MARKER_RADIUS, icon = MARKER_ICON}},
+						icon = MARKER_ICON}},
 				})
 			end
 		end
@@ -1356,6 +1378,27 @@ local function updateMarkers()
 end
 
 --== lifecycle ================================================================
+
+--- The run we last told the leader we are out of.
+local outSentFor = nil
+
+--- Our own car was disqualified in our run: tell the strip's leader, once, before we
+--- drive off. The game never sends a disqualification to other machines, so without this
+--- the leader would take our leave for a racer quitting mid-run and call off the run for
+--- the car that started cleanly.
+local function reportOwnDisqualification()
+	if not localContext then return end
+	local t = transport()
+	local active = t and t.getLocalClientActiveRace and t.getLocalClientActiveRace()
+	if not active or active.id == outSentFor then return end
+	local core = gameplay_drag_core
+	local data = core and core.getData and core.getData()
+	local vehicleId = be:getPlayerVehicleID(0)
+	local racer = data and data.racers and vehicleId and data.racers[vehicleId]
+	if not racer or not (racer.isDisqualified or racer.isDesqualified) then return end
+	outSentFor = active.id
+	t.send("mileageDragOut", "host", {stripId = localContext.stripId, raceId = active.id})
+end
 
 local function onUpdate(dtReal)
 	updateMarkers()
@@ -1378,6 +1421,8 @@ local function onUpdate(dtReal)
 		lastScan = now()
 		scanForStrip()
 	end
+
+	reportOwnDisqualification()
 
 	if localContext then
 		if hasLeftStrip() then
@@ -1409,6 +1454,7 @@ function M.reset()
 	localContext = nil
 	lastScan = 0
 	markersWereShown = false
+	outSentFor = nil
 end
 
 --- Lobby messages ride the same relay as the BeamNG protocol; the transport routes
@@ -1428,6 +1474,15 @@ function M.onMileageDragMessage(msgName, fromPlayerId, data)
 			return
 		end
 		cancelLocalRun(data.raceId, "called off by the strip's leader")
+	elseif msgName == "mileageDragOut" then
+		-- A racer in our run jumped the start (the server stamps who).
+		if type(data) ~= "table" or not isAuthorityFor(data.stripId) then return end
+		local run = runs[data.stripId]
+		if not run or run.raceId ~= data.raceId or not run.racers[fromPlayerId] then return end
+		run.out = run.out or {}
+		run.out[fromPlayerId] = true
+		log("I", logTag, string.format("player %s is out of run '%s' (disqualified)",
+			tostring(fromPlayerId), run.raceId))
 	elseif msgName == "mileageDragWait" then
 		-- The time left on our wait, from the leader of the strip we are at.
 		local t = transport()
