@@ -519,7 +519,11 @@ test("marks go out at most once a second, only when they change, and only for th
 	frames(friend, 0.5)
 	same(marksSent(friend), 1, "marks after a second")
 	frames(me, 2)
-	same(marksSent(me), 0, "marks from a game with no traffic")
+	-- #87: a game with no traffic still sends its cars' first marks, false, once, so other
+	-- games know at once that they can ask those cars for their paint.
+	same(marksSent(me), 1, "marks from a game with no traffic")
+	frames(me, 2)
+	same(marksSent(me), 1, "marks from a game with no traffic once nothing changed")
 	frames(friend, 3)
 	same(marksSent(friend), 1, "marks while nothing changed")
 	world.broadcasts = {}
@@ -1159,9 +1163,10 @@ test("#87: a traffic car my friend spawns while I am on the server is not asked 
 	world.toServer = {}
 	now = 1
 	as(me, paint.onUpdate)
-	same(paintRequests(), "", "paint requests once the traffic car is marked")
-	now = 5
+	same(paintRequests(), "1-4", "paint requests once the owner marked both cars")
+	world.toServer = {}
+	now = 10
 	as(me, paint.onUpdate)
-	same(paintRequests(), "1-4", "paint requests once the unmarked car's 5 s wait is over")
+	same(paintRequests(), "", "paint requests after the 5 s wait")
 	os.clockhp = function() return 0 end
 end)

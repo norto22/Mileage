@@ -29,14 +29,14 @@ local HOLD_SECONDS = 60
 local HOLD_MAX_CARS = 64
 local HOLD_MAX_PARTS = 512
 
--- Paint requests for another player's car that became ready before the server's state of
--- it arrived (#87). Their traffic and parked cars have no paints, and the server's state
--- is what says which cars those are, so the request waits for it: sent once the state
--- shows the car is not traffic, dropped if it is, and sent anyway after
--- STATE_WAIT_SECONDS, as a server that sends no states needs.
+-- Paint requests for another player's car that became ready before its owner's traffic
+-- mark reached this game (#87). Their traffic and parked cars have no paints, and the mark
+-- is what says which cars those are, so the request waits for it: sent once the mark
+-- shows the car is not traffic, dropped if it is, and sent after MARK_WAIT_SECONDS with
+-- no mark, as an owner on an older Mileage (which marks only traffic) needs.
 --   waitingRequests[serverVehicleID] = {gid = <game vehicle id>, at = <first ready>}
 local waitingRequests = {}
-local STATE_WAIT_SECONDS = 5
+local MARK_WAIT_SECONDS = 5
 
 local function clampHelper(value)
 	return clamp(tonumber(value) or 0, 0, 1)
@@ -294,13 +294,13 @@ local function rxRequestPartPaints(data)
 	sendPartPaints(inventoryId, requestData.serverVehicleID, requestData.originID)
 end
 
--- Whether the server says another player's car is their traffic or a parked car; nil
--- while its state has not arrived. An enabler that cannot tell (an older Mileage) gives
--- an answer at once, as before.
+-- Whether the owner marked another player's car as their traffic or a parked car; nil
+-- while no mark has arrived. An enabler that cannot tell (an older Mileage) gives an
+-- answer at once, as before.
 local function remoteTraffic(serverVehicleID)
 	local enabler = mileageEnabler
 	if type(enabler) ~= "table" then return false end
-	if type(enabler.hasRemoteState) == "function" and not enabler.hasRemoteState(serverVehicleID) then
+	if type(enabler.hasTrafficMark) == "function" and not enabler.hasTrafficMark(serverVehicleID) then
 		return nil
 	end
 	return type(enabler.isRemoteTraffic) == "function" and enabler.isRemoteTraffic(serverVehicleID) == true
@@ -340,7 +340,7 @@ local function onVehicleDestroyed(vehId)
 	end
 end
 
--- Sends or drops each waiting request once the car's state is known or the wait is over.
+-- Sends or drops each waiting request once the car's mark is known or the wait is over.
 -- A car no longer in BeamMP's list under the same game id is forgotten.
 local function updateWaitingRequests(now)
 	for serverVehicleID, waiting in pairs(waitingRequests) do
@@ -350,7 +350,7 @@ local function updateWaitingRequests(now)
 			local traffic = remoteTraffic(serverVehicleID)
 			if traffic == true then
 				waitingRequests[serverVehicleID] = nil
-			elseif traffic == false or now - waiting.at >= STATE_WAIT_SECONDS then
+			elseif traffic == false or now - waiting.at >= MARK_WAIT_SECONDS then
 				waitingRequests[serverVehicleID] = nil
 				requestPaints(serverVehicleID)
 			end

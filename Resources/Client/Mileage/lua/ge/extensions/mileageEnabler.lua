@@ -187,10 +187,13 @@ local function isRemoteTraffic(serverVehicleID)
 	return type(state) == "table" and state.traffic == true
 end
 
--- true once the server's state of another player's car has arrived, so isRemoteTraffic's
--- answer for it is the server's and not just "not heard yet".
-local function hasRemoteState(serverVehicleID)
-	return type(knownStates[serverVehicleID]) == "table"
+-- true once the server holds the owner's traffic mark for another player's car, so
+-- isRemoteTraffic's answer for it is the owner's and not just "not marked yet". A car's
+-- first state ({active = true} at spawn) carries no mark; the owner's game sends its
+-- first mark, true or false, within a second (an older Mileage marks only traffic).
+local function hasTrafficMark(serverVehicleID)
+	local state = knownStates[serverVehicleID]
+	return type(state) == "table" and type(state.traffic) == "boolean"
 end
 
 -- Career constantly hides/shows vehicles (garage, shopping, missions). A vehicle
@@ -254,14 +257,11 @@ local function sendTrafficMarks()
 				seen[serverVehicleID] = true
 				local mark = isTrafficCar(gameVehicleID, veh)
 				local sent = sentMarks[serverVehicleID]
-				-- A car never marked counts as unmarked, as the server has it. A car rebuilt
-				-- under a new game id keeps the server's old mark, so its mark is sent again.
-				local previous = false
-				if sent and sent.gameVehicleID == gameVehicleID then
-					previous = sent.mark
-				elseif sent then
-					previous = nil
-				end
+				-- Every car's first mark is sent, false too: other games wait for it before
+				-- asking the car for its paint (#87). A car rebuilt under a new game id keeps
+				-- the server's old mark, so its mark is sent again.
+				local previous = nil
+				if sent and sent.gameVehicleID == gameVehicleID then previous = sent.mark end
 				if mark ~= previous then
 					changed = changed or {}
 					changed[serverVehicleID] = mark
@@ -947,7 +947,7 @@ end
 M.getClientConfig = getClientConfig
 M.isTrafficCar = isTrafficCar
 M.isRemoteTraffic = isRemoteTraffic
-M.hasRemoteState = hasRemoteState
+M.hasTrafficMark = hasTrafficMark
 M.reapplyRemoteStates = reapplyRemoteStates
 
 M.onCareerActive = onCareerActive
