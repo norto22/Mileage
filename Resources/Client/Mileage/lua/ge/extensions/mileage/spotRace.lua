@@ -789,7 +789,7 @@ function M.join(id)
 	end
 	invite.sent = true
 	send({join = id})
-	inviteCard("Joined. Your car moves to the start grid when the race starts.")
+	inviteCard("Joined: your car moves to the grid when it starts.")
 	return true
 end
 
