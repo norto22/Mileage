@@ -1449,3 +1449,94 @@ World.test("off the route means more than 1000 m from the next checkpoint for 10
 	same(#out, 1, "out after 10 seconds more than 1000 m away")
 	same(out[1].why, "left", "left the route")
 end)
+
+--== the car each racer names, cars that did not start, closings for other races ====
+
+-- Holds back the ready each listed player's own game sends on the grid, so the test can
+-- send the ready it wants in its place.
+local function holdReady(world, players)
+	world.filter = function(m)
+		if m.way ~= "toServer" or m.name ~= "mileageSpotRace" then return nil end
+		for _, p in ipairs(players) do
+			if m.from == p.id and m.data:find('"ready"', 1, true) then return "drop" end
+		end
+		return nil
+	end
+end
+
+World.test("a car the racer names in ready that stands far from its grid place is not the one timed", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local r = route("highway_race")
+	atStart(ann, "highway_race")
+	holdReady(world, {ann})
+	request(world, ann, "highway_race", 0, {})
+	local grid = last(world, ann, "grid")
+	world.filter = nil
+	-- Another car of Ann's, parked 300 m from her grid place, never moves.
+	ann.parkedCar = {pos = {x = grid.pose.pos.x - grid.pose.dir.x * 300, y = grid.pose.pos.y - grid.pose.dir.y * 300,
+		z = grid.pose.pos.z}}
+	send(world, ann, {ready = {race = grid.id, car = ann.id .. "-9", opponents = {}}})
+	expect(last(world, ann, "countdown"), "the countdown started")
+	world:advance(6)
+	driveRoute(world, ann, r, 40)
+	world:advance(1)
+	local result = last(world, ann, "result")
+	expect(result, "the race ended at the finish of the car Ann drove")
+	expect(result and result.places[1].seconds, "Ann's grid car was timed, not the parked one")
+end)
+
+World.test("a car of another player's named in ready is not timed for the racer who named it", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local bob = world:join("Bob", 1000, 1)
+	local r = route("highway_race")
+	atStart(ann, "highway_race")
+	holdReady(world, {ann})
+	request(world, ann, "highway_race", 0, {})
+	local grid = last(world, ann, "grid")
+	world.filter = nil
+	-- Bob stands 5 m to the side of Ann's grid place and never moves.
+	bob.car.pos = {x = grid.pose.pos.x - grid.pose.dir.y * 5, y = grid.pose.pos.y + grid.pose.dir.x * 5,
+		z = grid.pose.pos.z}
+	send(world, ann, {ready = {race = grid.id, car = bob.id .. "-0", opponents = {}}})
+	world:advance(6)
+	driveRoute(world, ann, r, 40)
+	world:advance(1)
+	local result = last(world, ann, "result")
+	expect(result, "the race ended at Ann's own finish")
+	expect(result and result.places[1].seconds, "Ann's own car was timed")
+end)
+
+World.test("cars that did not start: at most the rest of those asked for, and only from the starter", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local bob = world:join("Bob", 1000, 1)
+	atStart(ann, "highway_race")
+	holdReady(world, {ann, bob})
+	request(world, ann, "highway_race", 2, {"Bob"})
+	answer(world, bob, "join")
+	local annGrid, bobGrid = last(world, ann, "grid"), last(world, bob, "grid")
+	expect(annGrid and bobGrid, "both on the grid")
+	world.filter = nil
+	send(world, bob, {ready = {race = bobGrid.id, opponents = {}, failed = {"Bob's claim"}}})
+	send(world, ann, {ready = {race = annGrid.id, opponents = {}, failed = {"A", "B", "C", "D", "E"}}})
+	expect(last(world, ann, "countdown"), "the countdown started")
+	world:advance(7)
+	local rows = last(world, ann, "standings").rows
+	local spawn, names = 0, {}
+	for _, row in ipairs(rows) do
+		if row.out == "spawn" then spawn = spawn + 1 end
+		names[row.name] = true
+	end
+	same(spawn, 2, "two asked for, two listed as not started")
+	same(names["Bob's claim"], nil, "a joined player cannot list cars that did not start")
+	same(#rows, 4, "Ann, Bob and the two cars")
+end)
+
+World.test("a closing for another race while racing leaves this race and its card", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	soloToGreen(world, ann)
+	world:queue({way = "toClient", target = ann.id, event = "rxMileageSpotRace",
+		data = World.encode({phase = "closed", id = "someone-elses", why = "The starter left."})})
+	world:pump()
+	world:as(ann, function() same(mileage_spotRace.inRace(), true, "still racing") end)
+	same(lastCard(world, ann, "closed"), nil, "no closed card for a race this game is not in")
+end)
