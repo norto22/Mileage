@@ -315,10 +315,89 @@ test("leaving the server while cars wait lets BeamMP build them and puts its fun
 	same(MPVehicleGE.onPreRender, bm.original, "BeamMP's function back")
 end)
 
+-- Rejects pacing that stops at the cars it saw when building started, or that lets
+-- BeamMP's own call and a paced release build in the same frame.
+test("a player joining while cars are built one at a time has their cars built too, one per frame", function()
+	local module = setup()
+	module.onCareerActive(true)
+	for i = 0, 5 do spawn("1-" .. i, 1) end
+	run(3.05)
+	same(builtCount(), 1, "first car")
+	run(0.3)
+	for i = 0, 2 do spawn("2-" .. i, 2) end
+	run(4)
+	same(builtCount(), 9, "built")
+	same(framesWithTwo(), 0, "frames that built two cars")
+end)
+
 test("off a server nothing is wrapped", function()
 	local module = setup({mp = false})
 	module.onCareerActive(true)
 	same(MPVehicleGE.onPreRender, bm.original, "MPVehicleGE.onPreRender")
+end)
+
+-- BeamMP applies a waiting car's spawn and then its edit; an edit applied to a car not
+-- built yet is dropped and the car keeps its old parts.
+test("an edit queued on a car still waiting is applied only once that car is built", function()
+	local module = setup()
+	module.onCareerActive(true)
+	for i = 0, 2 do spawn("1-" .. i, 1) end
+	bm.vehicles["1-2"].editQueue = '{"vcf":"new parts"}'
+	bm.queueWaiting = true
+	local editedBeforeBuilt = false
+	for _ = 1, math.floor(5 / FRAME) do
+		run(FRAME)
+		local built, edited = false, false
+		for _, b in ipairs(bm.built) do if b.sid == "1-2" then built = true end end
+		for _, sid in ipairs(bm.edits) do if sid == "1-2" then edited = true end end
+		if edited and not built then editedBeforeBuilt = true end
+	end
+	same(builtCount(), 3, "built")
+	expect(not editedBeforeBuilt, "the edit of 1-2 was applied while it was still waiting")
+	local edited = false
+	for _, sid in ipairs(bm.edits) do if sid == "1-2" then edited = true end end
+	expect(edited, "the edit of 1-2 was applied")
+end)
+
+test("a vehicle list that fails right after BeamMP built the first car still gets the rest built", function()
+	local module = setup()
+	module.onCareerActive(true)
+	for i = 0, 5 do spawn("1-" .. i, 1) end
+	run(2.99)
+	same(builtCount(), 0, "built before BeamMP starts")
+	-- Once BeamMP has built the first car, the next three list reads fail: the rest of
+	-- that frame.
+	local failuresLeft = 3
+	local real = MPVehicleGE.getVehicles
+	MPVehicleGE.getVehicles = function()
+		if #bm.built >= 1 and failuresLeft > 0 then
+			failuresLeft = failuresLeft - 1
+			error("vehicle list broke")
+		end
+		return bm.vehicles
+	end
+	run(0.1)
+	same(failuresLeft, 0, "list reads that failed")
+	MPVehicleGE.getVehicles = real
+	run(1)
+	same(builtCount(), 6, "every car built")
+	same(countLines(logs, "join pacing failed"), 1, "error lines")
+end)
+
+test("a failure before BeamMP starts building leaves BeamMP's own rule to build them", function()
+	local module = setup()
+	module.onCareerActive(true)
+	bm.slow = false
+	for i = 0, 3 do spawn("1-" .. i, 1) end
+	run(1)
+	bm.failGetVehicles = true
+	run(FRAME)
+	bm.failGetVehicles = false
+	run(2)
+	same(builtCount(), 0, "built while the player drives fast")
+	bm.slow = true
+	run(3.05)
+	same(builtCount(), 4, "built by BeamMP's own rule, at once")
 end)
 
 test("the log says once that pacing is active", function()

@@ -58,24 +58,27 @@ local function waitingRemote(vehicles)
 end
 
 -- Leaves the first waiting car in BeamMP's queue and moves the others aside; returns it.
+-- A waiting car's queued edit moves with its spawn: BeamMP applies a car's spawn and then
+-- its edit, and an edit applied to a car not built yet is lost.
 local function keepOne(vehicles)
 	local list = waitingRemote(vehicles)
 	for i = 2, #list do
 		local entry = vehicles[list[i]]
-		aside[list[i]] = {entry = entry, queue = entry.spawnQueue}
-		entry.spawnQueue = nil
+		aside[list[i]] = {entry = entry, queue = entry.spawnQueue, edit = entry.editQueue}
+		entry.spawnQueue, entry.editQueue = nil, nil
 	end
 	return list[1]
 end
 
--- Puts every moved spawn back on its car, unless the car is gone or has a new one. With
--- no vehicle list (it failed) every spawn goes back: a removed car's entry is no longer
--- BeamMP's, so its spawn is never built.
+-- Puts every moved spawn and edit back on its car, unless the car is gone or has a new
+-- one. With no vehicle list (it failed) everything goes back: a removed car's entry is no
+-- longer BeamMP's, so its spawn is never built.
 local function putBack(vehicles)
 	for serverVehicleID, moved in pairs(aside) do
 		local present = not vehicles or vehicles[serverVehicleID] == moved.entry
-		if present and moved.entry.spawnQueue == nil then
-			moved.entry.spawnQueue = moved.queue
+		if present then
+			if moved.entry.spawnQueue == nil then moved.entry.spawnQueue = moved.queue end
+			if moved.entry.editQueue == nil then moved.entry.editQueue = moved.edit end
 		end
 	end
 	aside = {}
@@ -129,9 +132,13 @@ local function buildAllWaiting()
 	if type(apply) == "function" then pcall(apply) end
 end
 
+-- A car kept in BeamMP's queue this frame may have been built before the failure, which
+-- stops BeamMP waiting too, so the cars left are built as well.
 local function stopPacing(err)
-	putBack(getVehiclesSafely())
-	if releasing then buildAllWaiting() end
+	local vehicles = getVehiclesSafely()
+	putBack(vehicles)
+	local keptBuilt = kept and (not vehicles or wasBuilt(vehicles, kept))
+	if releasing or keptBuilt then buildAllWaiting() end
 	releasing, kept = false, nil
 	if err then
 		disabled = true
@@ -143,6 +150,7 @@ end
 local function makeCheck(original)
 	return function(dt, ...)
 		if disabled then return original(dt, ...) end
+		kept = nil
 		local ok, err = pcall(function() kept = keepOne(wrapped.module.getVehicles()) end)
 		if not ok then
 			stopPacing(err)
