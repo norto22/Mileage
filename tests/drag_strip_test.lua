@@ -125,7 +125,8 @@ local function newCore()
 		dragData, races, latest, lastStarted = nil, {}, nil, nil
 	end
 
-	function c.finalizeMpPostRace() world.finalized = world.finalized + 1 end
+	-- 0.40.4.0's spelling; the game raises onDragMPTimeslipRequested as each car stops.
+	function c.finalizeMPPostRace() world.finalized = world.finalized + 1 end
 	return c
 end
 
@@ -644,7 +645,7 @@ test("a leader change after the result is built leaves the timeslip up", functio
 	runTo(1)
 	runFromLeader("A-5", {{1, 1}, {2, 2}})
 	gameplay_drag_core.getRaceState("A-5").finishTimes = {[1] = 11.2, [2] = 11.9}
-	world.drag.onDragMpTimeslipRequested()
+	extensions.hook("onDragMPTimeslipRequested")
 	same(world.drag.isRaceFinalized(), true, "result built")
 	world.cleared = 0
 	setLeader(3)
@@ -840,7 +841,7 @@ test("the game's place caches are cleared once each time the markers come or go,
 	runTo(20)
 	same(world.poiClears, 2, "clears during the run")
 	gameplay_drag_core.getRaceState(activeRunId()).finishTimes = {[1] = 11.1}
-	world.drag.onDragMpTimeslipRequested()
+	extensions.hook("onDragMPTimeslipRequested")
 	-- The result lingers 12 s; the next run forms 10 s after this player re-joins.
 	runTo(33)
 	same(activeRunId(), nil, "the run is over")
@@ -885,7 +886,7 @@ test("a cancel from the strip's leader after the result is built leaves the time
 	runTo(1)
 	runFromLeader("A-5", {{1, 1}, {2, 2}})
 	gameplay_drag_core.getRaceState("A-5").finishTimes = {[1] = 11.2, [2] = 11.9}
-	world.drag.onDragMpTimeslipRequested()
+	extensions.hook("onDragMPTimeslipRequested")
 	same(world.drag.isRaceFinalized(), true, "result built")
 	world.cleared = 0
 	fromPlayer(2, "mileageDragCancel", {stripId = "A", raceId = "A-5"})
@@ -1125,7 +1126,7 @@ test("the leader 400 m down the strip keeps it while their result is on screen, 
 	world.pos = {0, 400, 0}
 	runTo(10)
 	gameplay_drag_core.getRaceState(raceId).finishTimes = {[1] = 11.2, [2] = 11.9}
-	world.drag.onDragMpTimeslipRequested()
+	extensions.hook("onDragMPTimeslipRequested")
 	same(world.drag.isRaceFinalized(), true, "result built")
 	runTo(10.5)
 	same(world.lobby.getRun("A").step, "result", "step once both are in")
@@ -1147,4 +1148,88 @@ test("the other player jumps the start: the leader's own finish moves the run to
 	gameplay_drag_core.getRaceState(raceId).finishTimes = {[1] = 11.2}
 	runTo(5.5)
 	same(world.lobby.getRun("A").step, "result", "step after the clean car's finish")
+end)
+
+--== the game's other 0.40.4.0 names ===========================================
+
+test("the bridge and the drag mode answer the game's 0.40.4.0 client and recipient names", function()
+	newWorld()
+	local bridge = world.transport.bridge
+	same(bridge.getLocalMPClientId and bridge.getLocalMPClientId(), ME, "bridge.getLocalMPClientId")
+	same(bridge.getMPPlayerIdByMPClientId and bridge.getMPPlayerIdByMPClientId(5), 5, "bridge.getMPPlayerIdByMPClientId")
+	same(world.drag.getMPPlayerIdByMPClientId and world.drag.getMPPlayerIdByMPClientId(5), 5, "drag.getMPPlayerIdByMPClientId")
+	expect(type(bridge.getTimerRecipientMPClientIds) == "function", "bridge.getTimerRecipientMPClientIds")
+	expect(type(bridge.sendToMPClientIds) == "function", "bridge.sendToMPClientIds")
+	world.wire = {}
+	bridge.sendToMPClientIds({[2] = true, [3] = false}, "dragRaceTimerUpdate", {raceId = "A-1"})
+	local sent = wireNamed("dragRaceTimerUpdate")
+	same(#sent, 1, "messages sent")
+	same(recipients(sent[1]), "2", "recipients")
+end)
+
+test("the game's timeslip request under its 0.40.4.0 name builds the result", function()
+	newWorld()
+	runTo(11)
+	stageAll()
+	runTo(12)
+	racerOf(1).isFinished = true
+	gameplay_drag_core.getRaceState(activeRunId()).finishTimes = {[1] = 11.2}
+	extensions.hook("onDragMPTimeslipRequested")
+	same(world.finalized, 1, "results built")
+	same(world.drag.isRaceFinalized(), true, "result built")
+end)
+
+--== a false start, and the clean car's result =================================
+
+test("the other player jumps the start: the clean leader's timeslip is built before the strip closes", function()
+	twoPlayersRunning()
+	world.others[2] = nil
+	local raceId = world.lobby.getRun("A").raceId
+	fromPlayer(2, "mileageDragOut", {stripId = "A", raceId = raceId})
+	fromPlayer(2, "mileageDragLeave", {stripId = "A"})
+	local outs = wireNamed("mileageDragRacerOut")
+	same(#outs, 1, "out notices passed on")
+	same(outs[1].data.playerId, 2, "racer out")
+	runTo(5)
+	racerOf(1).isFinished = true
+	gameplay_drag_core.getRaceState(raceId).finishTimes = {[1] = 11.2}
+	extensions.hook("onDragMPTimeslipRequested")
+	same(world.finalized, 1, "timeslips built for the clean car")
+	runTo(world.now + 13)
+	same(world.lobby.getRun("A"), nil, "run after the result's 12 s")
+end)
+
+test("the leader jumps the start: the clean player's timeslip is built before the closing notice", function()
+	newWorld({leader = 2})
+	runTo(1)
+	runFromLeader("A-5", {{1, 1}, {2, 2}})
+	stageAll()
+	world.drag.advanceOutOfStaging()
+	fromPlayer(3, "mileageDragRacerOut", {stripId = "A", raceId = "A-5", playerId = 2})
+	fromPlayer(2, "mileageDragRacerOut", {stripId = "A", raceId = "A-9", playerId = 2})
+	fromPlayer(2, "mileageDragRacerOut", "not a table")
+	fromPlayer(2, "mileageDragRacerOut", {stripId = "A", raceId = "A-5", playerId = 2})
+	runTo(5)
+	racerOf(1).isFinished = true
+	gameplay_drag_core.getRaceState("A-5").finishTimes = {[1] = 11.2}
+	extensions.hook("onDragMPTimeslipRequested")
+	same(world.finalized, 1, "timeslips built for the clean car")
+	runTo(world.now + 12)
+	world.cleared = 0
+	fromPlayer(2, "mileageDragCancel", {stripId = "A", raceId = "A-5"})
+	same(world.cleared, 0, "display taken down by the closing notice")
+end)
+
+test("an out notice passed on by anyone but the leader, or for another run, does not count the racer out", function()
+	newWorld({leader = 2})
+	runTo(1)
+	runFromLeader("A-5", {{1, 1}, {2, 2}})
+	stageAll()
+	world.drag.advanceOutOfStaging()
+	fromPlayer(3, "mileageDragRacerOut", {stripId = "A", raceId = "A-5", playerId = 2})
+	fromPlayer(2, "mileageDragRacerOut", {stripId = "A", raceId = "A-9", playerId = 2})
+	racerOf(1).isFinished = true
+	gameplay_drag_core.getRaceState("A-5").finishTimes = {[1] = 11.2}
+	extensions.hook("onDragMPTimeslipRequested")
+	same(world.finalized, 0, "timeslips built while the other car may still finish")
 end)

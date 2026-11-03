@@ -1479,10 +1479,31 @@ function M.onMileageDragMessage(msgName, fromPlayerId, data)
 		if type(data) ~= "table" or not isAuthorityFor(data.stripId) then return end
 		local run = runs[data.stripId]
 		if not run or run.raceId ~= data.raceId or not run.racers[fromPlayerId] then return end
+		if run.out and run.out[fromPlayerId] then return end
 		run.out = run.out or {}
 		run.out[fromPlayerId] = true
 		log("I", logTag, string.format("player %s is out of run '%s' (disqualified)",
 			tostring(fromPlayerId), run.raceId))
+		-- Pass it on, so every screen in the run builds the clean car's result without
+		-- waiting for a finish time that will never come.
+		local notice = {stripId = data.stripId, raceId = run.raceId, playerId = fromPlayerId}
+		local t = transport()
+		local ids = runRecipients(data.stripId, run)
+		if t and #ids > 0 then t.send("mileageDragRacerOut", ids, notice) end
+		local gm = gamemode()
+		if gm and gm.setPlayerOut then gm.setPlayerOut(fromPlayerId) end
+	elseif msgName == "mileageDragRacerOut" then
+		-- A racer in our run is out, from our strip's leader and for our run only.
+		local t = transport()
+		local active = t and t.getLocalClientActiveRace and t.getLocalClientActiveRace()
+		if type(data) ~= "table" or type(data.stripId) ~= "string" or not t or not t.getAuthorityFor
+			or t.getAuthorityFor(data.stripId) ~= fromPlayerId
+			or not active or active.id ~= data.raceId then
+			return
+		end
+		local gm = gamemode()
+		local playerId = tonumber(data.playerId)
+		if gm and gm.setPlayerOut and playerId then gm.setPlayerOut(playerId) end
 	elseif msgName == "mileageDragWait" then
 		-- The time left on our wait, from the leader of the strip we are at.
 		local t = transport()

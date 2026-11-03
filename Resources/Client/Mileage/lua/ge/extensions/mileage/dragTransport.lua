@@ -168,6 +168,14 @@ function bridge.sendToClientIds(clientIds, msgName, data)
 	send(msgName, list, data)
 end
 
+-- The names the game's 0.40.4.0 handlers ask under (mpDragHandlers.lua). Unanswered, the
+-- leader dropped every finish time it was sent and relayed no light or timer update to the
+-- other racers. The older names stay for anything that still asks them.
+bridge.getLocalMPClientId = bridge.getLocalClientId
+bridge.getMPPlayerIdByMPClientId = bridge.getPlayerIdByClientId
+bridge.getTimerRecipientMPClientIds = bridge.getTimerRecipientClientIds
+bridge.sendToMPClientIds = bridge.sendToClientIds
+
 --- mpDragHandlers.lua:35 calls this as
 ---     bridge.setLocalClientActiveRace(raceId, r.poiData, pd.lane or 1, r.treeType)
 --- -- four arguments, the first a raceId STRING, not a race table. Taking one parameter
