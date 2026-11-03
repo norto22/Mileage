@@ -4878,10 +4878,17 @@ do
 	local SENT_KINDS = {"pos", "elec", "inp"}
 	local CAR_KINDS = {"own", "ownTraffic", "ownParked", "remote", "remoteTraffic", "hidden"}
 
-	-- A finite number clamped to [0, high], or nil for anything else.
+	-- A finite number clamped to [0, high] and rounded to a whole number (the Stats line
+	-- prints them with %d, which refuses a fraction), or nil for anything else.
 	local function clamped(value, high)
 		if type(value) ~= "number" or value ~= value or value == math.huge or value == -math.huge then return nil end
-		return math.max(0, math.min(high, value))
+		return math.floor(math.max(0, math.min(high, value)) + 0.5)
+	end
+
+	-- The same to a tenth, for a number printed with one decimal.
+	local function tenths(value, high)
+		local n = type(value) == "number" and clamped(value * 10, high * 10)
+		return n and n / 10 or nil
 	end
 
 	local function pairOf(value, high)
@@ -4896,7 +4903,7 @@ do
 	-- The report's known fields, each nil when missing or of the wrong type.
 	function perf.clean(raw)
 		local r = {
-			s = clamped(raw.s, 600), frames = clamped(raw.frames, BIG), avgMs = clamped(raw.avgMs, 60000),
+			s = clamped(raw.s, 600), frames = clamped(raw.frames, BIG), avgMs = tenths(raw.avgMs, 60000),
 			worstMs = clamped(raw.worstMs, 60000), hitches = clamped(raw.hitches, BIG), built = clamped(raw.built, BIG),
 			near = pairOf(raw.near, 1000), sent = {own = {}, traffic = {}}, recv = {}, cars = {},
 		}

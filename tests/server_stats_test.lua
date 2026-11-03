@@ -432,6 +432,19 @@ test("fields of the wrong type print as a dash and numbers out of range are clam
 	end
 end)
 
+test("fractions in a report are rounded, so Stats prints them instead of failing", function()
+	newServer({0, 1})
+	mileagePerfReport(1, perfJson({s = 30.4, frames = 1799.6, avgMs = 16.44, worstMs = 211.5, hitches = 0.2,
+		near = {0.6, 2.4}, sent = {own = {pos = {10.5, 9.4}}}, recv = {pos = 3.7}, cars = {own = 1.5}}))
+	local ok, lines = pcall(statsLines)
+	expect(ok, "Stats failed: " .. tostring(lines))
+	local line = costLine(lines, 1)
+	for _, part in ipairs({"30 s", "avg 16.4 ms", "worst 212 ms", "0 over 100 ms", "players near 1-2",
+		"own pos 9/11", "received pos 4", "cars own 2"}) do
+		expect(line:find(part, 1, true), "missing '" .. part .. "' in: " .. line)
+	end
+end)
+
 test("a report older than 90 s is not printed and a player who leaves loses theirs", function()
 	newServer({0, 1, 2})
 	mileagePerfReport(1, perfJson())
