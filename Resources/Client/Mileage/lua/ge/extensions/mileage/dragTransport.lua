@@ -107,6 +107,10 @@ function bridge.getLocalPlayerId()
 	return getLocalPlayerId()
 end
 
+-- The name the game's session handler asks since 0.40.4.0 (mpDragHandlers.lua:31) before it
+-- records this player's run; unanswered, the run is never recorded as ours.
+bridge.getLocalMPPlayerId = bridge.getLocalPlayerId
+
 function bridge.getPlayerIdByClientId(clientId)
 	return clientId
 end

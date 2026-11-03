@@ -228,6 +228,12 @@ function M.getLocalPlayerId()
 	return t and t.bridge.getLocalPlayerId() or nil
 end
 
+--- The same answer under the name the game asks since 0.40.4.0 (core.lua:1198 and :1224).
+--- Unanswered, the race start keeps this player's own car as a stand-in for someone on
+--- another machine, which can never stage, so the lights never count down. The old name
+--- stays for anything that still asks it.
+M.getLocalMPPlayerId = M.getLocalPlayerId
+
 function M.getPlayerIdByClientId(clientId)
 	local t = transport()
 	return t and t.bridge.getPlayerIdByClientId(clientId) or clientId
