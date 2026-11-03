@@ -1040,6 +1040,113 @@ World.test("only a strictly faster time replaces a player's best at a route", fu
 	same(last(world, ann, "status").mine.highway_race, faster.places[1].seconds, "the set-up card knows it")
 end)
 
+--== the whole race ===============================================================
+
+-- Drives several players' cars through the route together, each at its own speed in
+-- metres a second, one second at a time, until every one has done every lap.
+local function driveTogether(world, r, speeds)
+	local paths = {}
+	for p, speed in pairs(speeds) do
+		local targets = {}
+		for _ = 1, r.laps do
+			for _, checkpoint in ipairs(r.checkpoints) do table.insert(targets, checkpoint.pos) end
+		end
+		paths[p] = {targets = targets, index = 1, speed = speed}
+	end
+	for _ = 1, 600 do
+		local moving = false
+		for p, path in pairs(paths) do
+			local left = path.speed
+			local pos = copy(p.car.pos)
+			while left > 0 and path.index <= #path.targets do
+				local target = path.targets[path.index]
+				local d = metres(pos, target)
+				local step = math.min(d, left)
+				if d > 0 then
+					pos = {x = pos.x + (target.x - pos.x) * step / d, y = pos.y + (target.y - pos.y) * step / d,
+						z = pos.z + (target.z - pos.z) * step / d}
+				end
+				left = left - step
+				if step >= d then path.index = path.index + 1 end
+			end
+			if path.index <= #path.targets or left < path.speed then
+				moving = true
+				expect(world:drive(p, pos.x, pos.y, pos.z), p.name .. "'s car is free to drive")
+			end
+		end
+		if not moving then return end
+		world:advance(1)
+	end
+	error("the cars never finished")
+end
+
+World.test("the Oracle race: two opponents and an invited friend, all four places, the prize once, the time kept", function(world)
+	world:setConfig("server", "spotRacePrize", "2000")
+	local ann = world:join("Ann", 1000, 0)
+	local bob = world:join("Bob", 1000, 1)
+	local cat = world:join("Cat", 1000, 2)
+	local r = route("rally_track")
+	roadsAt(world, r)
+	withClass(ann)
+	world.opponentSpeed = 30
+	bob.car.pos = {x = r.grid.pos.x + 900, y = r.grid.pos.y, z = r.grid.pos.z}
+	atStart(ann, "rally_track")
+	-- Through Ann's set-up card, as she would.
+	world:as(ann, function() expect(mileage_spotRace.openSetup("rally_track"), "the card opens") end)
+	world:pump()
+	world:as(ann, function()
+		expect(mileage_spotRace.request("rally_track", 2, '["Bob"]'), "Start race pressed")
+	end)
+	world:pump()
+	answer(world, bob, "join")
+	local bobGrid = last(world, bob, "grid")
+	expect(metres(bob.car.pos, bobGrid.pose.pos) < 0.01, "Bob was moved onto the grid")
+	local countdown = last(world, ann, "countdown")
+	same(#countdown.racers, 4, "Ann, Bob and two opponents on the grid")
+	same(#heard(world, cat, "grid"), 0, "Cat is not in the race")
+	world:advance(6)
+	driveTogether(world, r, {[ann] = 45, [bob] = 25})
+	for _ = 1, 70 do
+		if last(world, bob, "result") then break end
+		world:advance(1)
+	end
+	local result = last(world, bob, "result")
+	expect(result, "everyone hears the result")
+	same(#result.places, 4, "four places")
+	same(result.places[1].name, "Ann", "Ann first")
+	for i = 1, 4 do expect(result.places[i].seconds, "place " .. i .. " has a time") end
+	local names = {}
+	for i = 2, 4 do names[result.places[i].name] = true end
+	expect(names.Bob and names["Ibishu Pessima"] and names["ETK 800 Series"], "Bob and both opponents placed")
+	same(result.winner, "Ann", "Ann won")
+	same(result.ranked, true, "the server followed every car")
+	same(last(world, ann, "result").prize, 2000, "Ann is paid")
+	same(result.prize, 2000, "Bob's card says what the winner was paid")
+	world:advance(2)
+	same(ann.money, 3000, "paid once")
+	same(bob.money, 1000, "nothing for Bob")
+	local board = world:dataFile("leaderboard.json")
+	same(board.spots.rally_track.Ann.time, result.places[1].seconds, "Ann's time kept under the spot")
+	expect(board.spots.rally_track.Bob, "Bob's time kept too")
+	same(board.wins.Ann, 1, "a race win")
+	for _, s in ipairs(spawned(world, ann)) do same(s.car.deleted, true, "the opponents are gone") end
+	-- Again, with the opponents held still and Bob not driving: Ann is first but paid nothing.
+	world.opponentSpeed = 0
+	atStart(ann, "rally_track")
+	world:as(ann, function() mileage_spotRace.openSetup("rally_track") end)
+	world:as(ann, function() mileage_spotRace.request("rally_track", 2, "[]") end)
+	world:pump()
+	world:advance(6)
+	driveTogether(world, r, {[ann] = 45})
+	world:advance(2)
+	local again = last(world, ann, "result")
+	same(again.winner, "Ann", "Ann first again")
+	same(again.withheld, "slow", "nobody else drove")
+	same(again.prize, 0, "no prize")
+	world:advance(2)
+	same(ann.money, 3000, "still paid once")
+end)
+
 World.test("leaving the server ends the race here and releases the car", function(world)
 	local ann = world:join("Ann", 1000, 0)
 	atStart(ann, "highway_race")
