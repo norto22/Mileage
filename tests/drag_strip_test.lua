@@ -972,6 +972,62 @@ test("lane markers: none for a lane with no stage line, one for a lane with no e
 	expect(list[1].markerInfo.missionMarker.rot ~= nil, "the marker still has a facing")
 end)
 
+--== busy: the traffic race card stays away at the line and in a run ============
+
+test("busy at the stage line and through the run, not once its result is built and you drive off", function()
+	newWorld({leader = 2})
+	same(world.lobby.busy(), false, "not at a strip yet")
+	runTo(1)
+	same(world.lobby.busy(), true, "on lane 1's stage line")
+	runFromLeader("A-5", {{1, 1}, {2, 2}})
+	stageAll()
+	world.drag.advanceOutOfStaging()
+	world.pos = {0, 300, 0}
+	runTo(3)
+	same(world.lobby.busy(), true, "racing 300 m down the strip")
+	racerOf(1).isFinished = true
+	world.pos = {0, 400, 0}
+	gameplay_drag_core.getRaceState("A-5").finishTimes = {[1] = 11.2, [2] = 11.9}
+	extensions.hook("onDragMPTimeslipRequested")
+	same(world.drag.isRaceFinalized(), true, "result built")
+	runTo(3.5)
+	same(appliedCount("dragRaceReset"), 0, "the strip has not reset: the result is still up")
+	same(world.lobby.busy(), false, "the result is built and the car is past the strip")
+end)
+
+test("busy while this player's run is live, even once the lobby no longer holds the strip, until its result is built", function()
+	newWorld({leader = 2})
+	runTo(1)
+	runFromLeader("A-5", {{1, 1}, {2, 2}})
+	stageAll()
+	world.drag.advanceOutOfStaging()
+	world.lobby.clearLocalContext(true)
+	same(world.lobby.getLocalStripId(), nil, "the lobby no longer holds the strip")
+	expect(activeRunId() ~= nil, "the run is still live")
+	same(world.lobby.busy(), true, "the run's result is not built yet")
+	gameplay_drag_core.getRaceState("A-5").finishTimes = {[1] = 11.2, [2] = 11.9}
+	extensions.hook("onDragMPTimeslipRequested")
+	same(world.drag.isRaceFinalized(), true, "result built")
+	same(world.lobby.busy(), false, "the result is built")
+end)
+
+test("not busy after driving away from the line, or with no transport or drag mode loaded", function()
+	newWorld()
+	runTo(1)
+	same(world.lobby.busy(), true, "at the line")
+	world.pos = {500, 0, 0}
+	runTo(1.5)
+	same(world.lobby.busy(), false, "drove away")
+	world.pos = {0, 0, 0}
+	runTo(2)
+	same(world.lobby.busy(), true, "back at the line")
+	world.lobby.clearLocalContext()
+	local transport, mode = mileage_dragTransport, multiplayer_gamemodes_drag_drag
+	mileage_dragTransport, multiplayer_gamemodes_drag_drag = nil, nil
+	same(world.lobby.busy(), false, "no transport or drag mode")
+	mileage_dragTransport, multiplayer_gamemodes_drag_drag = transport, mode
+end)
+
 --== a false start, and handing the strip to a mission =========================
 
 -- Where a message went on the wire, by position.

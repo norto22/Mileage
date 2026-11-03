@@ -333,8 +333,11 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 				$scope.traffic = {kind: "available", view: availableView(data)};
 				return;
 			case "none":
-			case "racing":
 				if (kind === "available") $scope.traffic = null;
+				return;
+			case "racing":
+				// A joined invite goes too once its race counts down; a result stays until closed.
+				if (kind === "available" || kind === "invite") $scope.traffic = null;
 				return;
 			case "invite":
 				if (typeof data.race !== "string") return;

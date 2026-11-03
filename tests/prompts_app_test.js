@@ -311,6 +311,24 @@ test("the invite shows the host, the car, the reward and Join or Decline, and st
 	assert.ok(lua.includes("if mileage_aiRace then mileage_aiRace.decline() end"));
 });
 
+test("once a race counts down, an invite or a car card goes but a result stays", () => {
+	const {scope} = load();
+	const INVITE = {phase: "invite", race: "ai3-9", host: "Taylor", car: "Ibishu Pessima", distance: 2900, prize: 3000,
+		seconds: 5};
+	scope.emit("MileageAiRace", INVITE);
+	scope.emit("MileageAiRace", {phase: "none"});
+	assert.strictEqual(scope.traffic.kind, "invite", "no car beside you leaves the invite");
+	scope.emit("MileageAiRace", {phase: "racing", race: "ai3-9"});
+	assert.strictEqual(scope.traffic, null, "a joined invite goes once its race counts down");
+	scope.emit("MileageAiRace", OWN);
+	scope.emit("MileageAiRace", {phase: "racing", race: "ai5"});
+	assert.strictEqual(scope.traffic, null, "the car card goes too");
+	scope.emit("MileageAiRace", {phase: "result", race: "ai1", host: "x", car: "C", winner: null, places: [], you: "y"});
+	scope.emit("MileageAiRace", {phase: "racing", race: "ai6"});
+	scope.emit("MileageAiRace", {phase: "none"});
+	assert.strictEqual(scope.traffic.kind, "result", "a result stays until closed");
+});
+
 test("the rolling countdown and race panel say keep driving and show the reward", () => {
 	const {scope} = load();
 	scope.emit("MileageRace", {phase: "countdown", race: "ai1", other: "the Ibishu Pessima and Sam", stake: 0, count: 4,

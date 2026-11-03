@@ -150,6 +150,14 @@ function M.sendState()
 	if current then guihooks.trigger("MileageEvent", current) end
 end
 
+--- Whether the server last said this player joined an event that has not ended. Once it
+--- starts the race itself (mileage/streetRace.lua) holds the player; a message without
+--- youJoined, from an older server, reads as not joined.
+function M.signedUp()
+	return current ~= nil and current.youJoined == true and current.phase ~= "result" and current.phase ~= "over"
+		and current.phase ~= "cancelled"
+end
+
 function M.onBeamMPServerLeave()
 	current = nil
 end

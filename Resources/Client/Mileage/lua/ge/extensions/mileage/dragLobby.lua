@@ -320,6 +320,17 @@ function M.getLocalStripId()
 	return localContext and localContext.stripId or nil
 end
 
+--- Whether this player is at a strip's line or in a run whose result is not built yet. The
+--- traffic race card (mileage/aiRace.lua) stays away while it is; nothing here changes.
+function M.busy()
+	if localContext then return true end
+	local t = transport()
+	local active = t and t.getLocalClientActiveRace and t.getLocalClientActiveRace()
+	if not active then return false end
+	local gm = gamemode()
+	return not (gm and gm.isRaceFinalized and gm.isRaceFinalized())
+end
+
 function M.clearLocalContext(keepRace)
 	if localContext then
 		-- Say how far, and in which vehicle. On 01/08 a car parked 1.5 m from the line was

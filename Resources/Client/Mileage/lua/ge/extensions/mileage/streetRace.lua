@@ -291,11 +291,12 @@ function M.startRollingRace(info)
 	return true
 end
 
---- The race under way here, {id, phase, elapsed}, or nil. A race against a traffic car
---- times that car on this clock.
+--- The race under way here, {id, phase, elapsed, finished}, or nil; finished once this
+--- car's finish is reported (the phase stays "racing": a race against a traffic car times
+--- that car on this clock).
 function M.current()
 	if not race then return nil end
-	return {id = race.id, phase = race.phase, elapsed = race.elapsed}
+	return {id = race.id, phase = race.phase, elapsed = race.elapsed, finished = race.reported == true}
 end
 
 --- Changes who a rolling race is against and its race reward (a player joined).
