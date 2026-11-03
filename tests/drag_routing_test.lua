@@ -172,6 +172,84 @@ local function realTransport(localStrip)
 	return transport, wire
 end
 
+-- The transport's receive side, with the relay's handler captured as BeamMP would call it.
+local function receivingTransport()
+	local handlers, hooked, toGame = {}, {}, {}
+	function AddEventHandler(name, fn) handlers[name] = fn end
+	function TriggerServerEvent() end
+	function jsonEncode(t) return t end
+	function jsonDecode(t) return t end
+	function log() end
+	function setExtensionUnloadMode() end
+	extensions = {
+		hook = function(name, ...) table.insert(hooked, {name = name, args = {...}}) end,
+		load = function() end,
+	}
+	gameplay_drag_mpDragHandlers = {handle = function(msgName) table.insert(toGame, msgName) end}
+	local transport = dofile(TRANSPORT)
+	transport.onExtensionLoaded()
+	return handlers, hooked, toGame
+end
+
+test("a lobby join from the relay reaches the lobby, not the game's handlers", function()
+	local handlers, hooked, toGame = receivingTransport()
+	handlers.rxDragMP({msg = "mileageDragJoin", from = "2", data = {stripId = "A", lane = 2}})
+	same(#hooked, 1, "lobby hooks")
+	same(hooked[1].name, "onMileageDragMessage", "hook")
+	same(hooked[1].args[1], "mileageDragJoin", "message")
+	same(hooked[1].args[2], 2, "sender as a number")
+	same(hooked[1].args[3].stripId, "A", "data")
+	same(#toGame, 0, "messages handed to the game")
+end)
+
+test("the game's own drag messages still go to its handlers", function()
+	local handlers, hooked, toGame = receivingTransport()
+	handlers.rxDragMP({msg = "dragRaceFinishTime", from = 2, data = {rawTime = 12.3}})
+	same(#toGame, 1, "messages handed to the game")
+	same(toGame[1], "dragRaceFinishTime", "message")
+	same(#hooked, 0, "lobby hooks")
+end)
+
+test("a message whose name is not text is not taken for a lobby message, and nothing raises", function()
+	local handlers, hooked, toGame = receivingTransport()
+	handlers.rxDragMP({msg = 5, from = 2})
+	same(#hooked, 0, "lobby hooks")
+end)
+
+test("a lobby leave and a clock probe from the relay reach the lobby too, not only the join", function()
+	local handlers, hooked, toGame = receivingTransport()
+	handlers.rxDragMP({msg = "mileageDragLeave", from = 3, data = {stripId = "A"}})
+	handlers.rxDragMP({msg = "mileageClockPing", from = 4, data = {token = 9}})
+	same(#hooked, 2, "lobby hooks")
+	same(hooked[1].args[1], "mileageDragLeave", "first message")
+	same(hooked[1].args[2], 3, "first sender")
+	same(hooked[2].args[1], "mileageClockPing", "second message")
+	same(hooked[2].args[3].token, 9, "second message's data")
+	same(#toGame, 0, "messages handed to the game")
+end)
+
+test("a game message with the lobby's name past its start still goes to the game's handlers", function()
+	local handlers, hooked, toGame = receivingTransport()
+	handlers.rxDragMP({msg = "dragmileageResult", from = 2, data = {}})
+	same(#hooked, 0, "lobby hooks")
+	same(#toGame, 1, "messages handed to the game")
+end)
+
+test("a name that is a table or true is not taken for a lobby message either, and nothing raises", function()
+	local handlers, hooked = receivingTransport()
+	handlers.rxDragMP({msg = {"mileageDragJoin"}, from = 2, data = {}})
+	handlers.rxDragMP({msg = true, from = 2, data = {}})
+	same(#hooked, 0, "lobby hooks")
+end)
+
+test("a name shorter than the lobby's prefix, or empty, goes to the game's handlers", function()
+	local handlers, hooked, toGame = receivingTransport()
+	handlers.rxDragMP({msg = "mile", from = 2, data = {}})
+	handlers.rxDragMP({msg = "", from = 2, data = {}})
+	same(#hooked, 0, "lobby hooks")
+	same(#toGame, 2, "messages handed to the game")
+end)
+
 test("#19: a message for the strip's leader carries the sender's strip", function()
 	local transport, wire = realTransport("B")
 	transport.send("dragRaceFinishTime", "host", {rawTime = 12.3})
@@ -654,4 +732,87 @@ test("#22: a mission's type is logged once per mission, not on every check", fun
 	for _ = 1, 5 do drag.isMultiplayer() end
 	same(countLines(logs, "type=dragRace"), 1, "log lines for the next mission")
 	noMission()
+end)
+
+--== a join carried by the server's relay forms a race at the strip ===========
+
+-- The leader's game (player 1, at strip A lane 1) on the real transport and the real
+-- lobby, joined to the real server plugin: what the game sends goes to the server, and
+-- what the server sends player 1 comes back through the transport's receive handler.
+-- Everything the server sends anyone else is kept in `others`.
+local function leaderOnServer()
+	local lobby = newGame({"A"})
+	newServer()
+	local handlers, others = {}, {}
+	function AddEventHandler(name, fn) handlers[name] = fn end
+	function TriggerServerEvent(name, data) _G[name](1, data) end
+	jsonEncode, jsonDecode = encode, decode
+	deepcopy = deepcopy or function(t)
+		if type(t) ~= "table" then return t end
+		local r = {}
+		for k, v in pairs(t) do r[k] = deepcopy(v) end
+		return r
+	end
+	extensions = {
+		load = function() end,
+		hook = function(name, ...)
+			if mileage_dragLobby and mileage_dragLobby[name] then mileage_dragLobby[name](...) end
+		end,
+	}
+	mileage_dragTransport = dofile(TRANSPORT)
+	mileage_dragTransport.onExtensionLoaded()
+	local function pump()
+		while #server.sent > 0 do
+			local m = table.remove(server.sent, 1)
+			if m.target == 1 or m.target == -1 then handlers[m.event](m.data) end
+			if m.target ~= 1 then table.insert(others, m) end
+		end
+	end
+	local function tick(seconds)
+		game.now = seconds
+		pump()
+		lobby.onUpdate(0.5)
+		pump()
+	end
+	return lobby, tick, others
+end
+
+local function sessionsSentTo(others, playerId)
+	local n = 0
+	for _, m in ipairs(others) do
+		if m.event == "rxDragMP" and m.target == playerId and decode(m.data).msg == "dragSessionStarted" then
+			n = n + 1
+		end
+	end
+	return n
+end
+
+test("two players at the strip: a join through the server's relay forms a race for both", function()
+	finally(function()
+		local _, tick, others = leaderOnServer()
+		tick(0.5)
+		dragMP(2, encode({msg = "mileageDragJoin", to = "host", stripId = "A",
+			data = {stripId = "A", lane = 2, pos = {4, 0, 0}}}))
+		tick(1)
+		same(#sentNamed("mileageDragJoin"), 0, "lobby joins handed to the game")
+		same(#sentNamed("dragSessionStarted"), 1, "races started on the leader")
+		same(sessionsSentTo(others, 2), 1, "race sessions relayed to the second player")
+	end)
+end)
+
+test("one player at the strip: the leader's own join comes back through the relay and a solo run starts after 45 s", function()
+	finally(function()
+		local _, tick = leaderOnServer()
+		local t = 0.5
+		while t < 45 do
+			tick(t)
+			t = t + 0.5
+		end
+		same(#sentNamed("dragSessionStarted"), 0, "races started before 45 s")
+		while t <= 47 do
+			tick(t)
+			t = t + 0.5
+		end
+		same(#sentNamed("dragSessionStarted"), 1, "solo runs started by 47 s")
+	end)
 end)

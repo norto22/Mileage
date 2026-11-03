@@ -301,6 +301,9 @@ function M.normalizeIncoming(msgName, data)
 	end
 end
 
+--- The namespace of our own lobby messages (mileageDragJoin, mileageClockPong, ...).
+local LOBBY_PREFIX = "mileage"
+
 local function onDragMessage(payload)
 	local envelope = jsonDecode(payload)
 	if not envelope or not envelope.msg then return end
@@ -308,7 +311,9 @@ local function onDragMessage(payload)
 	-- Our own lobby messages share this relay rather than adding a second event pair.
 	-- They are namespaced so they can never collide with a BeamNG protocol message, now
 	-- or after a game update.
-	if envelope.msg:sub(1, 8) == "mileage" then
+	-- Measured from the prefix itself: a hard-coded length outlived a rename once and sent
+	-- every lobby message to the game's handlers, so no race ever formed.
+	if type(envelope.msg) == "string" and envelope.msg:sub(1, #LOBBY_PREFIX) == LOBBY_PREFIX then
 		extensions.hook("onMileageDragMessage", envelope.msg,
 			tonumber(envelope.from) or envelope.from, envelope.data)
 		return

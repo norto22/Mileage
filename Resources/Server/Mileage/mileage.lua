@@ -12,8 +12,8 @@
 -- `lineage` field in versions/client.json and versions/server.json.
 local LINEAGE = "norto22/Mileage"
 
-local HARD_CLIENT_VERSION = {major = 0, minor = 6, revision = 1, lineage = LINEAGE}
-local HARD_SERVER_VERSION = {major = 0, minor = 6, revision = 1, lineage = LINEAGE}
+local HARD_CLIENT_VERSION = {major = 0, minor = 6, revision = 2, lineage = LINEAGE}
+local HARD_SERVER_VERSION = {major = 0, minor = 6, revision = 2, lineage = LINEAGE}
 
 local RAW = "https://raw.githubusercontent.com/"
 local GITHUB_REPO = "norto22/Mileage/"

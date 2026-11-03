@@ -177,7 +177,10 @@ local function addCar(game, owner, vid, opts)
 	for cid = 0, nodeCount - 1 do
 		nodes[cid] = {cid = cid}
 		if cid > 0 then
-			car.nodePos[cid] = fromCarFrame(car, (cid % 5) * 0.4 - 0.8, math.floor(cid / 5) * 0.4 - 2, (cid % 3) * 0.3)
+			-- Rows of five, folded every 40 rows so a car of thousands of points stays the
+			-- size of a real one (within the 20 m a copy accepts).
+			car.nodePos[cid] = fromCarFrame(car, (cid % 5) * 0.4 - 0.8, (math.floor(cid / 5) % 40) * 0.4 - 2,
+				(cid % 3) * 0.3 + math.floor(cid / 200) * 0.01)
 		end
 	end
 	for cid = 0, beamCount - 1 do
@@ -189,16 +192,36 @@ local function addCar(game, owner, vid, opts)
 		end
 		car.restLen[cid] = 1
 	end
-	car.v = {data = {beams = beams, nodes = nodes, refNodes = {[0] = {ref = 0}}}}
+	-- opts.hydros: steering hydraulics' beams; opts.settling: beams that settle after spawn.
+	local hydros = {}
+	for _, cid in ipairs(opts.hydros or {}) do table.insert(hydros, {beamCID = cid}) end
+	for _, cid in ipairs(opts.settling or {}) do beams[cid].beamPrecompressionTime = 0.5 end
+	-- opts.beamNames / opts.beamTags: {cid = name or tag}; opts.controllers: the car's
+	-- jbeam controllers; opts.data: more of v.data.
+	for cid, name in pairs(opts.beamNames or {}) do beams[cid].name = name end
+	for cid, tag in pairs(opts.beamTags or {}) do beams[cid].tag = tag end
+	car.v = {data = {beams = beams, nodes = nodes, refNodes = {[0] = {ref = 0}}, hydros = hydros,
+		controller = opts.controllers}}
+	for k, value in pairs(opts.data or {}) do car.v.data[k] = value end
 	car.beamstate = {damage = 0, deformedBeams = {}}
 	function car.beamstate.onBeamDeformed(cid, ratio)
 		car.deformCalls = car.deformCalls + 1
 		car.beamstate.deformedBeams[cid] = ratio
 	end
 	car.obj = {}
+	-- What the copy's vehicle Lua did to the car, in order: {"node", cid}, {"beam", cid},
+	-- {"commit"}.
+	car.applyLog, car.commits = {}, 0
 	function car.obj:getID() return gid end
 	function car.obj:getBeamRestLength(cid) return car.restLen[cid] end
-	function car.obj:setBeamLength(cid, len) car.restLen[cid] = len end
+	function car.obj:setBeamLength(cid, len)
+		table.insert(car.applyLog, {"beam", cid})
+		car.restLen[cid] = len
+	end
+	function car.obj:commitLoad()
+		table.insert(car.applyLog, {"commit"})
+		car.commits = car.commits + 1
+	end
 	function car.obj:beamIsBroken(cid) return car.broken[cid] == true end
 	function car.obj:breakBeam(cid)
 		car.breakCalls = car.breakCalls + 1
@@ -206,7 +229,10 @@ local function addCar(game, owner, vid, opts)
 		car.beamstate.deformedBeams[cid] = 1
 	end
 	function car.obj:getNodePosition(cid) return vec3(car.nodePos[cid]) end
-	function car.obj:setNodePosition(cid, p) car.nodePos[cid] = vec3(p) end
+	function car.obj:setNodePosition(cid, p)
+		table.insert(car.applyLog, {"node", cid})
+		car.nodePos[cid] = vec3(p)
+	end
 	function car.obj:getDirectionVector() return vec3(car.fwd) end
 	function car.obj:getDirectionVectorUp() return vec3(car.up) end
 	function car.obj:queueGameEngineLua(cmd) table.insert(game.geQueue, cmd) end
@@ -311,7 +337,8 @@ local function twoGames(opts)
 	newWorld()
 	local owners, copies = addGame(0), addGame(1)
 	local owner = addCar(owners, 0, 0, opts)
-	local copy = addCar(copies, 0, 0, {nodes = opts.nodes, beams = opts.beams, fwd = {x = 1, y = 0, z = 0}})
+	local copy = addCar(copies, 0, 0, {nodes = opts.nodes, beams = opts.beams, hydros = opts.hydros,
+		settling = opts.settling, fwd = {x = 1, y = 0, z = 0}})
 	owners.playerVehicle = owner.gid
 	return owner, copy, owners, copies
 end
@@ -448,8 +475,10 @@ test("a wreck of 1000 beams goes out as 400, 400 and 200 over three ticks", func
 	same(table.concat(counts, ","), "400,400,200", "beams per message")
 end)
 
-test("a message holds at most 500 points", function()
+test("a message of ordinary dents holds at most 500 points", function()
 	local car = ownerCar({beams = 300, nodes = 600, separate = true})
+	tick(car)
+	takeMessages(car)
 	car.beamstate.damage = 1000
 	for cid = 0, 299 do car.restLen[cid] = 0.9 end
 	tick(car)
@@ -1069,12 +1098,29 @@ local function phantomDents(copy, first, last, len)
 	copy.beamstate.damage = copy.beamstate.damage + 1000
 end
 
-test("lengths within 2 cm, or only 20 disagreeing beams, start no resync", function()
+test("one beam more than 5 mm off the owner's report starts a resync, one under 5 mm does not", function()
 	local copy = heardCopy(30)
-	for cid = 0, 29 do copy.restLen[cid] = 0.9 - 0.015 end
-	phantomDents(copy, 50, 69)
+	for cid = 0, 29 do copy.restLen[cid] = 0.9 - 0.004 end
+	copy.restLen[50] = 1.004
+	copy.beamstate.damage = copy.beamstate.damage + 10
 	tick(copy, 5)
-	same(resetRequests(copy).resync, 0, "resyncs")
+	same(resetRequests(copy).resync, 0, "resyncs with every beam within 5 mm")
+	copy.restLen[60] = 1 - 0.006
+	copy.beamstate.damage = copy.beamstate.damage + 10
+	tick(copy, 1)
+	same(resetRequests(copy).resync, 0, "resyncs after one check")
+	tick(copy, 1)
+	same(resetRequests(copy).resync, 1, "resyncs after two checks")
+end)
+
+test("one beam broken on the copy while reported whole starts a resync after two checks", function()
+	local copy = heardCopy(30)
+	copy.broken[55] = true
+	copy.beamstate.damage = copy.beamstate.damage + 10
+	tick(copy, 1)
+	same(resetRequests(copy).resync, 0, "resyncs after one check")
+	tick(copy, 1)
+	same(resetRequests(copy).resync, 1, "resyncs after two checks")
 end)
 
 test("25 plain dents the owner never reported start a resync", function()
@@ -1649,4 +1695,560 @@ test("an answer still finishes while the car is dented every half second", funct
 	for cid = 0, 1599 do if not answered[cid] then missing = missing + 1 end end
 	same(missing, 0, "beams of the answer not sent after 5 s of dents")
 	for k = 0, 9 do expect(dentsSent[1600 + k], "dent on beam " .. (1600 + k) .. " sent for everyone") end
+end)
+
+--== a still car's copy is put right, whatever it differs by =================
+
+test("a wheel lost on the copy of a still car (8 beams broken) is put right", function()
+	local owner, copy = syncedGames()
+	phantomBreaks(copy, 30, 8)
+	step(30)
+	same(copy.broken[30], nil, "the lost wheel's beam 30 on the copy after 30 s")
+	same(copy.restLen[7], 0.8, "the owner's dent on the copy again")
+end)
+
+test("a single 3 cm dent only the copy has is put right", function()
+	local owner, copy = syncedGames()
+	copy.restLen[40] = 0.97
+	copy.beamstate.damage = copy.beamstate.damage + 50
+	step(30)
+	same(copy.restLen[40], 1, "the copy's beam 40 after 30 s")
+	same(copy.restLen[7], 0.8, "the owner's dent on the copy again")
+end)
+
+--== beams the game lengthens on its own =====================================
+
+-- A copy that heard from its owner, with beam 70 a steering hydraulic and 71 a beam
+-- that settles after spawn.
+local function heardCopyWithHydros()
+	local copy = copyCar({beams = 100, hydros = {70}, settling = {71}})
+	inVehicle(copy, copy.ext.applyDamage, 0, {7, 0.9, 0, 0.2}, {})
+	return copy
+end
+
+test("a steering hydraulic's length, or a settling beam's, never starts a resync", function()
+	local copy = heardCopyWithHydros()
+	copy.restLen[70] = 1.03
+	copy.restLen[71] = 0.96
+	copy.beamstate.damage = copy.beamstate.damage + 10
+	tick(copy, 5)
+	same(resetRequests(copy).resync, 0, "resyncs")
+end)
+
+test("a hydraulic beam broken on the copy while whole on the owner starts a resync", function()
+	local copy = heardCopyWithHydros()
+	copy.broken[70] = true
+	copy.beamstate.damage = copy.beamstate.damage + 10
+	tick(copy, 2)
+	same(resetRequests(copy).resync, 1, "resyncs")
+end)
+
+test("an owner never sends a hydraulic's or settling beam's length, and sends their breaks", function()
+	local car = ownerCar({hydros = {5}, settling = {6}})
+	tick(car)
+	takeMessages(car)
+	car.restLen[5] = 1.05
+	car.restLen[6] = 0.9
+	dent(car, 7, 0.8)
+	tick(car)
+	same(table.concat(beamIds(takeMessages(car)[1]), ","), "7", "beams sent for a dent while steering")
+	car.broken[5], car.broken[6] = true, true
+	car.beamstate.damage = car.beamstate.damage + 50
+	tick(car)
+	local m = takeMessages(car)[1]
+	same(table.concat(beamIds(m), ","), "5,6", "beams sent once they break")
+	same(m.b[3], 1, "beam 5 broken")
+	same(m.b[7], 1, "beam 6 broken")
+end)
+
+test("a hydraulic beam broken on the owner reaches the copy broken, its length left to the copy", function()
+	local owner, copy = twoGames({hydros = {5}})
+	step(2.5)
+	owner.restLen[5] = 1.04
+	owner.broken[5] = true
+	owner.beamstate.damage = owner.beamstate.damage + 100
+	step(1.5)
+	same(copy.broken[5], true, "the copy's hydraulic beam 5 broken")
+	same(copy.restLen[5], 1, "the copy's hydraulic beam 5 length")
+end)
+
+--== the owner's full damage as one whole shape =============================
+
+-- Points of `car` more than 2 mm from where they are on `owner`, each in its car's own frame.
+local function pointsOff(owner, car)
+	local off = {}
+	for cid in pairs(owner.v.data.nodes) do
+		local ox, oy, oz = toCarFrame(owner, owner.nodePos[cid])
+		local cx, cy, cz = toCarFrame(car, car.nodePos[cid])
+		if math.abs(ox - cx) > 0.002 or math.abs(oy - cy) > 0.002 or math.abs(oz - cz) > 0.002 then
+			table.insert(off, cid)
+		end
+	end
+	return off
+end
+
+-- Nudges every point of a car but its reference point by dz metres up, in its own frame:
+-- a copy whose physics rests at another suspension height.
+local function nudgePoints(car, dz)
+	for cid in pairs(car.v.data.nodes) do
+		if cid ~= 0 then
+			local x, y, z = toCarFrame(car, car.nodePos[cid])
+			car.nodePos[cid] = fromCarFrame(car, x, y, z + dz)
+		end
+	end
+end
+
+test("a damaged still car's copy, reset, gets every point of his car", function()
+	local owner, copy = syncedGames()
+	nudgePoints(copy, 0.05)
+	copy.applyLog, copy.commits = {}, 0
+	phantomBreaks(copy, 30, 1)
+	step(10)
+	expect(copy.veh.resets >= 1, "the copy was reset in place")
+	same(#pointsOff(owner, copy), 0, "points of the copy away from the owner's car")
+	same(copy.commits, 1, "commits of the owner's damage")
+	same(copy.restLen[7], 0.8, "the owner's dent on the copy")
+end)
+
+-- An owner of 600 points and 300 beams, each beam with points of its own, beams 0-9 dented.
+local function bigDentedOwner()
+	local car = soloCar({beams = 300, nodes = 600, separate = true})
+	for cid = 0, 9 do dent(car, cid, 0.8) end
+	return car
+end
+
+-- The point ids in a decoded message.
+local function pointIds(message)
+	local ids = {}
+	for i = 1, #message.n, 4 do table.insert(ids, message.n[i]) end
+	return ids
+end
+
+test("a full send carries every point of the car in numbered parts", function()
+	local car = bigDentedOwner()
+	inVehicle(car, car.ext.setRole, "owner")
+	tick(car, 2)
+	local sent = rawMessages(car)
+	same(#sent, 2, "parts of the full send for everyone")
+	same(sent[1]:sub(1, 20), '{"c":0,"p":1,"t":2,"', "the first part")
+	same(sent[2]:sub(1, 20), '{"c":0,"p":2,"t":2,"', "the second part")
+	local points, beams = {}, {}
+	for _, m in ipairs(sent) do
+		local message = jsonToLua(m)
+		expect(#message.n / 4 <= 500, "points in a part: " .. #message.n / 4)
+		for _, id in ipairs(pointIds(message)) do points[id] = true end
+		for _, id in ipairs(beamIds(message)) do beams[#beams + 1] = id end
+	end
+	local count = 0
+	for _ in pairs(points) do count = count + 1 end
+	same(count, 600, "points of the car in the full send")
+	same(table.concat(beams, ","), "0,1,2,3,4,5,6,7,8,9", "beams in the full send")
+	inVehicle(car, car.ext.answerFull)
+	tick(car, 2)
+	local answer = rawMessages(car)
+	same(#answer, 2, "parts of the answer")
+	same(answer[1]:sub(1, 26), '{"f":1,"c":0,"p":1,"t":2,"', "the answer's first part, flagged first")
+	same(answer[2]:sub(1, 26), '{"f":1,"c":0,"p":2,"t":2,"', "the answer's second part")
+end)
+
+--== the copy applies a whole set at once ====================================
+
+-- The two parts of bigDentedOwner's answer, decoded, and a copy of the same car.
+local function wholeAnswerAndCopy()
+	local owner = bigDentedOwner()
+	inVehicle(owner, owner.ext.setRole, "owner")
+	tick(owner, 2)
+	takeMessages(owner)
+	inVehicle(owner, owner.ext.answerFull)
+	tick(owner, 2)
+	local parts = takeMessages(owner)
+	same(#parts, 2, "parts of the answer")
+	local copy = copyCar({beams = 300, nodes = 600, separate = true})
+	return parts, copy
+end
+
+local function applyPart(copy, m)
+	inVehicle(copy, copy.ext.applyDamage, m.c, m.b, m.n, m.p, m.t)
+end
+
+test("a whole-shape answer moves every point and commits once, after its last part", function()
+	local parts, copy = wholeAnswerAndCopy()
+	applyPart(copy, parts[1])
+	same(#copy.applyLog, 0, "changes to the copy after the first of two parts")
+	applyPart(copy, parts[2])
+	local points, lastPoint, firstBeam = {}, 0, nil
+	for i, entry in ipairs(copy.applyLog) do
+		if entry[1] == "node" then
+			points[entry[2]] = true
+			lastPoint = i
+		elseif entry[1] == "beam" and not firstBeam then
+			firstBeam = i
+		end
+	end
+	local count = 0
+	for _ in pairs(points) do count = count + 1 end
+	same(count, 600, "points of the copy set")
+	expect(firstBeam and firstBeam > lastPoint, "every point is set before any beam")
+	same(copy.commits, 1, "commits")
+	same(copy.applyLog[#copy.applyLog][1], "commit", "the commit comes last")
+	same(copy.restLen[3], 0.8, "the owner's dent on the copy")
+	same(countLines(copy.game.geQueue, "mileage_damageSync.shapeApplied(" .. copy.gid .. ")"), 1, "the copy's wait ended")
+end)
+
+test("a part that does not follow the one before applies nothing", function()
+	local parts, copy = wholeAnswerAndCopy()
+	applyPart(copy, parts[2])
+	applyPart(copy, parts[1])
+	applyPart(copy, parts[1])
+	same(#copy.applyLog, 0, "changes to the copy")
+	same(countLines(copy.game.geQueue, "shapeApplied"), 0, "waits ended")
+end)
+
+test("an incomplete set is dropped 5 s after its latest part, or by a cleared notice", function()
+	local parts, copy = wholeAnswerAndCopy()
+	applyPart(copy, parts[1])
+	tick(copy, 4.5)
+	applyPart(copy, parts[1])
+	tick(copy, 5)
+	applyPart(copy, parts[2])
+	same(#copy.applyLog, 0, "changes to the copy after 5 s without a part")
+	applyPart(copy, parts[1])
+	inVehicle(copy, copy.ext.applyDamage, 1, {}, {})
+	applyPart(copy, parts[2])
+	same(#copy.applyLog, 0, "changes to the copy after a cleared notice")
+	same(countLines(copy.game.geQueue, "shapeApplied"), 0, "waits ended")
+end)
+
+test("a set still arriving 4.5 s after its first part is applied", function()
+	local parts, copy = wholeAnswerAndCopy()
+	applyPart(copy, parts[1])
+	tick(copy, 4.5)
+	applyPart(copy, parts[2])
+	same(copy.commits, 1, "commits")
+end)
+
+test("ordinary dents that arrive while a set is incomplete are applied after it", function()
+	local parts, copy = wholeAnswerAndCopy()
+	applyPart(copy, parts[1])
+	inVehicle(copy, copy.ext.applyDamage, 0, {3, 0.75, 0, 0.3}, {})
+	same(copy.restLen[3], 1, "the dent held while the set is incomplete")
+	applyPart(copy, parts[2])
+	same(copy.commits, 1, "commits")
+	same(copy.restLen[3], 0.75, "the newer dent on top of the set")
+end)
+
+test("a part number that is not a whole number from 1 to 64, or past its set, is dropped", function()
+	local owner, copy, owners, copies = twoGames()
+	step(2)
+	for _, pt in ipairs({'"p":0,"t":1', '"p":65,"t":65', '"p":2,"t":1', '"p":1.5,"t":2', '"p":"1","t":1',
+			'"p":1', '"t":1', '"p":1,"t":"1);injected();("'}) do
+		deliver(copies, '{"v":"0-0","c":0,' .. pt .. ',"b":[7,0.5,0,0.3],"n":[]}')
+	end
+	same(#copy.applyLog, 0, "changes to the copy")
+	deliver(copies, '{"v":"0-0","c":0,"p":1,"t":1,"b":[7,0.5,0,0.3],"n":[]}')
+	same(copy.restLen[7], 0.5, "a well-numbered part applies")
+	same(copy.commits, 1, "commits")
+end)
+
+test("a set whose middle part is lost, though its last part arrives, is asked for again", function()
+	local owner, copy, owners, copies = twoGames({beams = 300, nodes = 1200, separate = true})
+	for cid = 0, 9 do dent(owner, cid, 0.8) end
+	nudgePoints(copy, 0.05)
+	local rx, dropped = copies.handlers.rxCareerDamage, 0
+	copies.handlers.rxCareerDamage = function(data)
+		if dropped == 0 and data:find('"p":2,', 1, true) then dropped = 1; return end
+		return rx(data)
+	end
+	step(4)
+	same(dropped, 1, "middle parts lost")
+	same(copy.commits, 0, "commits of a set missing its middle part")
+	-- A dent while he drives does not end the wait for his full damage.
+	dent(owner, 20, 0.7)
+	step(26)
+	same(requestsFor("0-0"), 2, "requests from the copy's game")
+	same(copy.commits, 1, "commits")
+	same(#pointsOff(owner, copy), 0, "points of the copy away from the owner's car")
+	same(copy.restLen[20], 0.7, "the dent while he drove")
+end)
+
+test("a set longer than 5 s is not asked for again while its parts still arrive", function()
+	local owner, copy = twoGames({beams = 300, nodes = 5000, separate = true})
+	for cid = 0, 9 do dent(owner, cid, 0.8) end
+	step(30)
+	same(requestsFor("0-0"), 1, "requests from the copy's game")
+	same(copy.commits, 1, "commits")
+end)
+
+--== whole-shape edges ========================================================
+
+-- The full send for everyone of a new owner `car`, raw, after `seconds` of ticks.
+local function newOwnerFullSend(car, seconds)
+	inVehicle(car, car.ext.setRole, "owner")
+	tick(car, seconds or 2)
+	return rawMessages(car)
+end
+
+test("a full send of exactly 500 points is one part, of 501 points two parts with every point once", function()
+	for _, count in ipairs({500, 501}) do
+		local car = soloCar({nodes = count})
+		dent(car, 7, 0.8)
+		local sent = newOwnerFullSend(car)
+		local wanted = count == 500 and 1 or 2
+		same(#sent, wanted, count .. " points: parts")
+		same(sent[1]:sub(1, 20), '{"c":0,"p":1,"t":' .. wanted .. ',"', count .. " points: the first part")
+		local seen, total = {}, 0
+		for _, m in ipairs(sent) do
+			for _, id in ipairs(pointIds(jsonToLua(m))) do
+				expect(not seen[id], count .. " points: point " .. id .. " sent twice")
+				seen[id], total = true, total + 1
+			end
+		end
+		same(total, count, count .. " points: points in the full send")
+	end
+end)
+
+test("a full send of 401 changed beams on a car of 100 points is two parts, and the copy applies every beam once", function()
+	local owner = soloCar({beams = 401, nodes = 100})
+	for cid = 0, 400 do dent(owner, cid, 0.8) end
+	inVehicle(owner, owner.ext.setRole, "owner")
+	tick(owner, 2)
+	local parts = takeMessages(owner)
+	same(#parts, 2, "parts")
+	same(#parts[1].b / 4, 400, "beams in the first part")
+	same(#parts[2].b / 4, 1, "beams in the second part")
+	same(#parts[1].n / 4 + #parts[2].n / 4, 100, "points in the two parts")
+	same(parts[2].p .. "/" .. parts[2].t, "2/2", "the second part's number")
+	local copy = copyCar({beams = 401, nodes = 100})
+	applyPart(copy, parts[1])
+	same(copy.commits, 0, "commits after the first part")
+	applyPart(copy, parts[2])
+	same(copy.commits, 1, "commits")
+	same(copy.restLen[0], 0.8, "the copy's beam 0")
+	same(copy.restLen[400], 0.8, "the copy's beam 400, alone in the second part")
+end)
+
+test("a car whose whole shape needs more than 64 parts sends no part, logs it once, and still sends its dents", function()
+	local car = soloCar({nodes = 32001})
+	dent(car, 7, 0.8)
+	local sent = newOwnerFullSend(car)
+	inVehicle(car, car.ext.answerFull)
+	tick(car, 2)
+	for _, m in ipairs(rawMessages(car)) do table.insert(sent, m) end
+	local numbered, dents = 0, 0
+	for _, m in ipairs(sent) do
+		if m:find('"p":', 1, true) then numbered = numbered + 1 end
+		local ids = beamIds(jsonToLua(m))
+		if ids[1] == 7 then dents = dents + 1 end
+	end
+	same(numbered, 0, "numbered parts sent")
+	same(countLines(logs, "and is not sent whole"), 1, "warnings")
+	same(dents, 1, "messages with the dent on beam 7")
+end)
+
+test("a part that names another number of parts than the set it follows applies nothing", function()
+	local parts, copy = wholeAnswerAndCopy()
+	applyPart(copy, parts[1])
+	inVehicle(copy, copy.ext.applyDamage, 0, parts[2].b, parts[2].n, 2, 3)
+	applyPart(copy, parts[2])
+	same(#copy.applyLog, 0, "changes to the copy")
+	same(countLines(copy.game.geQueue, "shapeApplied"), 0, "waits ended")
+end)
+
+test("a whole set completed while the copy's direction cannot be read applies nothing and keeps the copy waiting", function()
+	local parts, copy = wholeAnswerAndCopy()
+	applyPart(copy, parts[1])
+	copy.fwd = {x = 0, y = 0, z = 0}
+	applyPart(copy, parts[2])
+	same(#copy.applyLog, 0, "changes to the copy")
+	same(copy.commits, 0, "commits")
+	same(countLines(copy.game.geQueue, "shapeApplied"), 0, "waits ended")
+end)
+
+test("a cleared notice also drops the dents held for an incomplete set", function()
+	local parts, copy = wholeAnswerAndCopy()
+	applyPart(copy, parts[1])
+	inVehicle(copy, copy.ext.applyDamage, 0, {3, 0.75, 0, 0.3}, {})
+	inVehicle(copy, copy.ext.applyDamage, 1, {}, {})
+	applyPart(copy, parts[2])
+	same(copy.restLen[3], 1, "the copy's beam 3 after the owner's reset")
+	same(#copy.applyLog, 0, "changes to the copy")
+end)
+
+test("a hydraulic beam in a whole shape reaches the copy broken, its length left to the copy", function()
+	local owner = soloCar({beams = 100, hydros = {70}})
+	dent(owner, 7, 0.8)
+	owner.restLen[70], owner.broken[70] = 1.04, true
+	inVehicle(owner, owner.ext.setRole, "owner")
+	tick(owner, 2)
+	local parts = takeMessages(owner)
+	same(#parts, 1, "parts")
+	same(table.concat(beamIds(parts[1]), ","), "7,70", "beams in the whole shape")
+	local copy = copyCar({beams = 100, hydros = {70}})
+	applyPart(copy, parts[1])
+	same(copy.commits, 1, "commits")
+	same(copy.broken[70], true, "the copy's hydraulic beam 70 broken")
+	same(copy.restLen[70], 1, "the copy's hydraulic beam 70 length")
+	same(copy.restLen[7], 0.8, "the copy's beam 7")
+end)
+
+test("every part of the biggest whole shape fits a 32 KB message", function()
+	-- 5-digit point and beam ids, every coordinate at the 20 m a copy accepts, every beam
+	-- at the longest length a copy accepts, broken, at the largest deformation.
+	local car = soloCar({nodes = 20500, beams = 20500})
+	for cid = 1, 20499 do car.nodePos[cid] = fromCarFrame(car, -19.999, -19.999, -19.999) end
+	for cid = 0, 20499 do
+		car.restLen[cid], car.broken[cid] = 99.9999, true
+		car.beamstate.deformedBeams[cid] = 9.999
+	end
+	car.beamstate.damage = 1e6
+	local sent = newOwnerFullSend(car, 30)
+	same(#sent, 52, "parts")
+	local longest = 0
+	for _, m in ipairs(sent) do
+		longest = math.max(longest, #('{"v":"999-999",' .. m:sub(2)))
+	end
+	expect(longest <= 32768, "the longest part with its car id: " .. longest .. " bytes")
+end)
+
+--== found in verification ===================================================
+
+-- A copy whose car has the game's other controllers that lengthen beams on their own:
+-- hydraulic suspension (beams by name, from the default and a named list), a beam chain
+-- and beam segments (beams by tag) and googly eyes (their default tags).
+local function copyWithControllers()
+	local copy = copyCar({beams = 100,
+		controllers = {
+			{fileName = "hydraulicSuspension"},
+			{fileName = "hydraulicSuspension", name = "front", hydraulicBeams = "frontHydros"},
+			{fileName = "mechanics/beamChain", beamTag = "chain"},
+			{fileName = "mechanics/beamSegments", segmentBeamTag = "seg", sensorBeamTag = "sensor"},
+			{fileName = "propAnimation/googlyEyes"},
+		},
+		data = {hydraulicsData = {{beamName = "susp", groupName = "g"}}, frontHydros = {{beamName = "fh", groupName = "f"}}},
+		beamNames = {[72] = "susp", [80] = "fh"},
+		beamTags = {[73] = "chain", [74] = "chain", [75] = "seg", [76] = {"other", "seg"}, [77] = "sensor",
+			[78] = "eyeBeam", [79] = "eyeLimiterBeam", [81] = "eyeAttachmentBeam"}})
+	inVehicle(copy, copy.ext.applyDamage, 0, {7, 0.9, 0, 0.2}, {})
+	return copy
+end
+
+test("beams the car's controllers lengthen on their own never start a resync, their breaks still do", function()
+	local copy = copyWithControllers()
+	for cid = 72, 81 do copy.restLen[cid] = 1.03 end
+	copy.beamstate.damage = copy.beamstate.damage + 10
+	tick(copy, 5)
+	same(resetRequests(copy).resync, 0, "resyncs for the controllers' lengths")
+	copy.broken[73] = true
+	copy.beamstate.damage = copy.beamstate.damage + 10
+	tick(copy, 2)
+	same(resetRequests(copy).resync, 1, "resyncs once a chain beam breaks")
+end)
+
+test("a whole shape sent to everyone, with a part lost, is asked for by a copy that was not waiting", function()
+	local owner, copy, owners, copies = twoGames({beams = 300, nodes = 1200, separate = true})
+	for cid = 0, 9 do dent(owner, cid, 0.8) end
+	step(10)
+	same(copy.commits, 1, "commits of the owner's first full send")
+	local requestsBefore = requestsFor("0-0")
+	-- The owner's game dropped queued messages: a cleared notice, then its whole shape
+	-- for everyone. The copy loses that shape's middle part.
+	dent(owner, 20, 0.7)
+	nudgePoints(copy, 0.05)
+	local rx, dropped = copies.handlers.rxCareerDamage, 0
+	copies.handlers.rxCareerDamage = function(data)
+		if dropped == 0 and data:find('"p":2,', 1, true) then dropped = 1; return end
+		return rx(data)
+	end
+	inVehicle(owner, owner.ext.sendFull, 1)
+	step(30)
+	same(dropped, 1, "middle parts lost")
+	same(requestsFor("0-0") - requestsBefore, 1, "requests after the lost part")
+	same(copy.commits, 2, "commits")
+	same(#pointsOff(owner, copy), 0, "points of the copy away from the owner's car")
+	same(copy.restLen[20], 0.7, "the owner's latest dent")
+end)
+
+test("a whole set with a row the copy cannot use applies nothing and keeps the copy waiting", function()
+	for _, bad in ipairs({
+		{beams = {7, 0.8, 0, 0.3}, nodes = {1, 0, 0, 0, 999, 0, 0, 0}},   -- unknown point
+		{beams = {7, 0.8, 0, 0.3}, nodes = {4, 1001, 0, 0}},               -- past 1000 m
+		{beams = {7, 0.8, 0, 0.3, 8, 150, 0, 0}, nodes = {1, 0, 0, 0}},    -- rest length out of range
+		{beams = {7, 0.8, 0, 0.3, 999, 0.8, 0, 0}, nodes = {1, 0, 0, 0}},  -- unknown beam
+	}) do
+		local copy = copyCar()
+		inVehicle(copy, copy.ext.applyDamage, 0, bad.beams, bad.nodes, 1, 1)
+		same(#copy.applyLog, 0, "changes to the copy")
+		same(countLines(copy.game.geQueue, "shapeApplied"), 0, "waits ended")
+	end
+end)
+
+test("a point of a whole shape up to 1000 m away, a part torn off and flung, is placed", function()
+	local copy = copyCar()
+	inVehicle(copy, copy.ext.applyDamage, 0, {7, 0.8, 0, 0.3}, {4, 25, 0, 0, 5, 0, -999, 0}, 1, 1)
+	same(copy.commits, 1, "commits")
+	local x = toCarFrame(copy, copy.nodePos[4])
+	local _, y = toCarFrame(copy, copy.nodePos[5])
+	expect(math.abs(x - 25) < 1e-6, "point 4 placed 25 m away")
+	expect(math.abs(y + 999) < 1e-6, "point 5 placed 999 m away")
+	same(countLines(copy.game.geQueue, "shapeApplied"), 1, "waits ended")
+end)
+
+--== found in the independent review ==========================================
+
+test("a whole set with a deformation, broken flag or rest length the copy cannot use applies nothing", function()
+	for _, beams in ipairs({
+		{7, 0.8, 0, 0.3, 8, 0.8, 0, 11},   -- deformation past 10
+		{7, 0.8, 0, 0.3, 8, 0.8, 2, 0.3},  -- broken flag neither 0 nor 1
+		{7, 0.8, 0, 0.3, 8, 0, 0, 0.3},    -- rest length 0
+	}) do
+		local copy = copyCar()
+		inVehicle(copy, copy.ext.applyDamage, 0, beams, {1, 0, 0, 0}, 1, 1)
+		same(#copy.applyLog, 0, "changes to the copy")
+		same(copy.commits, 0, "commits")
+		same(countLines(copy.game.geQueue, "shapeApplied"), 0, "waits ended")
+	end
+end)
+
+test("a point of a whole shape exactly 1000 m away is placed, and the set applied", function()
+	local copy = copyCar()
+	inVehicle(copy, copy.ext.applyDamage, 0, {7, 0.8, 0, 0.3}, {4, 1000, 0, -1000}, 1, 1)
+	same(copy.commits, 1, "commits")
+	local x, _, z = toCarFrame(copy, copy.nodePos[4])
+	expect(math.abs(x - 1000) < 1e-6 and math.abs(z + 1000) < 1e-6, "point 4 placed 1000 m away")
+end)
+
+test("dents held for an incomplete set go on when the set is dropped after 5 s", function()
+	local parts, copy = wholeAnswerAndCopy()
+	applyPart(copy, parts[1])
+	inVehicle(copy, copy.ext.applyDamage, 0, {3, 0.75, 0, 0.3}, {})
+	same(copy.restLen[3], 1, "the dent held while the set is incomplete")
+	tick(copy, 5)
+	same(copy.restLen[3], 0.75, "the held dent once the set is dropped")
+	same(copy.commits, 0, "commits of the dropped set")
+	same(countLines(copy.game.geQueue, "shapeApplied"), 0, "waits ended")
+end)
+
+test("a new owner whose direction cannot be read sends its whole shape once it can", function()
+	local car = bigDentedOwner()
+	local fwd = car.fwd
+	car.fwd = {x = 0, y = 0, z = 0}
+	inVehicle(car, car.ext.setRole, "owner")
+	tick(car, 2)
+	same(#rawMessages(car), 0, "messages without a frame")
+	car.fwd = fwd
+	tick(car, 2)
+	local sent = rawMessages(car)
+	same(#sent, 2, "parts of the full send once the frame is back")
+	same(sent[1]:sub(1, 20), '{"c":0,"p":1,"t":2,"', "the first part")
+	same(sent[2]:sub(1, 20), '{"c":0,"p":2,"t":2,"', "the second part")
+end)
+
+test("a numbered part for this game's own car is dropped and opens no wait", function()
+	local owner, copy, owners, copies = twoGames()
+	step(2)
+	local before = #sentToServer("careerDamageRequest", 0)
+	deliver(owners, '{"v":"0-0","c":0,"p":1,"t":2,"b":[7,0.5,0,0.3],"n":[]}')
+	step(12)
+	same(owner.restLen[7], 1, "the owner's own beam 7")
+	same(#sentToServer("careerDamageRequest", 0) - before, 0, "requests from the owner's game")
 end)
