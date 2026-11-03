@@ -609,6 +609,8 @@ end
 -- share only what they must through this table, which keeps the plugin's main chunk
 -- under Lua's limit of 200 local names. Money.start loads their data on a server start.
 local Money = {}
+-- When each car reached the server (signalTimer seconds), by server vehicle id.
+Money.spawnedAt = {}
 
 --== Data files ==============================================================
 -- What Mileage keeps about players between server starts: unfinished money transfers,
@@ -2829,6 +2831,8 @@ local function requestProblem(player_id, name, request)
 	for _, race in pairs(aiRaces) do
 		if race.car == request.car then return "carBusy" end
 	end
+	-- Set by the spot races section: a race spot's opponent is racing already.
+	if Money.carInSpotRace and Money.carInSpotRace(request.car) then return "carBusy" end
 	if not isPoint(request.start) or not isPoint(request.finish) then return "finish" end
 	return nil
 end
@@ -3510,15 +3514,16 @@ local function allReady(race)
 	return true
 end
 
--- The starter's game lists the opponents it spawned: only its own cars, at most as many as
--- it asked for, each once.
+-- The starter's game lists the opponents it spawned: only its own cars spawned since the
+-- race was asked for (never the car it drives), at most as many as it asked for, each once.
 local function addOpponents(race, player_id, list)
 	if type(list) ~= "table" then return end
 	local slot = race.opponentSlots
 	for _, entry in ipairs(list) do
 		if slot - race.opponentSlots >= race.opponentsWanted then break end
 		local car = type(entry) == "table" and entry.car
-		if Money.ownsVehicle(player_id, car) and not race.cars[car] then
+		local spawned = type(car) == "string" and Money.spawnedAt[car]
+		if Money.ownsVehicle(player_id, car) and spawned and spawned >= race.askedAt and not race.cars[car] then
 			slot = slot + 1
 			local racer = {key = "car:" .. car, name = modelText(entry.model), car = car, model = modelText(entry.model),
 				slot = slot, ready = true, passed = 0}
@@ -3767,7 +3772,7 @@ local function startRequest(player_id, name, request)
 	spotSeq = spotSeq + 1
 	local now = signalTimer:GetCurrent()
 	local race = {id = "s" .. spotSeq .. "-" .. os.time(), starter = name, route = route, phase = "inviting",
-		phaseEnds = now + INVITE_SECONDS, opponentsWanted = request.opponents, invited = {},
+		askedAt = now, phaseEnds = now + INVITE_SECONDS, opponentsWanted = request.opponents, invited = {},
 		racers = {[name] = {key = name, name = name, passed = 0}}, order = {}, cars = {}}
 	spotRaces[race.id] = race
 	local invited = {}
@@ -4715,6 +4720,8 @@ end
 function onVehicleSpawnHandler(player_id, vehicle_id,  data)
 	local serverVehicleID = player_id .. "-" .. vehicle_id
 	vehicleStates[serverVehicleID] = {active = true}
+	-- A race spot's opponents must be cars spawned after the race was asked for.
+	Money.spawnedAt[serverVehicleID] = signalTimer:GetCurrent()
 	sendVehicleState(serverVehicleID)
 end
 
@@ -4732,6 +4739,7 @@ function onVehicleDeletedHandler(player_id, vehicle_id)
 	if vehicleStates[player_id .. "-" .. vehicle_id] then
 		vehicleStates[player_id .. "-" .. vehicle_id] = nil
 	end
+	Money.spawnedAt[player_id .. "-" .. vehicle_id] = nil
 end
 
 function onPlayerDisconnectHandler(player_id)
@@ -4763,6 +4771,9 @@ function onPlayerDisconnectHandler(player_id)
 	local prefix = tostring(player_id) .. "-"
 	for serverVehicleID in pairs(vehicleStates) do
 		if serverVehicleID:sub(1, #prefix) == prefix then vehicleStates[serverVehicleID] = nil end
+	end
+	for serverVehicleID in pairs(Money.spawnedAt) do
+		if serverVehicleID:sub(1, #prefix) == prefix then Money.spawnedAt[serverVehicleID] = nil end
 	end
 	for serverVehicleID, askers in pairs(fullWanted) do
 		askers[player_id] = nil

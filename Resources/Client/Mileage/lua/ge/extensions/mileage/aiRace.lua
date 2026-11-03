@@ -150,6 +150,8 @@ local function findCandidate()
 	local function consider(vid, own, owner)
 		if vid == playerId then return end
 		local veh = be:getObjectByID(vid)
+		-- A race spot's opponent is already racing.
+		if veh and veh.mileageSpotRacer == "true" then return end
 		local metres = veh and besideMetres(playerPos, playerDir, veh)
 		if metres and (not bestMetres or metres < bestMetres) then
 			best, bestMetres = {vid = vid, own = own, owner = owner, model = modelName(veh)}, metres

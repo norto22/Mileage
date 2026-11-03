@@ -256,12 +256,21 @@ function World:startServer()
 		GetPlayerVehicles = function(id)
 			local p = world.players[id]
 			if world.hidePositions or p.hideCar or not p or not p.car then return nil end
+			local list = {[0] = {name = p.car.JBeam}}
 			-- p.parkedCar = {pos}: a second car of theirs, parked somewhere else (vehicle 9).
-			if p.parkedCar then return {[9] = {name = "parked"}, [0] = {name = p.car.JBeam}} end
-			return {[0] = {name = p.car.JBeam}}
+			if p.parkedCar then list[9] = {name = "parked"} end
+			-- Cars p's game spawned (a race spot's opponents).
+			for _, s in pairs(world.spawned) do
+				if s.owner == p and not s.gone then list[s.vid] = {name = s.car.JBeam} end
+			end
+			return list
 		end,
 		GetPositionRaw = function(id, vid)
 			local p = world.players[id]
+			local s = world.spawned[tostring(id) .. "-" .. tostring(vid)]
+			if s and not s.gone and not world.hidePositions and not s.hidden then
+				return {pos = {s.car.pos.x, s.car.pos.y, s.car.pos.z}}
+			end
 			-- A traffic car, by its server vehicle id.
 			local t = world.traffic[tostring(id) .. "-" .. tostring(vid)]
 			-- world.hideTraffic: the server cannot read traffic cars, only players' own.
@@ -484,6 +493,74 @@ function World:giveTraffic(p, opts)
 	return t
 end
 
+-- A car p's game spawns with core_vehicles.spawnNewVehicle (a race spot's opponent). It
+-- reaches the server at once unless world.spawnRefused (no car) or world.noServerIds (BeamMP
+-- never gives it a server id). Sent a race path, it drives straight from road node to road
+-- node at car.speed metres a second, lap after lap. Returns the car.
+function World:spawnCar(p, model, opts)
+	if self.spawnRefused then return nil end
+	self.spawnCount = (self.spawnCount or 0) + 1
+	local n = self.spawnCount
+	local world = self
+	local rot = opts.rot or {}
+	local car = {id = 7000 + n, JBeam = model, config = opts.config, pos = {x = opts.pos.x, y = opts.pos.y, z = opts.pos.z},
+		dir = copy(rot.dir) or {x = 0, y = 1, z = 0}, up = copy(rot.up) or {x = 0, y = 0, z = 1}, commands = {},
+		speed = self.opponentSpeed or 30, frozen = false, deleted = false}
+	local s = {car = car, owner = p, vid = 100 + n, sid = p.id .. "-" .. (100 + n)}
+	function car:getPosition() return self.pos end
+	function car:getDirectionVector() return self.dir end
+	function car:getDirectionVectorUp() return self.up end
+	function car:getID() return self.id end
+	function car:setDynDataFieldbyName(name, _, value) self[name] = value end
+	function car:delete()
+		self.deleted = true
+		s.gone = true
+		world:serverOutput(function() onVehicleDeletedHandler(p.id, s.vid) end)
+	end
+	function car:queueLuaCommand(cmd)
+		table.insert(self.commands, cmd)
+		local on = cmd:match("^controller%.setFreeze%((%d)%)$")
+		if on then self.frozen = on == "1" end
+		local list = cmd:match("^ai%.driveUsingPath%({wpTargetList = {(.-)}")
+		if list then
+			self.path = {}
+			for name in list:gmatch('"([^"]+)"') do table.insert(self.path, name) end
+			self.laps = tonumber(cmd:match("noOfLaps = (%d+)")) or 1
+			self.aggression = tonumber(cmd:match("aggression = ([%d%.]+)"))
+			self.pathIndex, self.lap, self.racing = 1, 1, true
+		end
+	end
+	self.spawned[s.sid] = s
+	self:serverOutput(function() onVehicleSpawnHandler(p.id, s.vid) end)
+	return car
+end
+
+-- Spawned cars sent a race path drive it; a frozen one, or one at speed 0, stands.
+function World:moveSpawned()
+	for _, s in pairs(self.spawned) do
+		local car = s.car
+		local left = car.speed
+		while car.racing and not s.gone and not car.frozen and left > 0 do
+			local node = (self.roadNodes or {})[car.path[car.pathIndex]]
+			if not node then car.racing = false break end
+			local dx, dy, dz = node.pos.x - car.pos.x, node.pos.y - car.pos.y, node.pos.z - car.pos.z
+			local d = math.sqrt(dx * dx + dy * dy + dz * dz)
+			local step = math.min(d, left)
+			if d > 0 then
+				car.pos = {x = car.pos.x + dx / d * step, y = car.pos.y + dy / d * step, z = car.pos.z + dz / d * step}
+			end
+			left = left - step
+			if step >= d then
+				car.pathIndex = car.pathIndex + 1
+				if car.pathIndex > #car.path then
+					car.lap, car.pathIndex = car.lap + 1, 1
+					if car.lap > car.laps then car.racing = false end
+				end
+			end
+		end
+	end
+end
+
 -- Traffic cars sent a race route drive straight at their target, car.speed metres a second.
 function World:moveTraffic()
 	for _, t in pairs(self.traffic) do
@@ -542,12 +619,20 @@ function World:loadGame(p)
 		end,
 		isOwn = function(gid)
 			if p.trafficData[gid] then return true end
+			for _, s in pairs(world.spawned) do
+				if s.car.id == gid then return s.owner == p end
+			end
 			return p.car ~= nil and p.car.id == gid and p.car.own ~= false
 		end,
 		getServerVehicleID = function(gid)
 			if p.car and p.car.id == gid then return p.id .. "-0" end
 			for sid, t in pairs(world.traffic) do
 				if t.car.id == gid then return sid end
+			end
+			if not world.noServerIds then
+				for sid, s in pairs(world.spawned) do
+					if s.car.id == gid then return sid end
+				end
 			end
 			return nil
 		end,
@@ -571,6 +656,9 @@ function World:loadGame(p)
 			if p.car and p.car.id == gid then return p.car end
 			for _, t in pairs(world.traffic) do
 				if t.car.id == gid and not t.gone then return t.car end
+			end
+			for _, s in pairs(world.spawned) do
+				if s.car.id == gid and not s.gone and s.owner == p then return s.car end
 			end
 			return nil
 		end,
@@ -611,8 +699,12 @@ function World:loadGame(p)
 	p.globals.ui_missionInfo = {closeDialogue = function() p.promptCloses = p.promptCloses + 1 end}
 	p.globals.mileageEnabler = {isRemoteTraffic = function(sid) return world.traffic[sid] ~= nil end}
 	p.globals.core_vehicles = {getModel = function(jbeam)
-		local models = {pessima = {Brand = "Ibishu", Name = "Pessima"}, pickup = {Brand = "Gavril", Name = "D-Series"}}
+		local models = {pessima = {Brand = "Ibishu", Name = "Pessima"}, pickup = {Brand = "Gavril", Name = "D-Series"},
+			etk800 = {Brand = "ETK", Name = "800 Series"}}
 		return models[jbeam] and {model = models[jbeam]} or {}
+	end, spawnNewVehicle = function(model, opts)
+		table.insert(world.spawnRequests, {owner = p, model = model, opts = opts})
+		return world:spawnCar(p, model, opts)
 	end}
 	p.globals.core_input_bindings = {getControlForAction = function(action)
 		return (world.boundKeys or {})[action]
@@ -740,6 +832,7 @@ function World:advance(seconds)
 	for _ = 1, math.floor(seconds + 0.5) do
 		self.now = self.now + 1
 		self:moveTraffic()
+		self:moveSpawned()
 		self:serverOutput(function() if _G.tick then tick() end end)
 		self:pump()
 		for _, t in pairs(self.traffic) do
@@ -814,7 +907,8 @@ World.realOpen = REAL_IO.open
 function World.new(opts)
 	opts = opts or {}
 	local self = setmetatable({players = {}, toServer = {}, toClients = {}, serverLog = {}, clientLog = {},
-		dropped = {}, notifications = {}, printed = {}, disk = {}, dirs = {}, now = 0, nextPlayerId = 0, traffic = {}},
+		dropped = {}, notifications = {}, printed = {}, disk = {}, dirs = {}, now = 0, nextPlayerId = 0, traffic = {},
+		spawned = {}, spawnRequests = {}},
 		World)
 	-- Every test starts from the real io and os functions.
 	World.restoreIo()

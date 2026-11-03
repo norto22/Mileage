@@ -429,6 +429,7 @@ local function spawn(owner, vid, fields)
 		local veh = {owner = owner, serverVehicleID = sid, JBeam = fields.JBeam or "pickup", active = true}
 		if id == owner then
 			veh.isTraffic, veh.isParked = fields.isTraffic, fields.isParked
+			veh.mileageSpotRacer = fields.mileageSpotRacer
 			if fields.ai ~= nil then p.trafficData[gid] = {isAi = fields.ai} end
 		end
 		function veh:setActive(on)
@@ -510,6 +511,16 @@ test("a car the game lists only as AI traffic, with no traffic or parked flag, c
 	frames(friend, 1)
 	same(nametag(me, "1-3"), true, "my friend's AI road car")
 	same(nametag(me, "1-4"), false, "a car in my friend's traffic data that is not AI")
+end)
+
+test("my friend's race spot opponent is marked as traffic: no nametag on my game", function()
+	local me, friend = twoPlayers()
+	spawn(1, 5, {JBeam = "pessima", mileageSpotRacer = "true"})
+	frames(friend, 1)
+	same(nametag(me, "1-5"), true, "the opponent car")
+	same(nametag(me, "1-0"), false, "the car my friend drives")
+	same(as(friend, friend.enabler.isTrafficCar, gameId(1, 5), friend.objects[gameId(1, 5)]), true,
+		"isTrafficCar says so")
 end)
 
 test("marks go out at most once a second, only when they change, and only for the sender's cars", function()

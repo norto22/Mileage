@@ -453,6 +453,297 @@ World.test("a car off the route for 10 seconds is out, and its race ends", funct
 	same(result.places[1].out, "left", "listed as left the route")
 end)
 
+--== the starter's opponents ======================================================
+
+-- A road node at each checkpoint of the route, named cp1, cp2, ...
+local function roadsAt(world, r)
+	world.roadNodes = {}
+	for i, checkpoint in ipairs(r.checkpoints) do world.roadNodes["cp" .. i] = {pos = copy(checkpoint.pos)} end
+end
+
+-- The game's class lookup and class grouping on p's game: class B, two cars, push 0.8.
+local function withClass(p)
+	p.globals.gameplay_vehiclePerformance = {getClassFromVehId = function(vid)
+		p.classAskedFor = vid
+		return {class = {name = "B"}, performanceIndex = 52}
+	end}
+	p.globals.career_modules_vehicleClassGrouping = {
+		generateGroup = function(class, _, _, _, _, _, _, _, index)
+			p.groupAsked = {class = class, index = index}
+			return {data = {{model = "pessima", config = "base_M"}, {model = "etk800", config = "sport_A"}}}
+		end,
+		getAggressionMultiplier = function(class) return class == "B" and 0.8 or 1 end,
+	}
+end
+
+local function spawned(world, p)
+	local list = {}
+	for _, s in pairs(world.spawned) do
+		if s.owner == p then table.insert(list, s) end
+	end
+	table.sort(list, function(a, b) return a.vid < b.vid end)
+	return list
+end
+
+World.test("two opponents are cars of the starter's class on the next grid places, held, marked and listed", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	withClass(ann)
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 2, {})
+	local grid = last(world, ann, "grid")
+	same(#grid.opponentPoses, 2, "two opponent places")
+	same(ann.classAskedFor, ann.car.id, "the class of the car Ann drives")
+	same(ann.groupAsked.class, "B", "a group of class B")
+	same(ann.groupAsked.index, 52, "near its performance index")
+	local cars = spawned(world, ann)
+	same(#cars, 2, "two cars spawned")
+	same(cars[1].car.JBeam, "pessima", "the group's first car")
+	same(cars[1].car.config, "base_M", "with its config")
+	same(cars[2].car.JBeam, "etk800", "the group's second car")
+	for i, s in ipairs(cars) do
+		expect(metres(s.car.pos, grid.opponentPoses[i].pos) < 0.01, "opponent " .. i .. " on its grid place")
+		same(s.car.dir.x, grid.opponentPoses[i].dir.x, "facing the route")
+		same(s.car.frozen, true, "held on the grid")
+		same(s.car.mileageSpotRacer, "true", "marked as a race spot opponent")
+	end
+	same(world.spawnRequests[1].opts.autoEnterVehicle, false, "the player stays in their own car")
+	local ready = sentKey(world, ann, "ready")
+	same(#ready, 1, "ready once")
+	same(#ready[1].opponents, 2, "both listed")
+	same(ready[1].opponents[1].car, cars[1].sid, "by server vehicle id")
+	same(ready[1].opponents[1].model, "Ibishu Pessima", "named by model")
+	local countdown = last(world, ann, "countdown")
+	same(#countdown.racers, 3, "three racers on the grid")
+	same(countdown.racers[2].name, "Ibishu Pessima", "the first opponent by its model")
+	same(countdown.racers[2].car, true, "a car")
+end)
+
+World.test("at green each opponent drives the checkpoints' road nodes for every lap at its class's push", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local r = route("rally_track")
+	roadsAt(world, r)
+	withClass(ann)
+	atStart(ann, "rally_track")
+	request(world, ann, "rally_track", 1, {})
+	local car = spawned(world, ann)[1].car
+	world:advance(3)
+	same(car.frozen, true, "held through the count")
+	world:advance(3)
+	same(car.frozen, false, "released on green")
+	local drive = nil
+	for _, cmd in ipairs(car.commands) do
+		if cmd:find("ai.driveUsingPath", 1, true) then drive = cmd end
+	end
+	expect(drive, "sent the game's race driving")
+	expect(drive:find('wpTargetList = {"cp1", "cp2", "cp3"', 1, true), "through the checkpoints' road nodes in order")
+	expect(drive:find('"cp11"}', 1, true), "to the finish line's")
+	expect(drive:find("noOfLaps = 2", 1, true), "both laps")
+	expect(drive:find("aggression = 0.8", 1, true), "at class B's push")
+	expect(drive:find("avoidCars = 'on'", 1, true), "round other cars")
+	same(car.commands[#car.commands], "ai.setRacing(true)", "racing")
+end)
+
+World.test("an opponent that cannot spawn, or never gets a server id, is left out and the race goes on", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	withClass(ann)
+	world.spawnRefused = true
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 2, {})
+	local ready = sentKey(world, ann, "ready")
+	same(#ready, 1, "ready at once")
+	same(#ready[1].opponents, 0, "no opponents")
+	expect(last(world, ann, "countdown"), "the race goes on alone")
+	world:advance(6)
+	world:as(ann, function() mileage_spotRace.giveUp() end)
+	world:advance(2)
+	expect(last(world, ann, "result"), "that race is over")
+	world.spawnRefused, world.noServerIds = false, true
+	atStart(ann, "cell_tower")
+	local before = #sentKey(world, ann, "ready")
+	request(world, ann, "cell_tower", 1, {})
+	world:advance(9)
+	same(#sentKey(world, ann, "ready"), before, "waiting up to 10 s for the server id")
+	world:advance(2)
+	ready = sentKey(world, ann, "ready")
+	same(#ready, before + 1, "ready without it")
+	same(#ready[#ready].opponents, 0, "the car is left out")
+	same(spawned(world, ann)[1].car.deleted, true, "and deleted")
+end)
+
+World.test("an opponent standing 15 s is reported stuck, and a vanished one gone", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	roadsAt(world, route("highway_race"))
+	withClass(ann)
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 2, {})
+	local cars = spawned(world, ann)
+	cars[1].car.speed = 0
+	world:advance(6)
+	cars[2].gone = true
+	world:advance(1)
+	local outs = sentKey(world, ann, "out")
+	same(#outs, 1, "the vanished car first")
+	same(outs[1].racer, "car:" .. cars[2].sid, "for that car")
+	same(outs[1].why, "gone", "gone")
+	world:advance(15)
+	outs = sentKey(world, ann, "out")
+	same(outs[2].racer, "car:" .. cars[1].sid, "then the standing car")
+	same(outs[2].why, "stuck", "stuck")
+end)
+
+World.test("the result, a call-off and leaving the server delete every opponent", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	withClass(ann)
+	world:setConfig("server", "raceTimeLimitMinutes", "1")
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 2, {})
+	world:advance(70)
+	expect(last(world, ann, "result"), "the race ended")
+	for _, s in ipairs(spawned(world, ann)) do same(s.car.deleted, true, "deleted after the result") end
+	world:advance(1)
+	atStart(ann, "cell_tower")
+	request(world, ann, "cell_tower", 1, {})
+	world:as(ann, function() mileage_spotRace.giveUp() end)
+	world:pump()
+	same(spawned(world, ann)[3].car.deleted, true, "deleted when Ann calls it off on the grid")
+	atStart(ann, "rally_track")
+	request(world, ann, "rally_track", 1, {})
+	world:hook(ann, "onBeamMPServerLeave")
+	same(spawned(world, ann)[4].car.deleted, true, "deleted when Ann leaves the server")
+end)
+
+World.test("without the game's class grouping, the opponents are the starter's own model", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	ann.globals.gameplay_vehiclePerformance = false
+	ann.globals.career_modules_vehicleClassGrouping = false
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 2, {})
+	local cars = spawned(world, ann)
+	same(#cars, 2, "two cars")
+	same(cars[1].car.JBeam, "pickup", "Ann's own model")
+	same(cars[2].car.JBeam, "pickup", "both")
+end)
+
+--== the server and the opponents =================================================
+
+World.test("the server times opponents: one that beats Ann is first even when the starter's game hides its finish", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local r = route("highway_race")
+	roadsAt(world, r)
+	withClass(ann)
+	world.opponentSpeed = 60
+	-- Ann's game never reports a finish for its opponents.
+	world.filter = function(m)
+		if m.way == "toServer" and m.name == "mileageSpotRace" and m.data:find('"finished"', 1, true)
+				and m.data:find("car:", 1, true) then
+			return "drop"
+		end
+	end
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 1, {})
+	world:advance(6)
+	driveRoute(world, ann, r, 30)
+	world:advance(2)
+	local result = last(world, ann, "result")
+	expect(result, "the race ended")
+	same(result.places[1].car, true, "the opponent is first")
+	same(result.places[1].name, "Ibishu Pessima", "named by its model")
+	same(result.places[2].name, "Ann", "Ann second")
+	expect(result.places[1].seconds < result.places[2].seconds, "on the server's times")
+	same(result.winner, nil, "no player won")
+	same(result.carWon, true, "a car won")
+	same(result.withheld, "car won", "no prize")
+	local board = world:dataFile("leaderboard.json")
+	same(board and board.wins and board.wins.Ann, nil, "no win for second place")
+end)
+
+World.test("the server takes only cars the starter spawned for the race, as many as it asked for", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local bob = world:join("Bob", 1000, 1)
+	-- Ann's game says ready with a list of its own making.
+	world.filter = function(m)
+		if m.way == "toServer" and m.from == ann.id and m.name == "mileageSpotRace" and m.data:find('"ready"', 1, true)
+				and not m.data:find("forged", 1, true) then
+			return "drop"
+		end
+	end
+	local old = world:spawnCar(ann, "pessima", {pos = {x = 0, y = 0, z = 0}})
+	world:advance(1)
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 1, {})
+	local id = last(world, ann, "grid").id
+	local fresh1 = world:spawnCar(ann, "pessima", {pos = {x = 0, y = 0, z = 0}})
+	local fresh2 = world:spawnCar(ann, "pessima", {pos = {x = 0, y = 0, z = 0}})
+	local function sid(car)
+		for k, s in pairs(world.spawned) do if s.car == car then return k end end
+	end
+	send(world, ann, {ready = {race = id, forged = true, opponents = {
+		{car = bob.id .. "-0", model = "Bob's car"}, {car = ann.id .. "-0", model = "Ann's own"},
+		{car = sid(old), model = "parked before"}, {car = sid(fresh1), model = "one"}, {car = sid(fresh2), model = "two"}}}})
+	local countdown = last(world, ann, "countdown")
+	expect(countdown, "the race starts")
+	same(#countdown.racers, 2, "Ann and one opponent")
+	same(countdown.racers[2].name, "one", "the first car spawned for the race")
+end)
+
+World.test("an out claim for an opponent the server sees driving is ignored; one it sees standing 20 s is out", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local r = route("highway_race")
+	roadsAt(world, r)
+	withClass(ann)
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 2, {})
+	local id = last(world, ann, "countdown").id
+	local cars = spawned(world, ann)
+	world:advance(8)
+	send(world, ann, {out = {race = id, racer = "car:" .. cars[1].sid, why = "stuck"}})
+	world:advance(1)
+	expect(standingsRow(world, ann, "Ibishu Pessima").out == nil, "a car still driving is not out on the game's word")
+	-- The second car stops; Ann's game is told nothing about it here.
+	world.filter = function(m)
+		if m.way == "toServer" and m.data and m.data:find('"out"', 1, true) then return "drop" end
+	end
+	cars[2].car.speed = 0
+	world:advance(21)
+	local rows = last(world, ann, "standings").rows
+	local etk = nil
+	for _, row in ipairs(rows) do if row.name == "ETK 800 Series" then etk = row end end
+	same(etk.out, "stuck", "the server's own reading puts it out")
+end)
+
+World.test("a race spot opponent is never offered for a traffic race, and the server refuses one", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	withClass(ann)
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 1, {})
+	local s = spawned(world, ann)[1]
+	-- Even listed as AI traffic in the game's traffic data, 4 m beside Ann and facing her way.
+	ann.trafficData[s.car.id] = {isAi = true}
+	s.car.pos = {x = ann.car.pos.x + 4, y = ann.car.pos.y, z = ann.car.pos.z}
+	s.car.dir = copy(ann.car.dir)
+	world:advance(1)
+	local cards = world:ui(ann, "MileageAiRace")
+	for _, card in ipairs(cards) do
+		expect(card.phase ~= "available", "the traffic race card never offers the opponent")
+	end
+	world:queue({way = "toServer", from = ann.id, name = "mileageAiRace", data = World.encode({request = {car = s.sid,
+		start = copy(ann.car.pos), finish = {x = ann.car.pos.x, y = ann.car.pos.y + 2500, z = 0}, model = "Ibishu Pessima"}})})
+	world:pump()
+	local refused = world:received(ann, "rxMileageAiRace")
+	expect(refused[#refused].phase == "refused", "the server refuses the request")
+end)
+
+World.test("the starter leaving after the green ends the race with no winner", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	withClass(ann)
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 1, {})
+	world:advance(8)
+	world:leave(ann)
+	world:advance(1)
+	same(world:printedMatching("no winner (starterLeft)"), 1, "ended for everyone")
+end)
+
 World.test("leaving the server ends the race here and releases the car", function(world)
 	local ann = world:join("Ann", 1000, 0)
 	atStart(ann, "highway_race")

@@ -227,15 +227,154 @@ function M.closeSetup()
 	ui({phase = "clear"})
 end
 
+--== the starter's opponents ==================================================
+-- The starter's game spawns cars of its own car's class (the game's class grouping) on
+-- the grid places the server gave, marks them (mileageSpotRacer, which makes them traffic
+-- to every other game), lists them once BeamMP has given each a server id, drives them
+-- through the checkpoints' road nodes at green with the game's race driving at the push
+-- the game gives that class, reports their checkpoints, and deletes them at every ending.
+
+local SPAWN_WAIT_SECONDS = 10
+local STUCK_SPEED, STUCK_SECONDS = 1, 15
+
+-- The cars to race and their push: the game's group for this car's class, or this car's
+-- own model where the game cannot group cars.
+local function opponentCars(count, veh, vid)
+	local cars, aggression = {}, 1
+	local perf, grouping = gameplay_vehiclePerformance, career_modules_vehicleClassGrouping
+	if type(perf) == "table" and type(grouping) == "table" and type(perf.getClassFromVehId) == "function"
+			and type(grouping.generateGroup) == "function" then
+		local ok, data = pcall(perf.getClassFromVehId, vid)
+		local className = ok and type(data) == "table" and (type(data.class) == "table" and data.class.name or data.class)
+		if type(className) == "string" then
+			local okGroup, group = pcall(grouping.generateGroup, className, nil, nil, nil, nil, nil, true, true,
+				data.performanceIndex)
+			for _, entry in ipairs(okGroup and type(group) == "table" and type(group.data) == "table" and group.data or {}) do
+				if type(entry) == "table" and type(entry.model) == "string" then table.insert(cars, entry) end
+			end
+			if type(grouping.getAggressionMultiplier) == "function" then
+				local okPush, push = pcall(grouping.getAggressionMultiplier, className)
+				if okPush and tonumber(push) then aggression = tonumber(push) end
+			end
+		end
+	end
+	if #cars == 0 then cars = {{model = veh.JBeam, config = veh.partConfig}} end
+	local chosen = {}
+	for i = 1, count do chosen[i] = cars[(i - 1) % #cars + 1] end
+	return chosen, aggression
+end
+
+local function spawnOpponent(entry, pose)
+	if type(core_vehicles) ~= "table" or type(core_vehicles.spawnNewVehicle) ~= "function" then return nil end
+	local rot = quatFromDir(vec3(pose.dir.x, pose.dir.y, pose.dir.z), vec3(pose.up.x, pose.up.y, pose.up.z))
+	local ok, veh = pcall(core_vehicles.spawnNewVehicle, entry.model, {config = entry.config, paintName = entry.paintName,
+		pos = vec3(pose.pos.x, pose.pos.y, pose.pos.z), rot = rot, autoEnterVehicle = false})
+	if not ok or not veh then
+		log("W", logTag, "an opponent could not be spawned: " .. tostring(ok and "no car" or veh))
+		return nil
+	end
+	pcall(function() veh:setDynDataFieldbyName("mileageSpotRacer", 0, "true") end)
+	veh:queueLuaCommand("controller.setFreeze(1)")
+	return veh
+end
+
+local function deleteOpponents()
+	for _, opponent in ipairs(race and race.opponents or {}) do
+		local veh = be:getObjectByID(opponent.vid)
+		if veh then
+			local ok, err = pcall(function() veh:delete() end)
+			if not ok then log("E", logTag, "an opponent could not be deleted: " .. tostring(err)) end
+		end
+	end
+	if race then race.opponents = {} end
+end
+
+-- Spawns one car per opponent grid place. Each gets its server id from BeamMP a moment later.
+local function spawnOpponents(poses, veh, vid)
+	local cars, aggression = opponentCars(#poses, veh, vid)
+	race.aggression = aggression
+	race.opponents = {}
+	race.spawnWait = SPAWN_WAIT_SECONDS
+	local c = compat()
+	for i, pose in ipairs(poses) do
+		if isPoint(pose.pos) and isPoint(pose.dir) and isPoint(pose.up) then
+			local car = spawnOpponent(cars[i], pose)
+			if car then
+				table.insert(race.opponents, {vid = car:getID(), name = (c and c.getModelName(cars[i].model)) or cars[i].model,
+					passed = 0, slowFor = 0})
+			end
+		end
+	end
+end
+
+-- The opponents BeamMP has given a server id; true once all have one or the wait is over,
+-- when those without one are deleted.
+local function opponentsListed(dt)
+	local all = true
+	for _, opponent in ipairs(race.opponents) do
+		if not opponent.sid and MPVehicleGE and type(MPVehicleGE.getServerVehicleID) == "function" then
+			opponent.sid = MPVehicleGE.getServerVehicleID(opponent.vid)
+		end
+		if not opponent.sid then all = false end
+	end
+	race.spawnWait = race.spawnWait - dt
+	if not all and race.spawnWait > 0 then return false end
+	local kept = {}
+	for _, opponent in ipairs(race.opponents) do
+		if opponent.sid then
+			opponent.key = "car:" .. opponent.sid
+			table.insert(kept, opponent)
+		else
+			local veh = be:getObjectByID(opponent.vid)
+			if veh then pcall(function() veh:delete() end) end
+		end
+	end
+	race.opponents = kept
+	return true
+end
+
+-- Green: each opponent drives the route's checkpoints, every lap, at its class's push.
+local function driveOpponents()
+	local c = compat()
+	local nodes = {}
+	for _, checkpoint in ipairs(race.route.checkpoints) do
+		local node = c and c.getClosestRoadNode(checkpoint.pos)
+		if node and nodes[#nodes] ~= string.format("%q", tostring(node)) then
+			table.insert(nodes, string.format("%q", tostring(node)))
+		end
+	end
+	for _, opponent in ipairs(race.opponents) do
+		local veh = be:getObjectByID(opponent.vid)
+		if veh then
+			opponent.lastPos = point(veh:getPosition())
+			veh:queueLuaCommand("controller.setFreeze(0)")
+			if #nodes > 0 then
+				veh:queueLuaCommand("ai.driveUsingPath({wpTargetList = {" .. table.concat(nodes, ", ") .. "}, noOfLaps = "
+					.. race.route.laps .. ", aggression = " .. race.aggression .. ", avoidCars = 'on'})")
+				veh:queueLuaCommand("ai.setRacing(true)")
+			end
+		end
+	end
+end
+
 --== the race ================================================================
 
 local function endHere()
 	if race and race.frozen then setFrozen(false) end
+	deleteOpponents()
 	race = nil
 end
 
 local function routeName()
 	return race and race.route and race.route.name or ""
+end
+
+-- The starter says ready once its opponents are listed.
+local function sendReadyWithOpponents()
+	race.listing = false
+	local list = {}
+	for _, opponent in ipairs(race.opponents) do table.insert(list, {car = opponent.sid, model = opponent.name}) end
+	send({ready = {race = race.id, opponents = list}})
 end
 
 -- Moves this car to its grid place and holds it there; the race is under way from now.
@@ -257,12 +396,20 @@ local function onGrid(message)
 			ui({phase = "closed", id = message.id, why = why or "Your car could not be moved to the start."})
 			return
 		end
-		race = {id = message.id, route = route, starter = starter, phase = "grid", passed = 0, offFor = 0}
+		race = {id = message.id, route = route, starter = starter, phase = "grid", passed = 0, offFor = 0, opponents = {}}
 		setup, pending, invite = nil, false, nil
 		setFrozen(true)
+		if starter and type(message.opponentPoses) == "table" and #message.opponentPoses > 0 then
+			spawnOpponents(message.opponentPoses, veh, be:getPlayerVehicleID(0))
+			race.listing = true
+		end
 	end
-	send({ready = {race = race.id, opponents = {}}})
 	ui({phase = "grid", id = race.id, routeName = routeName()})
+	if not race.listing then
+		send({ready = {race = race.id, opponents = {}}})
+	elseif opponentsListed(0) then
+		sendReadyWithOpponents()
+	end
 end
 
 local function onCountdown(message)
@@ -301,28 +448,65 @@ local function racingPanel(nextMetres)
 		nextMetres = nextMetres and math.floor(nextMetres) or nil})
 end
 
+-- The checkpoints a racer (this car, or one of the starter's opponents: state.passed,
+-- state.lastPos) passed between its last position and pos, reported to the server as key.
+-- Returns true at its finish.
+local function passCheckpoints(state, pos, key)
+	local checkpoints = race.route.checkpoints
+	local total = #checkpoints * race.route.laps
+	local last = state.lastPos or pos
+	state.lastPos = pos
+	while state.passed < total do
+		local checkpoint = checkpoints[state.passed % #checkpoints + 1]
+		if not passesAt(last, pos, checkpoint.pos, checkpoint.r) then return false end
+		state.passed = state.passed + 1
+		local lap = math.floor((state.passed - 1) / #checkpoints) + 1
+		local index = (state.passed - 1) % #checkpoints + 1
+		send({progress = {race = race.id, racer = key, checkpoint = index, lap = lap, at = race.elapsed}})
+		if state.passed == total then
+			send({finished = {race = race.id, racer = key, seconds = race.elapsed}})
+			return true
+		end
+	end
+	return false
+end
+
+-- Each opponent's checkpoints; out when its car is gone or stands for STUCK_SECONDS.
+local function watchOpponents(dt)
+	for _, opponent in ipairs(race.opponents) do
+		if not opponent.ended then
+			local veh = be:getObjectByID(opponent.vid)
+			if not veh then
+				opponent.ended = "gone"
+				send({out = {race = race.id, racer = opponent.key, why = "gone"}})
+			else
+				local pos = point(veh:getPosition())
+				local before = opponent.lastPos or pos
+				if passCheckpoints(opponent, pos, opponent.key) then
+					opponent.ended = "finished"
+				elseif dt > 0 then
+					if distance(pos, before) / dt < STUCK_SPEED then opponent.slowFor = opponent.slowFor + dt
+					else opponent.slowFor = 0 end
+					if opponent.slowFor >= STUCK_SECONDS then
+						opponent.ended = "stuck"
+						send({out = {race = race.id, racer = opponent.key, why = "stuck"}})
+					end
+				end
+			end
+		end
+	end
+end
+
 -- This car's own checkpoints, lap by lap, from its last position to where it is now.
 local function checkOwnCar(dt)
 	local veh = playerVehicle()
 	if not veh then return end
 	local pos = point(veh:getPosition())
 	local checkpoints = race.route.checkpoints
-	local total = #checkpoints * race.route.laps
-	local last = race.lastPos or pos
-	race.lastPos = pos
-	while race.passed < total do
-		local checkpoint = checkpoints[race.passed % #checkpoints + 1]
-		if not passesAt(last, pos, checkpoint.pos, checkpoint.r) then break end
-		race.passed = race.passed + 1
-		local lap = math.floor((race.passed - 1) / #checkpoints) + 1
-		local index = (race.passed - 1) % #checkpoints + 1
-		send({progress = {race = race.id, racer = myName(), checkpoint = index, lap = lap, at = race.elapsed}})
-		if race.passed == total then
-			race.ended = "finished"
-			send({finished = {race = race.id, racer = myName(), seconds = race.elapsed}})
-			ui({phase = "finished", id = race.id, routeName = routeName(), elapsed = race.elapsed})
-			return
-		end
+	if passCheckpoints(race, pos, myName()) then
+		race.ended = "finished"
+		ui({phase = "finished", id = race.id, routeName = routeName(), elapsed = race.elapsed})
+		return
 	end
 	local nextPos = checkpoints[race.passed % #checkpoints + 1].pos
 	local away = distance(pos, nextPos)
@@ -341,6 +525,10 @@ local function checkOwnCar(dt)
 end
 
 local function updateRace(dt)
+	if race.phase == "grid" then
+		if race.listing and opponentsListed(dt) then sendReadyWithOpponents() end
+		return
+	end
 	if race.phase == "countdown" and race.countdownLeft then
 		local before = math.ceil(race.countdownLeft)
 		race.countdownLeft = race.countdownLeft - dt
@@ -351,6 +539,7 @@ local function updateRace(dt)
 			local veh = playerVehicle()
 			race.lastPos = veh and point(veh:getPosition()) or nil
 			setFrozen(false)
+			driveOpponents()
 			ui({phase = "go", id = race.id, routeName = routeName()})
 		elseif math.ceil(race.countdownLeft) ~= before then
 			ui({phase = "countdown", id = race.id, routeName = routeName(), count = math.ceil(race.countdownLeft),
@@ -361,6 +550,7 @@ local function updateRace(dt)
 	if race.phase ~= "racing" then return end
 	race.elapsed = race.elapsed + dt
 	if not race.ended then checkOwnCar(dt) end
+	watchOpponents(dt)
 end
 
 --- Gives up the race under way: before the green the starter calls it off for everyone.
@@ -503,6 +693,10 @@ end
 
 function M.onBeamMPServerLeave()
 	reset()
+end
+
+function M.onExtensionUnloaded()
+	deleteOpponents()
 end
 
 function M.onExtensionLoaded()
