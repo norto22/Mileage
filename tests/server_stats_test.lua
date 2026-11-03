@@ -322,3 +322,127 @@ test("Stats prints while a car's owner is no longer in the player list", functio
 	same(countLines(lines, "Players: 1"), 1, "players line")
 	same(countLines(lines, "player0 (0): 1 cars (1 shown), 0 traffic or parked (0 shown)"), 1, "player 0's line")
 end)
+
+--== game cost reports (mileagePerfReport) ===================================
+
+local function json(v)
+	if type(v) == "table" then
+		if #v > 0 then
+			local parts = {}
+			for _, x in ipairs(v) do table.insert(parts, json(x)) end
+			return "[" .. table.concat(parts, ",") .. "]"
+		end
+		local keys = {}
+		for k in pairs(v) do table.insert(keys, k) end
+		table.sort(keys)
+		local parts = {}
+		for _, k in ipairs(keys) do table.insert(parts, '"' .. k .. '":' .. json(v[k])) end
+		return "{" .. table.concat(parts, ",") .. "}"
+	elseif type(v) == "string" then
+		return '"' .. v .. '"'
+	end
+	return tostring(v)
+end
+
+-- A report as a game sends it, as JSON text; fields replace the defaults.
+local function perfJson(fields)
+	local r = {v = 1, s = 30, frames = 1800, avgMs = 16.4, worstMs = 212, hitches = 2, built = 3,
+		sent = {own = {pos = {1500, 1500}, elec = {300, 300}, inp = {600, 600}},
+			traffic = {pos = {7500, 3000}, elec = {2000, 700}, inp = {4000, 1500}}},
+		recv = {pos = 9000, elec = 1200, inp = 3000}, near = {1, 3},
+		cars = {own = 2, ownTraffic = 6, ownParked = 8, remote = 3, remoteTraffic = 14, hidden = 4}}
+	for k, v in pairs(fields or {}) do r[k] = v end
+	return json(r)
+end
+
+-- The Stats line of a player's last report.
+local function costLine(lines, id)
+	for _, line in ipairs(lines) do
+		if line:find("^  player" .. id .. " %(" .. id .. "%): ") and line:find(" avg ", 1, true) then return line end
+	end
+	return nil
+end
+
+test("a game's report shows in Stats as its own line with frame time, sends, receives and cars", function()
+	newServer({0, 1})
+	mileagePerfReport(1, perfJson())
+	local lines = statsLines()
+	local line = costLine(lines, 1)
+	expect(line, "no cost line for player 1")
+	for _, part in ipairs({"30 s", "avg 16.4 ms", "worst 212 ms", "2 over 100 ms",
+		"own pos 1500/1500 elec 300/300 inp 600/600", "traffic pos 3000/7500 elec 700/2000 inp 1500/4000",
+		"received pos 9000 elec 1200 inp 3000", "built 3", "players near 1-3",
+		"cars own 2, driving traffic 6, parked 8, others' 3, others' traffic 14, hidden 4"}) do
+		expect(line:find(part, 1, true), "missing '" .. part .. "' in: " .. line)
+	end
+	same(costLine(lines, 0), nil, "a player with no report has no cost line")
+	same(row(lines, "perf").window.received, 1, "perf row")
+end)
+
+test("the cars of every fresh report add up to driving traffic, parked and own", function()
+	newServer({0, 1})
+	mileagePerfReport(0, perfJson())
+	mileagePerfReport(1, perfJson({cars = {own = 1, ownTraffic = 2, ownParked = 3}}))
+	same(countLines(statsLines(), "Cars by kind (games' reports): 8 driving traffic, 11 parked, 3 players' own"), 1,
+		"split line")
+end)
+
+test("a second report within 20 s is dropped, one after 20 s replaces the first", function()
+	newServer({0, 1})
+	mileagePerfReport(1, perfJson())
+	server.now = 19
+	mileagePerfReport(1, perfJson({worstMs = 999}))
+	expect(costLine(statsLines(), 1):find("worst 212 ms", 1, true), "the second report was taken")
+	server.now = 20
+	mileagePerfReport(1, perfJson({worstMs = 999}))
+	expect(costLine(statsLines(), 1):find("worst 999 ms", 1, true), "the report after 20 s was not taken")
+	same(row(statsLines(), "perf").window.received, 3, "every report counted as received")
+end)
+
+test("a report over 2048 bytes, text that is not JSON, a list and nothing at all are ignored", function()
+	newServer({0, 1})
+	local big = perfJson():sub(1, -2) .. ',"pad":"' .. string.rep("x", 2048) .. '"}'
+	for _, data in ipairs({big, "not json", "[1,2,3]", ""}) do
+		local ok, err = pcall(mileagePerfReport, 1, data)
+		expect(ok, "raised: " .. tostring(err))
+	end
+	-- What BeamMP's decoder makes of a list, and a report of another version.
+	local realDecode = Util.JsonDecode
+	Util.JsonDecode = function() return {1, 2, 3} end
+	mileagePerfReport(1, "[1,2,3]")
+	Util.JsonDecode = realDecode
+	mileagePerfReport(1, perfJson({v = 2}))
+	for _, data in ipairs({false, 42}) do
+		local ok, err = pcall(mileagePerfReport, 1, data)
+		expect(ok, "raised: " .. tostring(err))
+	end
+	same(costLine(statsLines(), 1), nil, "no cost line")
+	same(countLines(statsLines(), "Game cost: no report in the last 90 s"), 1, "no-report line")
+end)
+
+test("fields of the wrong type print as a dash and numbers out of range are clamped", function()
+	newServer({0, 1})
+	mileagePerfReport(1, perfJson({avgMs = "fast", worstMs = 1e12, hitches = -5, near = {1},
+		sent = {own = {pos = {"a", 1}}, traffic = "lots"}, recv = {pos = 1e15}, cars = {own = "two"}}))
+	local line = costLine(statsLines(), 1)
+	expect(line, "no cost line")
+	for _, part in ipairs({"avg - ms", "worst 60000 ms", "0 over 100 ms", "players near -", "own pos - elec - inp -",
+		"traffic pos - elec - inp -", "received pos 10000000 elec - inp -", "cars own -, driving traffic -"}) do
+		expect(line:find(part, 1, true), "missing '" .. part .. "' in: " .. line)
+	end
+end)
+
+test("a report older than 90 s is not printed and a player who leaves loses theirs", function()
+	newServer({0, 1, 2})
+	mileagePerfReport(1, perfJson())
+	mileagePerfReport(2, perfJson())
+	server.now = 91
+	mileagePerfReport(2, perfJson())
+	local lines = statsLines()
+	same(costLine(lines, 1), nil, "player 1's 91 s old report")
+	expect(costLine(lines, 2), "player 2's fresh report")
+	onPlayerDisconnectHandler(2)
+	same(costLine(statsLines(), 2), nil, "player 2's report after leaving")
+	mileagePerfReport(2, perfJson())
+	expect(costLine(statsLines(), 2), "a player who joins again is not held to the old report's 20 s")
+end)

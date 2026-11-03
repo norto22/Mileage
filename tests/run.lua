@@ -4,6 +4,7 @@
 --
 --   luajit tests/run.lua       (from the repository root)
 --   lua5.4 tests/run.lua
+--   luajit tests/run.lua tests/position_rate_test.lua   (only the files named)
 --
 -- Each test file calls test(name, fn); fn fails by raising an error (expect, same).
 
@@ -28,6 +29,7 @@ local files = {
 	"tests/server_stats_test.lua",
 	"tests/traffic_share_test.lua",
 	"tests/position_rate_test.lua",
+	"tests/perf_meter_test.lua",
 	"tests/load_session_test.lua",
 	"tests/ui_apps_layout_test.lua",
 	"tests/transfers_test.lua",
@@ -46,6 +48,11 @@ local files = {
 	"tests/paint_hold_test.lua",
 	"tests/lua_syntax_test.lua",
 }
+
+if arg and arg[1] then
+	files = {}
+	for i = 1, #arg do files[i] = arg[i] end
+end
 
 local passed, failed = 0, 0
 local current = nil

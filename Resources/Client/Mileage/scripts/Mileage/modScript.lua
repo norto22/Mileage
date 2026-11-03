@@ -45,6 +45,8 @@ loadPersistent('mileageEnabler')
 loadPersistent('mileage/connectionWatch')
 loadPersistent('mileage/damageSync')
 loadPersistent('mileage/positionRate')
+-- The cost meter: the send checks above and spawn pacing tell it what they let through.
+loadPersistent('mileage/perfMeter')
 loadPersistent('mileageUIApps')
 loadPersistent('mileage/transfers')
 loadPersistent('mileagePlayerPayments')
