@@ -841,3 +841,127 @@ test("the game's place caches are cleared once each time the markers come or go,
 	same(activeRunId(), nil, "the run is over")
 	same(world.poiClears, 3, "clears once the run is over")
 end)
+
+--== edges: malformed notices, boundaries and the error paths ==================
+
+test("a wait notice outside 1 to 10 s, with no time, or while not at the strip shows nothing; 10 s and 1 s show", function()
+	newWorld({leader = 2})
+	runTo(1)
+	fromPlayer(2, "mileageDragWait", {stripId = "A", secondsLeft = 0})
+	fromPlayer(2, "mileageDragWait", {stripId = "A", secondsLeft = 11})
+	fromPlayer(2, "mileageDragWait", {stripId = "A", secondsLeft = -3})
+	fromPlayer(2, "mileageDragWait", {stripId = "A"})
+	same(waitMessages(), "", "wait messages from out-of-range notices")
+	fromPlayer(2, "mileageDragWait", {stripId = "A", secondsLeft = 10})
+	fromPlayer(2, "mileageDragWait", {stripId = "A", secondsLeft = 1})
+	same(waitMessages(), "10,1", "wait messages at the bounds")
+	world.pos = {0, 500, 0}
+	runTo(2)
+	world.flashes = {}
+	fromPlayer(2, "mileageDragWait", {stripId = "A", secondsLeft = 5})
+	same(waitMessages(), "", "wait messages after driving away from the strip")
+end)
+
+test("a malformed cancel from the strip's leader (no run id, no strip, a strip that is not text) changes nothing", function()
+	newWorld({leader = 2})
+	runTo(1)
+	runFromLeader("A-5", {{1, 1}, {2, 2}})
+	world.cleared = 0
+	fromPlayer(2, "mileageDragCancel", {stripId = "A"})
+	fromPlayer(2, "mileageDragCancel", {raceId = "A-5"})
+	fromPlayer(2, "mileageDragCancel", {stripId = 5, raceId = "A-5"})
+	fromPlayer(2, "mileageDragCancel", nil)
+	same(world.cleared, 0, "displays taken down")
+	same(activeRunId(), "A-5", "run after the malformed cancels")
+end)
+
+test("a cancel from the strip's leader after the result is built leaves the timeslip up", function()
+	newWorld({leader = 2})
+	runTo(1)
+	runFromLeader("A-5", {{1, 1}, {2, 2}})
+	gameplay_drag_core.getRaceState("A-5").finishTimes = {[1] = 11.2, [2] = 11.9}
+	world.drag.onDragMpTimeslipRequested()
+	same(world.drag.isRaceFinalized(), true, "result built")
+	world.cleared = 0
+	fromPlayer(2, "mileageDragCancel", {stripId = "A", raceId = "A-5"})
+	same(world.cleared, 0, "displays taken down")
+	same(world.drag.isRaceFinalized(), true, "result still built")
+end)
+
+test("a lone player who leaves during the wait and comes back waits the full 10 s again", function()
+	newWorld()
+	world.pos = {0, 500, 0}
+	runTo(1)
+	otherAt(2, 2)
+	runTo(6)
+	otherLeaves(2)
+	runTo(7)
+	local before = #wireNamed("mileageDragWait")
+	otherAt(2, 2)
+	runTo(7.5)
+	local notices = wireNamed("mileageDragWait")
+	same(notices[before + 1] and notices[before + 1].data.secondsLeft, 10, "first notice after coming back")
+	runTo(17)
+	same(#world.sessions, 0, "runs before 10 s after coming back")
+	runTo(18)
+	same(#world.sessions, 1, "runs by 10.5 s after coming back")
+end)
+
+test("a player sat out for not staging who moves less than 5 m stays out; 5 m or more lets them back", function()
+	newWorld()
+	runTo(11)
+	local started = world.now
+	runTo(started + 31)
+	same(world.lobby.getRun("A"), nil, "run after the stage window")
+	world.pos = {0, 4.5, 0}
+	runTo(started + 55)
+	same(#world.sessions, 1, "runs after moving 4.5 m")
+	world.pos = {0, 5.5, 0}
+	runTo(started + 75)
+	same(#world.sessions, 2, "runs after moving 5.5 m")
+end)
+
+test("the real-car check with no run id, or for a run this machine does not know, warns nothing and ends nothing", function()
+	newWorld()
+	runTo(11)
+	local run = world.lobby.getRun("A")
+	expect(run ~= nil, "a run is up")
+	gameplay_drag_core.getData().racers = {}
+	world.lobby.checkRunStart(nil)
+	world.lobby.checkRunStart("Z-1")
+	same(#warnings(), 0, "warnings")
+	same(world.lobby.getRun("A"), run, "run")
+	world.lobby.checkRunStart(run.raceId)
+	same(#warnings(), 1, "warnings for this run once the car is gone")
+	same(world.lobby.getRun("A"), nil, "run after the check")
+end)
+
+test("a run out of time with no result: 12 s on, the lights come down here and the other player gets a closing notice", function()
+	twoPlayersRunning()
+	local green = world.lobby.getRun("A").since
+	world.cleared = 0
+	runTo(green + 60.5)
+	same(world.lobby.getRun("A").step, "result", "step after 60 s")
+	same(world.cleared, 0, "displays taken down before the result's 12 s")
+	same(#wireNamed("mileageDragCancel"), 0, "notices before the result's 12 s")
+	runTo(green + 73)
+	same(world.lobby.getRun("A"), nil, "run after the result's 12 s")
+	same(world.cleared, 1, "displays taken down")
+	local cancels = wireNamed("mileageDragCancel")
+	same(#cancels, 1, "closing notices sent")
+	same(recipients(cancels[1]), "2", "recipients")
+end)
+
+test("lane markers: none for a lane with no stage line, one for a lane with no end line, none on a level with no strips yet", function()
+	newWorld()
+	world.strips = {}
+	same(#places(), 0, "places with no strips")
+	local s = stripData("B")
+	s.strip.lanes[1].waypoints.stage = nil
+	s.strip.lanes[2].waypoints.endLine = nil
+	world.strips = {s}
+	local list = places()
+	same(#list, 1, "places")
+	same(list[1].markerInfo.missionMarker.pos.x, 4, "the marker is lane 2's")
+	expect(list[1].markerInfo.missionMarker.rot ~= nil, "the marker still has a facing")
+end)
