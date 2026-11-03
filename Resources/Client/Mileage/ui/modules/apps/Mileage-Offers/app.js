@@ -413,6 +413,10 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 		var note = s.note ? String(s.note) : (solo ?
 			"No opponents and nobody invited: this run sets a time for the leaderboard but pays no prize." :
 			"Friends who join are moved onto the grid beside you.");
+		if (!s.note && s.untested) {
+			note = "Your car changed since its last performance test, or was never tested, so its rivals may not " +
+				"match it until it is tested again. " + note;
+		}
 		if (s.allowed === false) note = "Race spots are off on this server.";
 		return {
 			title: "Race spot: " + String(s.spotName || ""),
@@ -546,7 +550,7 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 			spot: data.spot, spotName: data.spotName, routes: routes, allowed: data.allowed,
 			routeIndex: before ? Math.min(before.routeIndex, Math.max(0, routes.length - 1)) : 0,
 			opponents: before ? Math.min(before.opponents, max) : Math.min(3, max), opponentsMax: max,
-			prize: data.prize, againIn: data.againIn, note: data.note, pending: data.pending,
+			prize: data.prize, againIn: data.againIn, note: data.note, pending: data.pending, untested: data.untested === true,
 			players: (Array.isArray(data.players) ? data.players : []).map(function (p) {
 				var name = String(p.name || "");
 				return {name: name, busy: p.busy === true, on: p.busy !== true && picks[name] === true};

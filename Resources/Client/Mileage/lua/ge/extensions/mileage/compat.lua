@@ -389,6 +389,52 @@ function M.getModelName(jbeam)
 	return type(jbeam) == "string" and jbeam or nil
 end
 
+-- {class = name, index = performance index} from one of the game's class answers.
+local function classOf(data)
+	if type(data) ~= "table" then return nil end
+	local name = type(data.class) == "table" and data.class.name or data.class
+	if type(name) ~= "string" then return nil end
+	return {class = name, index = tonumber(data.performanceIndex)}
+end
+
+local function call(fn, ...)
+	if not fn then return nil end
+	local ok, result = pcall(fn, ...)
+	return ok and result or nil
+end
+
+-- The performance class of the car with game vehicle id vid as it is now, upgrades
+-- counted, from the career's own garage tests of that car: {class, index, tested}.
+-- tested is "current" (its latest test still holds), "changed" (it changed since, so this
+-- is its newest earlier result), "never" (a career car never tested: the class it was
+-- bought as) or "stock" (not a career car: the class it was bought as). nil when the game
+-- cannot tell.
+function M.carPerformanceClass(vid)
+	local inventory = career_modules_inventory
+	local invId = call(pick(inventory, "getInventoryIdFromVehicleId"), vid)
+	if invId then
+		local current = classOf(call(pick(career_modules_vehiclePerformance, "getVehicleClass"), invId))
+		if current then
+			current.tested = "current"
+			return current
+		end
+		local vehicles = call((pick(inventory, "getVehicles")))
+		local vehicle = type(vehicles) == "table" and vehicles[invId]
+		local history = type(vehicle) == "table" and vehicle.performanceHistory
+		local fromData = pick(gameplay_vehiclePerformance, "getClassFromData")
+		if type(history) == "table" and history[1] then
+			local earlier = classOf(call(fromData, history[1]))
+			if earlier then
+				earlier.tested = "changed"
+				return earlier
+			end
+		end
+	end
+	local stock = classOf(call(pick(gameplay_vehiclePerformance, "getClassFromVehId"), vid))
+	if stock then stock.tested = invId and "never" or "stock" end
+	return stock
+end
+
 -- The control bound to a key action ("j"), or nil when none is.
 function M.getControlForAction(action)
 	local fn = pick(core_input_bindings, "getControlForAction")

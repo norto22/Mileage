@@ -184,9 +184,15 @@ local function setupCard()
 		end
 	end
 	local spotRoute = routeById(setup.spot)
+	-- A car changed since its last performance test, or never tested, gets rivals from an
+	-- older result or the class it was bought as.
+	local c = compat()
+	local _, vid = playerVehicle()
+	local class = c and vid and c.carPerformanceClass(vid)
 	ui({phase = "setup", spot = setup.spot, spotName = spotRoute and spotRoute.name or setup.spot, routes = list,
 		allowed = status.allowed, prize = status.prize, againIn = prizeAgainIn(), opponentsMax = status.opponentsMax,
-		players = players, note = setup.note, pending = pending})
+		players = players, note = setup.note, pending = pending,
+		untested = class ~= nil and (class.tested == "changed" or class.tested == "never")})
 end
 
 --- Opens the set-up card for a spot (the game's prompt at its start line), and asks the
@@ -243,18 +249,19 @@ local SPAWN_WAIT_SECONDS = 10
 local BEYOND_METRES = 250
 local STUCK_SPEED, STUCK_SECONDS = 1, 15
 
--- The cars to race and their push: the game's group for this car's class, or this car's
--- own model where the game cannot group cars.
+-- The cars to race and their push: the game's group for the class of this car as it is now
+-- (its latest performance test, upgrades counted), or this car's own model where the game
+-- cannot group cars.
 local function opponentCars(count, veh, vid)
 	local cars, aggression = {}, 1
-	local perf, grouping = gameplay_vehiclePerformance, career_modules_vehicleClassGrouping
-	if type(perf) == "table" and type(grouping) == "table" and type(perf.getClassFromVehId) == "function"
-			and type(grouping.generateGroup) == "function" then
-		local ok, data = pcall(perf.getClassFromVehId, vid)
-		local className = ok and type(data) == "table" and (type(data.class) == "table" and data.class.name or data.class)
+	local grouping = career_modules_vehicleClassGrouping
+	local c = compat()
+	if c and type(grouping) == "table" and type(grouping.generateGroup) == "function" then
+		local data = c.carPerformanceClass(vid)
+		local className = data and data.class
 		if type(className) == "string" then
 			local okGroup, group = pcall(grouping.generateGroup, className, nil, nil, nil, nil, nil, true, true,
-				data.performanceIndex)
+				data.index)
 			for _, entry in ipairs(okGroup and type(group) == "table" and type(group.data) == "table" and group.data or {}) do
 				if type(entry) == "table" and type(entry.model) == "string" then table.insert(cars, entry) end
 			end

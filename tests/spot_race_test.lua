@@ -665,6 +665,37 @@ World.test("an upgraded starter whose latest test is class S gets opponents grou
 	same(ann.groupAsked.index, 92, "near that test's performance index")
 end)
 
+World.test("a car changed since its test races on its newest earlier result; one never tested on its stock class", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	withTests(ann, nil, {{class = "A", index = 71}, {class = "B", index = 55}})
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 1, {})
+	same(ann.groupAsked.class .. " " .. ann.groupAsked.index, "A 71", "the newest earlier result")
+	world:as(ann, function() mileage_spotRace.giveUp() end)
+	world:pump()
+	withTests(ann, nil, nil)
+	atStart(ann, "cell_tower")
+	request(world, ann, "cell_tower", 1, {})
+	same(ann.groupAsked.class .. " " .. ann.groupAsked.index, "E 18", "the class it was bought as")
+end)
+
+World.test("the set-up card says the rivals may not match a car changed since its test, or never tested", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	withTests(ann, {class = "S", index = 92})
+	world:as(ann, function() mileage_spotRace.openSetup("city_race_1") end)
+	same(lastCard(world, ann, "setup").untested, false, "a current test: nothing to say")
+	withTests(ann, nil, {{class = "S", index = 92}})
+	world:as(ann, function() mileage_spotRace.openSetup("city_race_1") end)
+	same(lastCard(world, ann, "setup").untested, true, "changed since its test")
+	withTests(ann, nil, nil)
+	world:as(ann, function() mileage_spotRace.openSetup("city_race_1") end)
+	same(lastCard(world, ann, "setup").untested, true, "never tested")
+	ann.globals.career_modules_inventory = false
+	ann.globals.career_modules_vehiclePerformance = false
+	world:as(ann, function() mileage_spotRace.openSetup("city_race_1") end)
+	same(lastCard(world, ann, "setup").untested, false, "not a career car: nothing to say")
+end)
+
 local function spawned(world, p)
 	local list = {}
 	for _, s in pairs(world.spawned) do

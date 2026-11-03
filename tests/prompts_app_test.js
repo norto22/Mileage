@@ -539,6 +539,18 @@ test("the opponents stay within 0 and the server's maximum; none and nobody invi
 	assert.ok(rowsOf(scope.spot.view).includes("Prize: None on this server"));
 });
 
+test("a car changed since its last performance test is told its rivals may not match; a tested one is not", () => {
+	const {scope} = load();
+	scope.emit("MileageSpotRace", Object.assign({}, SETUP, {untested: true}));
+	assert.ok(scope.spot.view.note.startsWith("Your car changed since its last performance test, or was never " +
+		"tested, so its rivals may not match it until it is tested again."), scope.spot.view.note);
+	assert.ok(scope.spot.view.note.includes("Friends who join"), "the usual note still follows");
+	scope.emit("MileageSpotRace", Object.assign({}, SETUP, {untested: false}));
+	assert.ok(!scope.spot.view.note.includes("performance test"));
+	scope.emit("MileageSpotRace", Object.assign({}, SETUP, {untested: true, note: "Drive into the start marker first."}));
+	assert.strictEqual(scope.spot.view.note, "Drive into the start marker first.", "a reason it cannot start comes alone");
+});
+
 test("the race track's card offers its layouts and keeps the choice when the card is sent again", () => {
 	const {scope, lua} = load();
 	const track = Object.assign({}, SETUP, {spot: "race_track", spotName: "Race Track", routes: [
