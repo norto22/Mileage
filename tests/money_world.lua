@@ -695,7 +695,45 @@ function World:loadGame(p)
 			return {getRandomPathG = function(_, node) return {node, node .. "+1", node .. "+2"} end}
 		end,
 	}
-	p.globals.gameplay_traffic = {getTrafficData = function() return p.trafficData end}
+	-- The game's traffic and parked car amounts (p.amounts: road and parked as set, roadCars
+	-- and parkedCars as spawned; every set goes to p.amountsSet) and its vehicle pool, which
+	-- holds every traffic car until one is taken out (p.outOfPool).
+	p.amounts = p.amounts or {road = math.huge, parked = math.huge, roadCars = 0, parkedCars = 0}
+	p.amountsSet, p.outOfPool = p.amountsSet or {}, p.outOfPool or {}
+	p.globals.gameplay_traffic = {getTrafficData = function() return p.trafficData end,
+		getTrafficVars = function() return {activeAmount = p.amounts.road} end,
+		getNumOfTraffic = function(activeOnly)
+			return activeOnly and math.min(p.amounts.road, p.amounts.roadCars) or p.amounts.roadCars
+		end,
+		setActiveAmount = function(n)
+			p.amounts.road = n
+			table.insert(p.amountsSet, "road " .. tostring(n))
+		end}
+	p.globals.gameplay_parking = {
+		getParkingVars = function() return {activeAmount = p.amounts.parked} end,
+		getParkedCarsAmount = function(activeOnly)
+			return activeOnly and math.min(p.amounts.parked, p.amounts.parkedCars) or p.amounts.parkedCars
+		end,
+		setActiveAmount = function(n)
+			p.amounts.parked = n
+			table.insert(p.amountsSet, "parked " .. tostring(n))
+		end}
+	local pool = {name = "autoTraffic"}
+	function pool:removeVeh(id)
+		if p.outOfPool[id] then return false end
+		p.outOfPool[id] = true
+		table.insert(p.amountsSet, "out " .. id)
+		return true
+	end
+	function pool:insertVeh(id, forceInsert)
+		p.outOfPool[id] = nil
+		table.insert(p.amountsSet, "in " .. id .. (forceInsert and " active" or ""))
+		return true
+	end
+	p.globals.core_vehicleActivePooling = {getPoolOfVeh = function(id)
+		if p.trafficData[id] and not p.outOfPool[id] then return pool, true end
+		return nil
+	end}
 	-- The game's place list and marker caches, and its prompt at a marker.
 	p.poiClears, p.markerClears, p.promptCloses = p.poiClears or 0, p.markerClears or 0, p.promptCloses or 0
 	p.globals.gameplay_rawPois = {clear = function() p.poiClears = p.poiClears + 1 end}

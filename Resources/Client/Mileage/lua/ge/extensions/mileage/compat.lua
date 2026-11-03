@@ -375,6 +375,86 @@ function M.getRoadBeyond(node, dir, metres)
 	return {}
 end
 
+--== traffic during a race spot race =========================================
+-- A race spot race thins this game's own traffic and parked cars with the game's own
+-- active amounts, which put the rest in its vehicle pool, hidden; police cars are taken
+-- out of that pool for the race so none is hidden. Each returns nil (or does nothing) when
+-- the game lacks it, and the race runs with traffic as it is.
+
+local THIN_CONSEQUENCE = "traffic is not thinned during a race spot race"
+
+-- fn(...)'s first result, or nil when fn is missing or fails.
+local function call(fn, ...)
+	if not fn then return nil end
+	local ok, result = pcall(fn, ...)
+	return ok and result or nil
+end
+
+-- {road, parked}: the active amounts as set (nil where the game cannot tell), and
+-- activeRoad, activeParked: how many of each are active now. nil when neither is known.
+function M.getTrafficAmounts()
+	local roadVars = pickOrWarn(gameplay_traffic, "gameplay_traffic", "getTrafficVars", THIN_CONSEQUENCE)
+	local roadCount = pickOrWarn(gameplay_traffic, "gameplay_traffic", "getNumOfTraffic", THIN_CONSEQUENCE)
+	local parkedVars = pickOrWarn(gameplay_parking, "gameplay_parking", "getParkingVars", THIN_CONSEQUENCE)
+	local parkedCount = pickOrWarn(gameplay_parking, "gameplay_parking", "getParkedCarsAmount", THIN_CONSEQUENCE)
+	local amounts = {}
+	local vars, n = call(roadVars), call(roadCount, true)
+	if type(vars) == "table" and tonumber(vars.activeAmount) and tonumber(n) then
+		amounts.road, amounts.activeRoad = tonumber(vars.activeAmount), tonumber(n)
+	end
+	vars, n = call(parkedVars), call(parkedCount, true)
+	if type(vars) == "table" and tonumber(vars.activeAmount) and tonumber(n) then
+		amounts.parked, amounts.activeParked = tonumber(vars.activeAmount), tonumber(n)
+	end
+	if not amounts.road and not amounts.parked then return nil end
+	return amounts
+end
+
+-- Sets the active traffic and parked amounts; a nil one is left as it is.
+function M.setTrafficAmounts(road, parked)
+	local setRoad = pickOrWarn(gameplay_traffic, "gameplay_traffic", "setActiveAmount", THIN_CONSEQUENCE)
+	local setParked = pickOrWarn(gameplay_parking, "gameplay_parking", "setActiveAmount", THIN_CONSEQUENCE)
+	for _, set in ipairs({{setRoad, road}, {setParked, parked}}) do
+		if set[1] and set[2] then
+			local ok, err = pcall(set[1], set[2])
+			if not ok then log("E", "mileage.compat", "setActiveAmount failed: " .. tostring(err)) end
+		end
+	end
+end
+
+-- The game vehicle ids of this game's police traffic cars.
+function M.getPoliceCars()
+	local data = M.getTrafficData()
+	local ids = {}
+	for id, veh in pairs(type(data) == "table" and data or {}) do
+		local role = type(veh) == "table" and (veh.roleName or (type(veh.role) == "table" and veh.role.name))
+		if role == "police" then table.insert(ids, id) end
+	end
+	table.sort(ids)
+	return ids
+end
+
+-- Takes the car with game vehicle id out of the vehicle pool it is active in, so a lower
+-- active amount never hides it. Returns the pool to put it back in, or nil.
+function M.takeOutOfPool(id)
+	local fn = pick(core_vehicleActivePooling, "getPoolOfVeh")
+	if not fn then return nil end
+	local ok, pool, active = pcall(fn, id)
+	if not ok or type(pool) ~= "table" or not active then return nil end
+	local removed, err = pcall(function() return pool:removeVeh(id) end)
+	if not removed then
+		log("E", "mileage.compat", "a police car could not be held out of the traffic pool: " .. tostring(err))
+		return nil
+	end
+	return err and pool or nil
+end
+
+-- Puts a car taken out with takeOutOfPool back, active.
+function M.putBackInPool(pool, id)
+	local ok, err = pcall(function() return pool:insertVeh(id, true) end)
+	if not ok then log("E", "mileage.compat", "a police car could not go back into the traffic pool: " .. tostring(err)) end
+end
+
 -- The model's name as the game shows it ("Ibishu Pessima"), or the model key.
 function M.getModelName(jbeam)
 	local fn = pick(core_vehicles, "getModel")
@@ -395,12 +475,6 @@ local function classOf(data)
 	local name = type(data.class) == "table" and data.class.name or data.class
 	if type(name) ~= "string" then return nil end
 	return {class = name, index = tonumber(data.performanceIndex)}
-end
-
-local function call(fn, ...)
-	if not fn then return nil end
-	local ok, result = pcall(fn, ...)
-	return ok and result or nil
 end
 
 -- The performance class of the car with game vehicle id vid as it is now, upgrades

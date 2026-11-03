@@ -867,6 +867,86 @@ World.test("without the game's class grouping, the opponents are the starter's o
 	same(cars[2].car.JBeam, "pickup", "both")
 end)
 
+--== traffic during the race =======================================================
+
+-- p's game has road traffic cars (police of them police) and parked cars, all active.
+local function withTraffic(world, p, road, police, parked)
+	p.amounts = {road = road, parked = parked, roadCars = road, parkedCars = parked}
+	local ids = {}
+	for i = 1, police do
+		local t = world:giveTraffic(p, {x = 5000 + i * 10, y = 5000})
+		t.entry.roleName = "police"
+		table.insert(ids, t.car.id)
+	end
+	p.amountsSet = {}
+	return ids
+end
+
+World.test("at the green each racer's game halves its traffic and parked cars, keeping its police on the road", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local bob = world:join("Bob", 1000, 1)
+	local police = withTraffic(world, ann, 9, 2, 6)
+	withTraffic(world, bob, 8, 0, 5)
+	withClass(ann)
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 1, {"Bob"})
+	local invite = last(world, bob, "invite")
+	world:as(bob, function() mileage_spotRace.join(invite.id) end)
+	world:pump()
+	world:advance(3)
+	same(#ann.amountsSet + #bob.amountsSet, 0, "nothing changes before the green")
+	world:advance(4)
+	same(table.concat(ann.amountsSet, ", "), "out " .. police[1] .. ", out " .. police[2] .. ", road 3, parked 3",
+		"the starter's police out of the pool, then 5 of 9 on the road with them, 3 of 6 parked")
+	same(table.concat(bob.amountsSet, ", "), "road 4, parked 3", "a joined player's game too: 4 of 8, 3 of 5")
+	world:advance(5)
+	same(#ann.amountsSet, 4, "once a race")
+	world:as(ann, function() mileage_spotRace.giveUp() end)
+	world:as(bob, function() mileage_spotRace.giveUp() end)
+	world:pump()
+	same(table.concat(bob.amountsSet, ", "), "road 4, parked 3, road 8, parked 5",
+		"a racer whose own race is over gets its traffic back at once")
+	same(#ann.amountsSet, 4, "the starter's opponents still race, so its traffic stays thin")
+	-- Its opponent has no road to drive here, so it stands and is out as stuck after 15 s.
+	world:advance(16)
+	same(#ann.amountsSet, 8, "back once its last opponent is out too")
+	world:advance(70)
+	expect(last(world, ann, "result"), "the race is over")
+	same(table.concat(ann.amountsSet, ", "), "out " .. police[1] .. ", out " .. police[2] .. ", road 3, parked 3, in " ..
+		police[1] .. " active, in " .. police[2] .. " active, road 9, parked 6",
+		"at the result the police go back into the pool, then the amounts")
+end)
+
+World.test("every ending puts the traffic back: a finish, leaving the route and leaving the server", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	withTraffic(world, ann, 6, 0, 4)
+	local r = route("highway_race")
+	soloToGreen(world, ann)
+	same(table.concat(ann.amountsSet, ", "), "road 3, parked 2", "thinned at the green")
+	driveRoute(world, ann, r, 40)
+	world:advance(1)
+	same(table.concat(ann.amountsSet, ", "), "road 3, parked 2, road 6, parked 4", "back at the finish")
+	ann.amountsSet = {}
+	soloToGreen(world, ann)
+	local g = r.grid.pos
+	driveTo(world, ann, {x = g.x - r.grid.dir.y * 1500, y = g.y + r.grid.dir.x * 1500, z = g.z}, 80)
+	world:advance(11)
+	same(table.concat(ann.amountsSet, ", "), "road 3, parked 2, road 6, parked 4", "back on leaving the route")
+	ann.amountsSet = {}
+	soloToGreen(world, ann)
+	world:hook(ann, "onBeamMPServerLeave")
+	same(table.concat(ann.amountsSet, ", "), "road 3, parked 2, road 6, parked 4", "back on leaving the server")
+end)
+
+World.test("a game without the traffic functions races as before", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	ann.globals.gameplay_traffic = false
+	ann.globals.gameplay_parking = false
+	soloToGreen(world, ann)
+	world:as(ann, function() same(mileage_spotRace.inRace(), true, "racing") end)
+	same(ann.car.frozen, false, "released on green")
+end)
+
 --== the server and the opponents =================================================
 
 World.test("the server times opponents: one that beats Ann is first even when the starter's game hides its finish", function(world)

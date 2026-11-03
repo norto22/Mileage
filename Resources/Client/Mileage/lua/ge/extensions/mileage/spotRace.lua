@@ -386,10 +386,67 @@ local function driveOpponents()
 	end
 end
 
+--== traffic during the race =================================================
+-- At the green each racer's game halves its own active traffic and parked cars, rounded
+-- up, to leave room for the racing cars. Its police cars are held out of the game's
+-- vehicle pool so none is hidden, and count towards the half. The game hides the rest as
+-- it does whenever its amounts change, and Mileage's hide sync shows that to every other
+-- game. Once this game's part of the race is over (its own race, and the opponents it
+-- drives), the police go back into the pool and the amounts back to what the server sets.
+
+local function thinTraffic()
+	local c = compat()
+	if not race or race.thinned or not c then return end
+	local amounts = c.getTrafficAmounts()
+	if not amounts then return end
+	local police = {}
+	if amounts.road then
+		for _, id in ipairs(c.getPoliceCars()) do
+			local pool = c.takeOutOfPool(id)
+			if pool then table.insert(police, {pool = pool, id = id}) end
+		end
+	end
+	race.thinned = {road = amounts.road, parked = amounts.parked, police = police}
+	c.setTrafficAmounts(amounts.road and math.max(0, math.ceil(amounts.activeRoad / 2) - #police),
+		amounts.parked and math.ceil(amounts.activeParked / 2))
+end
+
+-- The server's amounts now (a share it sent during the race included), or nil.
+local function serverAmounts()
+	local traffic, enabler = extensions.mileage_traffic, mileageEnabler
+	if type(traffic) ~= "table" or type(traffic.serverAmounts) ~= "function" or type(enabler) ~= "table"
+			or type(enabler.getClientConfig) ~= "function" then
+		return nil
+	end
+	local ok, road, parked = pcall(function() return traffic.serverAmounts(enabler.getClientConfig()) end)
+	if ok and tonumber(road) and tonumber(parked) then return road, parked end
+	return nil
+end
+
+local function restoreTraffic()
+	local thinned = race and race.thinned
+	if not thinned then return end
+	race.thinned = nil
+	local c = compat()
+	if not c then return end
+	for _, held in ipairs(thinned.police) do c.putBackInPool(held.pool, held.id) end
+	local road, parked = serverAmounts()
+	c.setTrafficAmounts(thinned.road and (road or thinned.road), thinned.parked and (parked or thinned.parked))
+end
+
+-- This racer's own race is over: its traffic comes back unless it still drives opponents.
+local function ownRaceOver()
+	for _, opponent in ipairs(race.opponents) do
+		if not opponent.ended then return end
+	end
+	restoreTraffic()
+end
+
 --== the race ================================================================
 
 local function endHere()
 	if race and race.frozen then setFrozen(false) end
+	restoreTraffic()
 	deleteOpponents()
 	race = nil
 end
@@ -548,6 +605,7 @@ local function checkOwnCar(dt)
 	local checkpoints = race.route.checkpoints
 	if passCheckpoints(race, pos, myName()) then
 		race.ended = "finished"
+		ownRaceOver()
 		ui({phase = "finished", id = race.id, routeName = routeName(), elapsed = race.elapsed})
 		return
 	end
@@ -557,6 +615,7 @@ local function checkOwnCar(dt)
 	if away > OFF_ROUTE_METRES then race.offFor = race.offFor + dt else race.offFor = 0 end
 	if race.offFor >= OFF_ROUTE_SECONDS then
 		race.ended = "left"
+		ownRaceOver()
 		send({out = {race = race.id, racer = myName(), why = "left"}})
 		ui({phase = "out", id = race.id, routeName = routeName(), why = "left"})
 		return
@@ -585,6 +644,7 @@ local function updateRace(dt)
 			setFrozen(false)
 			showNextCheckpoint()
 			driveOpponents()
+			thinTraffic()
 			ui({phase = "go", id = race.id, routeName = routeName()})
 		elseif math.ceil(race.countdownLeft) ~= before then
 			ui({phase = "countdown", id = race.id, routeName = routeName(), count = math.ceil(race.countdownLeft),
@@ -596,6 +656,7 @@ local function updateRace(dt)
 	race.elapsed = race.elapsed + dt
 	if not race.ended then checkOwnCar(dt) end
 	watchOpponents(dt)
+	if race.ended and race.thinned then ownRaceOver() end
 end
 
 --- Gives up the race under way: before the green the starter calls it off for everyone.
@@ -607,6 +668,7 @@ function M.giveUp()
 		return true
 	end
 	race.ended = "gaveUp"
+	ownRaceOver()
 	ui({phase = "out", id = race.id, routeName = routeName(), why = "gaveUp"})
 	return true
 end
