@@ -1123,3 +1123,45 @@ test("#87: a player who joins, with the real enabler and server, asks only my fr
 	same(count(late.serverRequests, "requestPartPaints"), 1, "paint requests after the 5 s wait")
 	os.clockhp = function() return 0 end
 end)
+
+test("#87: a traffic car my friend spawns while I am on the server is not asked for paint before its mark", function()
+	local me, friend = twoPlayers()
+	frames(friend, 1)
+	me.MPVehicleGE.getGameVehicleID = function(sid)
+		local entry = me.vehicles[sid]
+		return entry and entry.gameVehicleID
+	end
+	local now = 0
+	os.clockhp = function() return now end
+	local paint
+	as(me, function()
+		mileageEnabler = me.enabler
+		paint = dofile(PAINT)
+		paint.onExtensionLoaded()
+	end)
+	local function paintRequests()
+		local asked = {}
+		for _, m in ipairs(world.toServer) do
+			if m.from == 0 and m.name == "requestPartPaints" then table.insert(asked, decode(m.data).serverVehicleID) end
+		end
+		table.sort(asked)
+		return table.concat(asked, ",")
+	end
+	-- The server tells every game of each new car with {active = true}; the owner's game
+	-- marks its traffic a moment later, once a second.
+	local police = spawn(1, 3, {JBeam = "fullsize", isTraffic = "true", ai = true})
+	local own = spawn(1, 4, {JBeam = "pickup"})
+	world.toServer = {}
+	as(me, paint.onVehicleReady, police)
+	as(me, paint.onVehicleReady, own)
+	same(paintRequests(), "", "paint requests before the owner's marks")
+	frames(friend, 1)
+	world.toServer = {}
+	now = 1
+	as(me, paint.onUpdate)
+	same(paintRequests(), "", "paint requests once the traffic car is marked")
+	now = 5
+	as(me, paint.onUpdate)
+	same(paintRequests(), "1-4", "paint requests once the unmarked car's 5 s wait is over")
+	os.clockhp = function() return 0 end
+end)
