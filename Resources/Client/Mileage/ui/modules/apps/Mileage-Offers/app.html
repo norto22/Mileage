@@ -19,7 +19,7 @@
 		<div class="mo-head">
 			<span class="mo-title" ng-bind="traffic.view.title"></span>
 			<span class="mo-key" ng-if="traffic.view.key" ng-bind="traffic.view.key"></span>
-			<span class="mo-label mo-hint" ng-if="traffic.view.keyHint" ng-bind="traffic.view.keyHint"></span>
+			<span class="mo-label" ng-if="traffic.view.keyHint" ng-bind="traffic.view.keyHint"></span>
 		</div>
 		<div class="mo-line" ng-if="traffic.view.line" ng-bind="traffic.view.line"></div>
 		<div class="mo-row" ng-repeat="row in traffic.view.rows">
