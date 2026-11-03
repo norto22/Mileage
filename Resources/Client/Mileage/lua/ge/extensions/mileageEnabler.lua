@@ -14,7 +14,8 @@
 --     mapping machine-dependent.
 --   * A join keeps one loading screen up until the career has started, and tells the
 --     server whether it started (see "Join" below).
---   * patchTopBar is gated: ui_topBar does not exist in 0.39.
+--   * The pause menu's Mods entry and editable environment are kept out of the career
+--     by mileage_patches (#15).
 --   * Menu hooks come from mileage_patches (runtime wrappers around the game's
 --     career modules).
 
@@ -477,22 +478,7 @@ local function onComputerOpenedMP()
 	inComputerMenus = false
 end
 
---Patch BeamMP behavior and topBar
-
--- 0.39 deleted ui/topBar.lua and ui/topBar/ outright. The replacement stack
--- (menuManager + router + uiStateManager + pause/) has no removeEntry
--- equivalent -- the entry list now lives behind the router / pause-V2 layer.
--- Gated rather than removed so the old path still works if BeamNG restores it.
-local function patchTopBar()
-	if not compat.hasLegacyTopBar() then return end
-	ui_topBar.removeEntry("environment")
-	ui_topBar.removeEntry("mods")
-	ui_topBar.removeEntry("vehicleconfig")
-	ui_topBar.removeEntry("vehicles")
-	local entries = ui_topBar.getEntries()
-	ui_topBar.updateEntries(entries)
-	ui_topBar.updateVisibleItems()
-end
+--Patch BeamMP behavior
 
 -- The mirrored driver side on remote vehicles is corrected by BeamMP itself
 -- (beammp_multiplayer installs core_camera.getDriverData). BeamMP re-asserts
@@ -877,10 +863,6 @@ local function onWorldReadyState(state)
 	end
 end
 
-local function onClientPostStartMission(levelPath)
-	patchTopBar()
-end
-
 local function onUpdate(dtReal, dtSim, dtRaw)
 	updateWaitingStart()
 	updateCareerStart()
@@ -988,8 +970,6 @@ M.onCareerTuningStartedMP = computerMenuHandler
 M.onPartShoppingStartedMP = computerMenuHandler
 M.onVehiclePaintingUiOpenedMP = computerMenuHandler
 M.onPerformanceTestStartedMP = computerMenuHandler
-
-M.onClientPostStartMission = onClientPostStartMission
 
 M.onWorldReadyState = onWorldReadyState
 M.onUpdate = onUpdate

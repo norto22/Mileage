@@ -924,6 +924,27 @@ test("revert puts the game's garage computer functions back", function()
 	same(career_modules_computer.computerButtonCallback, button, "computerButtonCallback")
 end)
 
+test("#15: every runtime patch applies with the pause menu not loaded yet, and the menu is patched once it loads", function()
+	setup()
+	ui_pause_actions, ui_pause_providers_routeData_environment = nil, nil
+	same(patches.apply(), true, "applied")
+	same(#patches.getFailures(), 0, "failures")
+	local gameRegister = function(metadata) return metadata end
+	local load = extensions.load
+	extensions.load = function(name)
+		ui_pause_actions = {registerButton = gameRegister}
+	end
+	-- extensions.load is wrapped by apply only when the game has one; this stand-in
+	-- had none, so the frame retry picks the menu up instead.
+	expect(load == nil, "the stand-in has no extensions.load")
+	extensions.load("ui_pause_actions")
+	patches.onUpdate(3)
+	expect(ui_pause_actions.registerButton ~= gameRegister, "registerButton patched by the retry")
+	patches.revert()
+	same(ui_pause_actions.registerButton, gameRegister, "registerButton after the revert")
+	ui_pause_actions = nil
+end)
+
 test("a game without computerButtonCallback is reported and the patches are tried again", function()
 	setup()
 	career_modules_computer.computerButtonCallback = nil

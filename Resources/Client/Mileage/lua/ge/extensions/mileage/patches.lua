@@ -1039,6 +1039,114 @@ function M.onPartShoppingCancelled()
 	pending.partShopping = nil
 end
 
+--== pause menu (#15) ========================================================
+-- The 0.40 pause menu already treats a Mileage career as a career (vehicle selection,
+-- parts and tuning locked), but still offers the Mods manager, and makes time, weather
+-- and traffic editable whenever the player has switched the game's "restrict scenarios"
+-- option off (ui/pause/providers/routeData/environment.lua:12-14). Neither belongs in a
+-- shared career, so while one is active the Mods button is registered hidden (the game's
+-- registerButton skips a button whose visible is false, ui/pause/actions.lua:10-13) and
+-- the environment pages are built as if "restrict scenarios" were on. The player's own
+-- setting is never written.
+--
+-- The pause modules load only when the menu first opens, so these targets are optional:
+-- a missing one is not a failure, and they are applied after every extensions.load too,
+-- because the menu builds on the same frame its modules load. Each patch checks for an
+-- active career when it is called, so the menu is the game's own before a career starts
+-- and after it ends.
+
+local PAUSE_ACTIONS = "ui_pause_actions"
+local PAUSE_ENVIRONMENT = "ui_pause_providers_routeData_environment"
+local ENVIRONMENT_PAGES = {
+	"getEnvironmentData", "getEnvironmentWeatherData", "getEnvironmentSimulationData", "getEnvironmentTrafficData",
+}
+
+-- Applied between apply and revert; the loader wrapper does nothing outside that.
+local pauseMenuOn = false
+
+local function careerActive()
+	local career = career_career
+	if type(career) ~= "table" or type(career.isActive) ~= "function" then return false end
+	local ok, active = pcall(career.isActive)
+	return ok and active == true
+end
+
+local function copyTable(t)
+	local out = {}
+	if type(t) == "table" then for k, v in pairs(t) do out[k] = v end end
+	return out
+end
+
+local function hideModsButton(original, metadata, ...)
+	if careerActive() and type(metadata) == "table" and metadata.id == "system.mods" then
+		local hidden = copyTable(metadata)
+		hidden.visible = false
+		return original(hidden, ...)
+	end
+	return original(metadata, ...)
+end
+
+-- Runs an environment page with settings.getValue("restrictScenarios") reading true, and
+-- puts the game's getValue back afterwards, also when the page raises.
+local function restrictedEnvironment(original, ...)
+	local store = settings
+	if not careerActive() or type(store) ~= "table" or type(store.getValue) ~= "function" then
+		return original(...)
+	end
+	local getValue = store.getValue
+	store.getValue = function(key, ...)
+		if key == "restrictScenarios" then return true end
+		return getValue(key, ...)
+	end
+	local results = pack(pcall(original, ...))
+	store.getValue = getValue
+	if not results[1] then error(results[2], 0) end
+	return unpack(results, 2, results.n)
+end
+
+-- The traffic panel asks for its controls with the editable flag the page gave it.
+local function readOnlyTrafficPayload(original, payload, ...)
+	if not careerActive() then return original(payload, ...) end
+	local readOnly = copyTable(payload)
+	readOnly.editable = false
+	return original(readOnly, ...)
+end
+
+local function replaceIfLoaded(moduleName, fnName, replacement)
+	local module = _G[moduleName]
+	if type(module) ~= "table" or type(module[fnName]) ~= "function" then return end
+	replace(moduleName, fnName, replacement)
+end
+
+local function applyPauseMenuPatches()
+	replaceIfLoaded(PAUSE_ACTIONS, "registerButton", hideModsButton)
+	for _, fnName in ipairs(ENVIRONMENT_PAGES) do
+		replaceIfLoaded(PAUSE_ENVIRONMENT, fnName, restrictedEnvironment)
+	end
+	replaceIfLoaded(PAUSE_ENVIRONMENT, "requestEnvironmentTrafficPayload", readOnlyTrafficPayload)
+end
+
+-- extensions.load, wrapped so pause modules loaded later are patched before their first
+-- call. Restored by revert with the other wrappers.
+local function wrapExtensionLoader()
+	local ext = extensions
+	if type(ext) ~= "table" or type(ext.load) ~= "function" then return end
+	wrap("extensions", "load", function()
+		if pauseMenuOn then applyPauseMenuPatches() end
+	end)
+end
+
+local function pauseMenuUnpatched()
+	local actions = _G[PAUSE_ACTIONS]
+	if type(actions) == "table" and type(actions.registerButton) == "function"
+		and not isOurs(actions.registerButton) then
+		return true
+	end
+	local environment = _G[PAUSE_ENVIRONMENT]
+	return type(environment) == "table" and type(environment.getEnvironmentData) == "function"
+		and not isOurs(environment.getEnvironmentData)
+end
+
 --== lifecycle ===============================================================
 
 -- Set once the failure list has been reported, so a target that is missing for good
@@ -1058,6 +1166,10 @@ function M.apply()
 	applySeatedRepairGuard()
 	applyPurchaseInsuranceGuard()
 	applyComputerPatches()
+	-- Optional targets: they add no failures.
+	pauseMenuOn = true
+	applyPauseMenuPatches()
+	wrapExtensionLoader()
 
 	-- Only count as applied when everything landed. Marking it applied regardless
 	-- would let a call made before the career modules exist stick, and the retry
@@ -1084,6 +1196,7 @@ end
 function M.revert()
 	-- Drop any held repair with the wrappers that would have completed it.
 	pendingSeatedRepair = nil
+	pauseMenuOn = false
 
 	for key, entry in pairs(originals) do
 		-- Restore against the LIVE module, not the one captured at wrap time: if the
@@ -1176,6 +1289,8 @@ local function onUpdate(dtReal)
 			applyRebuildPatch()
 			log("I", "mileage.patches", "core_vehicles.replaceVehicle was replaced after we applied - wrapped it again")
 		end
+		-- A pause module loaded by a path that bypassed extensions.load.
+		if pauseMenuUnpatched() then applyPauseMenuPatches() end
 		return
 	end
 
