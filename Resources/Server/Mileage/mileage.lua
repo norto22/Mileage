@@ -1984,10 +1984,11 @@ Money.loadRaces = loadRaces
 end
 
 --== Leaderboard =============================================================
--- Race wins counted by the server, and each player's best drag run per strip, reported
--- by the racer's own game once the game's drag result is in. Kept in
--- data/leaderboard.json: {wins = {[name] = count}, drag = {[stripId] = {[name] = {et,
--- trap, at}}}}. Any player can ask for the top LEADERBOARD_TOP of each.
+-- Race wins counted by the server, each player's best drag run per strip, reported by the
+-- racer's own game once the game's drag result is in, and each player's best time at each
+-- race spot route, timed by the server itself. Kept in data/leaderboard.json: {wins =
+-- {[name] = count}, drag = {[stripId] = {[name] = {et, trap, at}}}, spots = {[routeId] =
+-- {[name] = {time, at}}}}. Any player can ask for the top LEADERBOARD_TOP of each.
 
 do
 local readData, writeData = Money.readData, Money.writeData
@@ -1998,10 +1999,45 @@ local LEADERBOARD_STRIPS_MAX = 50
 local DRAG_ET_MIN, DRAG_ET_MAX = 3, 60
 local DRAG_TRAP_MAX = 200
 
-local leaderboard = {wins = {}, drag = {}}
+local leaderboard = {wins = {}, drag = {}, spots = {}}
 
 local function saveLeaderboard()
 	return writeData(LEADERBOARD_FILE, leaderboard)
+end
+
+-- A player's finish at a race spot route, as the server timed it. Only a strictly faster
+-- time replaces their best. Returns {improved, old} for the result card.
+Money.spotTime = function(routeId, name, seconds)
+	local route = leaderboard.spots[routeId]
+	if not route then
+		route = {}
+		leaderboard.spots[routeId] = route
+	end
+	local best = route[name]
+	local old = best and tonumber(best.time) or nil
+	if old and old <= seconds then return {improved = false, old = old} end
+	route[name] = {time = seconds, at = os.time()}
+	saveLeaderboard()
+	return {improved = true, old = old}
+end
+
+-- The best time at each route and the player's own: {best = {[routeId] = {name, time}},
+-- mine = {[routeId] = time}}, for the set-up card.
+Money.spotBests = function(name)
+	local best, mine = {}, {}
+	for routeId, times in pairs(leaderboard.spots) do
+		for player, entry in pairs(times) do
+			local time = tonumber(entry.time)
+			if time then
+				local top = best[routeId]
+				if not top or time < top.time or (time == top.time and player < top.name) then
+					best[routeId] = {name = player, time = time}
+				end
+				if player == name then mine[routeId] = time end
+			end
+		end
+	end
+	return {best = best, mine = mine}
 end
 
 Money.leaderboardWin = function(name)
@@ -2061,7 +2097,22 @@ local function leaderboardTop()
 		for i = #list, LEADERBOARD_TOP + 1, -1 do list[i] = nil end
 		if #list > 0 then drag[stripId] = list end
 	end
-	return {wins = wins, drag = drag}
+	local names = {}
+	for _, route in ipairs(Money.spotRoutes or {}) do names[route.id] = route.name end
+	local spots = {}
+	for routeId, times in pairs(leaderboard.spots) do
+		local list = {}
+		for name, entry in pairs(times) do
+			if tonumber(entry.time) then table.insert(list, {name = name, time = tonumber(entry.time)}) end
+		end
+		table.sort(list, function(a, b)
+			if a.time ~= b.time then return a.time < b.time end
+			return a.name < b.name
+		end)
+		for i = #list, LEADERBOARD_TOP + 1, -1 do list[i] = nil end
+		if #list > 0 then spots[routeId] = {name = names[routeId] or routeId, rows = list} end
+	end
+	return {wins = wins, drag = drag, spots = spots}
 end
 
 function mileageLeaderboard(player_id)
@@ -2071,17 +2122,19 @@ end
 
 local function loadLeaderboard()
 	local stored = readData(LEADERBOARD_FILE)
-	leaderboard = {wins = {}, drag = {}}
+	leaderboard = {wins = {}, drag = {}, spots = {}}
 	if stored then
 		leaderboard.wins = type(stored.wins) == "table" and stored.wins or {}
 		leaderboard.drag = type(stored.drag) == "table" and stored.drag or {}
+		-- A file from before race spots has no spots table.
+		leaderboard.spots = type(stored.spots) == "table" and stored.spots or {}
 	end
 end
 
 function Leaderboard(arguments)
 	local argument = arguments and arguments[1]
 	if argument == "reset" then
-		leaderboard = {wins = {}, drag = {}}
+		leaderboard = {wins = {}, drag = {}, spots = {}}
 		saveLeaderboard()
 		print("[Mileage] Leaderboard reset")
 		return
@@ -2101,6 +2154,16 @@ function Leaderboard(arguments)
 		print("[Mileage] Leaderboard - best drag times at " .. consoleText(stripId))
 		for i, entry in ipairs(top.drag[stripId]) do
 			print(string.format("  %2d. %s: %.3f s, %.0f km/h", i, consoleText(entry.name), entry.et, entry.trap * 3.6))
+		end
+	end
+	local routes = {}
+	for routeId in pairs(top.spots) do table.insert(routes, routeId) end
+	table.sort(routes)
+	for _, routeId in ipairs(routes) do
+		print("[Mileage] Leaderboard - best times at " .. consoleText(top.spots[routeId].name))
+		for i, entry in ipairs(top.spots[routeId].rows) do
+			print(string.format("  %2d. %s: %d:%05.2f", i, consoleText(entry.name), math.floor(entry.time / 60),
+				entry.time % 60))
 		end
 	end
 end

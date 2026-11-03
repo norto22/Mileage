@@ -102,6 +102,55 @@ World.test("the answer holds the top 10 of each, sorted", function(world)
 	same(board.drag[STRIP][10].name, "P3", "tenth")
 end)
 
+-- A leaderboard file already holding spot times: city_race_1 for P1 to P12 (P12 fastest),
+-- and Ann's at the highway race. The plugin reads it on its next start.
+local function storedSpotTimes(world)
+	local times = {}
+	for i = 1, 12 do times["P" .. i] = {time = 300 - i, at = 1} end
+	world.disk["Resources/Server/Mileage/data/leaderboard.json"] = World.encode({wins = {Ann = 3}, drag = {},
+		spots = {city_race_1 = times, highway_race = {Ann = {time = 61.25, at = 1}}}})
+	world:restart()
+end
+
+World.test("each race spot route has its ten fastest players on the board, named as on the map", function(world)
+	local ann = world:join("Ann", 0)
+	storedSpotTimes(world)
+	local board = leaderboardFor(world, ann)
+	local city = board.spots.city_race_1
+	same(city.name, "City Race 1", "the route's name")
+	same(#city.rows, 10, "ten times")
+	same(city.rows[1].name, "P12", "fastest first")
+	same(city.rows[1].time, 288, "with the time")
+	same(city.rows[10].name, "P3", "tenth")
+	same(board.spots.highway_race.rows[1].name, "Ann", "another route")
+	same(board.wins[1].wins, 3, "the wins are still there")
+end)
+
+World.test("the set-up card's status carries the best time at each route and the player's own", function(world)
+	local ann = world:join("Ann", 0)
+	storedSpotTimes(world)
+	local statuses = {}
+	for _, m in ipairs(world:received(ann, "rxMileageSpotRace")) do
+		if m.phase == "status" then table.insert(statuses, m) end
+	end
+	local status = statuses[#statuses]
+	same(status.best.city_race_1.name, "P12", "the best at City Race 1")
+	same(status.best.city_race_1.time, 288, "its time")
+	same(status.mine.highway_race, 61.25, "Ann's own at the highway race")
+	same(status.mine.city_race_1, nil, "none of Ann's at City Race 1")
+end)
+
+World.test("Mileage Leaderboard prints spot times and reset clears them", function(world)
+	local ann = world:join("Ann", 0)
+	storedSpotTimes(world)
+	local lines = world:console("Mileage Leaderboard")
+	same(countLines(lines, "best times at City Race 1"), 1, "route heading")
+	same(countLines(lines, "P12: 4:48.00"), 1, "the fastest line")
+	world:console("Mileage Leaderboard reset")
+	world:restart()
+	same(next(leaderboardFor(world, ann).spots), nil, "no spot times after reset and restart")
+end)
+
 World.test("Mileage Leaderboard prints the lists and reset clears them", function(world)
 	local ann = world:join("Ann", 0)
 	sendTime(world, ann, {strip = STRIP, et = 10.5, trap = 50})

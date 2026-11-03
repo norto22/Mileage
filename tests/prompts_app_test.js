@@ -663,6 +663,51 @@ test("the starter's card shows who joined, with Start now and Call off", () => {
 	assert.strictEqual(scope.spot.view.title, "Race called off");
 });
 
+test("a won race spot shows the prize paid, or why not, and a new best", () => {
+	const {scope} = load();
+	const won = {phase: "result", id: "s1", routeName: "City Race 1", you: "Taylor", winner: "Taylor", prizeOffered: 2000,
+		places: [{name: "Taylor", seconds: 229.02}, {name: "Ibishu Pessima", car: true, seconds: 230.77}]};
+	scope.emit("MileageSpotRace", Object.assign({}, won, {prize: 2000, best: {improved: true, old: 232.8}}));
+	assert.deepStrictEqual(rowsOf(scope.spot.view), ["Prize: $2,000"]);
+	assert.strictEqual(scope.spot.view.note, "New personal best. Your best here was 3:52.80.");
+	scope.emit("MileageSpotRace", Object.assign({}, won, {prize: 0, best: {improved: true}}));
+	assert.strictEqual(scope.spot.view.note, "Your first time here is on the leaderboard.");
+	const notes = {};
+	["alone", "slow", "wait", "unseen"].forEach((withheld) => {
+		scope.emit("MileageSpotRace", Object.assign({}, won, {prize: 0, withheld, againIn: 360, best: {improved: false}}));
+		notes[withheld] = scope.spot.view.note;
+		assert.deepStrictEqual(rowsOf(scope.spot.view), [], withheld + ": no prize row");
+	});
+	assert.deepStrictEqual(notes, {
+		alone: "No prize: nobody else raced. Your time counts for the leaderboard.",
+		slow: "No prize: no other racer drove at race pace.",
+		wait: "No prize: you can win it again in 6 min.",
+		unseen: "Unranked: the server could not follow every car, so no prize, win or leaderboard time.",
+	});
+	scope.emit("MileageSpotRace", Object.assign({}, won, {prize: 0, prizeOffered: 0, withheld: "alone"}));
+	assert.strictEqual(scope.spot.view.note, "", "no prize on this server: nothing to explain");
+	scope.emit("MileageSpotRace", {phase: "result", id: "s2", routeName: "City Race 1", you: "Taylor", carWon: true,
+		prizeOffered: 2000, withheld: "car won", places: [{name: "ETK 800", car: true, seconds: 230}, {name: "Taylor", seconds: 231}]});
+	assert.strictEqual(scope.spot.view.note, "No prize: only a player who finishes first is paid.");
+});
+
+test("the leaderboard has a Race spots tab with each route's fastest players", () => {
+	const {scope} = load();
+	scope.emit("MileageLeaderboard", {wins: [], drag: {}, spots: {
+		mountain_race: {name: "Mountain Race", rows: [{name: "Jordan", time: 372.9}]},
+		city_race_1: {name: "City Race 1", rows: [{name: "Sam", time: 221.27}, {name: "Taylor", time: 229.02}]}}});
+	scope.showTab("spots");
+	const spots = scope.leaderboard.spots;
+	assert.deepStrictEqual([...spots].map((s) => s.name), ["City Race 1", "Mountain Race"], "by name");
+	assert.deepStrictEqual([...spots[0].rows].map((r) => r.place + " " + r.name + " " + r.value), ["1 Sam 3:41.27",
+		"2 Taylor 3:49.02"]);
+	assert.ok(/showTab\('spots'\)">Race spots</.test(TEMPLATE), "the tab is on the page");
+	assert.ok(TEMPLATE.includes("No race spot times yet."), "with a line for an empty board");
+	scope.emit("MileageLeaderboard", {wins: [], drag: {}});
+	assert.strictEqual(scope.leaderboard.spots.length, 0, "an older server sends none");
+	assert.strictEqual(scope.leaderboard.tab, "spots", "the tab is kept");
+});
+
 test("no text the app shows for a race spot says AI", () => {
 	const {scope} = load();
 	const texts = (v) => [v.title, v.note, v.warn, v.big, v.start].concat((v.rows || []).map((r) => r.label + " " + r.value),

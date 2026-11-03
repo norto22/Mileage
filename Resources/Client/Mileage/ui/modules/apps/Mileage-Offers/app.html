@@ -105,6 +105,7 @@
 		<div class="mo-tabs">
 			<button ng-class="{'mo-tab-on': leaderboard.tab == 'wins'}" ng-click="showTab('wins')">Race wins</button>
 			<button ng-class="{'mo-tab-on': leaderboard.tab == 'drag'}" ng-click="showTab('drag')">Drag times</button>
+			<button ng-class="{'mo-tab-on': leaderboard.tab == 'spots'}" ng-click="showTab('spots')">Race spots</button>
 		</div>
 		<table class="mo-table" ng-if="leaderboard.tab == 'wins'">
 			<tr><th>#</th><th>Player</th><th>Wins</th></tr>
@@ -124,6 +125,16 @@
 			</table>
 		</div>
 		<div class="mo-note" ng-if="leaderboard.tab == 'drag' && leaderboard.strips.length == 0">No drag times yet.</div>
+		<div ng-if="leaderboard.tab == 'spots'" ng-repeat="spot in leaderboard.spots">
+			<div class="mo-note" ng-bind="spot.name"></div>
+			<table class="mo-table">
+				<tr><th>#</th><th>Player</th><th>Time</th></tr>
+				<tr ng-repeat="row in spot.rows">
+					<td ng-bind="row.place"></td><td ng-bind="row.name"></td><td ng-bind="row.value"></td>
+				</tr>
+			</table>
+		</div>
+		<div class="mo-note" ng-if="leaderboard.tab == 'spots' && leaderboard.spots.length == 0">No race spot times yet. Drive to a race spot on the map to set the first.</div>
 		<div class="mo-actions"><button ng-click="closeLeaderboard()">Close</button></div>
 	</div>
 

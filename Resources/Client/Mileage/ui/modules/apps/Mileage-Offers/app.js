@@ -676,7 +676,18 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 					}),
 				};
 			});
-			$scope.leaderboard = {tab: $scope.leaderboard ? $scope.leaderboard.tab : "wins", wins: wins, strips: strips};
+			var spots = Object.keys(data.spots || {}).map(function (routeId) {
+				var spot = data.spots[routeId] || {};
+				var rows = Array.isArray(spot.rows) ? spot.rows : [];
+				return {
+					name: String(spot.name || routeId),
+					rows: rows.map(function (row, i) {
+						return {place: i + 1, name: String(row.name), value: spotTime(row.time)};
+					}),
+				};
+			}).sort(function (a, b) { return a.name < b.name ? -1 : (a.name > b.name ? 1 : 0); });
+			$scope.leaderboard = {tab: $scope.leaderboard ? $scope.leaderboard.tab : "wins", wins: wins, strips: strips,
+				spots: spots};
 		});
 	});
 

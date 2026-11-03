@@ -894,6 +894,152 @@ World.test("Join while in a mission says why and sends nothing; Decline sends de
 	same(#heard(world, bob, "grid"), 0, "Bob is not in the race")
 end)
 
+--== the prize ===================================================================
+
+-- Ann races the highway race against one opponent driving at speed (0: held still), Ann at
+-- 40 m/s; returns her result.
+local function raceOne(world, ann, speed)
+	local r = route("highway_race")
+	roadsAt(world, r)
+	withClass(ann)
+	world.opponentSpeed = speed
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 1, {})
+	world:advance(6)
+	driveRoute(world, ann, r, 40)
+	for _ = 1, 70 do
+		if last(world, ann, "result") and last(world, ann, "result").id == last(world, ann, "countdown").id then break end
+		world:advance(1)
+	end
+	return last(world, ann, "result")
+end
+
+local function wins(world, name)
+	local board = world:dataFile("leaderboard.json")
+	return board and board.wins and board.wins[name] or 0
+end
+
+World.test("a player who beats a driving opponent is paid the owner's prize and gets a race win", function(world)
+	world:setConfig("server", "spotRacePrize", "2000")
+	local ann = world:join("Ann", 1000, 0)
+	local result = raceOne(world, ann, 30)
+	same(result.winner, "Ann", "Ann won")
+	same(result.places[2].car, true, "the opponent second")
+	expect(result.places[2].seconds, "the opponent finished too")
+	same(result.prize, 2000, "the prize")
+	same(result.withheld, nil, "nothing withheld")
+	world:advance(2)
+	same(ann.money, 3000, "paid into Ann's career")
+	same(ann.history[#ann.history].label, "Race spot prize", "labelled")
+	same(wins(world, "Ann"), 1, "a race win")
+	same(world:printedMatching("Ann wins, $2000 prize"), 1, "the console says so")
+end)
+
+World.test("no prize while the owner has set none; the win still counts", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local result = raceOne(world, ann, 30)
+	same(result.winner, "Ann", "Ann won")
+	same(result.prize, 0, "no prize")
+	same(result.withheld, nil, "nothing withheld: there is no prize")
+	world:advance(2)
+	same(ann.money, 1000, "nothing paid")
+	same(wins(world, "Ann"), 1, "a race win")
+end)
+
+World.test("opponents held still, racing alone, or a second win inside the wait pay no prize", function(world)
+	world:setConfig("server", "spotRacePrize", "2000")
+	world:setConfig("server", "spotRacePrizeCooldownMinutes", "30")
+	local ann = world:join("Ann", 1000, 0)
+	local result = raceOne(world, ann, 0)
+	same(result.winner, "Ann", "Ann was first")
+	same(result.withheld, "slow", "the opponent never drove")
+	same(result.prize, 0, "no prize")
+	same(wins(world, "Ann"), 0, "and no win")
+	world:advance(2)
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 0, {})
+	world:advance(6)
+	driveRoute(world, ann, route("highway_race"), 40)
+	world:advance(1)
+	result = last(world, ann, "result")
+	same(result.withheld, "alone", "nobody else raced")
+	same(result.prize, 0, "no prize")
+	world:advance(2)
+	result = raceOne(world, ann, 30)
+	same(result.prize, 2000, "a real race pays")
+	world:advance(2)
+	result = raceOne(world, ann, 30)
+	same(result.withheld, "wait", "inside the 30 minute wait")
+	same(result.prize, 0, "no prize")
+	expect(result.againIn > 0, "the card says when")
+	same(wins(world, "Ann"), 2, "both real races count as wins")
+	world:advance(2)
+	same(ann.money, 3000, "paid once")
+	same(last(world, ann, "status").againIn > 0, true, "the set-up card knows the wait")
+end)
+
+World.test("a starter's game reporting its own finish 0.1 s after green while standing still wins nothing", function(world)
+	world:setConfig("server", "spotRacePrize", "2000")
+	local ann = world:join("Ann", 1000, 0)
+	roadsAt(world, route("highway_race"))
+	withClass(ann)
+	world.opponentSpeed = 30
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 1, {})
+	local id = last(world, ann, "countdown").id
+	world:advance(6)
+	send(world, ann, {finished = {race = id, racer = "Ann", seconds = 0.1}})
+	for _ = 1, 140 do
+		if last(world, ann, "result") then break end
+		world:advance(1)
+	end
+	local result = last(world, ann, "result")
+	same(result.places[1].car, true, "the opponent won")
+	same(result.places[2].seconds, nil, "Ann has no time")
+	same(result.prize, 0, "no prize")
+	world:advance(2)
+	same(ann.money, 1000, "nothing paid")
+end)
+
+--== spot times on the leaderboard ================================================
+
+World.test("a leaderboard file from before race spots keeps its wins and drag times and gains the spot time", function(world)
+	world.disk["Resources/Server/Mileage/data/leaderboard.json"] = World.encode({wins = {Ann = 3},
+		drag = {alder_dragway = {Ann = {et = 11.2, trap = 50, at = 1}}}})
+	world:restart()
+	local ann = world:join("Ann", 1000, 0)
+	soloToGreen(world, ann)
+	driveRoute(world, ann, route("highway_race"), 40)
+	world:advance(1)
+	local result = last(world, ann, "result")
+	local board = world:dataFile("leaderboard.json")
+	same(board.wins.Ann, 3, "the wins kept")
+	same(board.drag.alder_dragway.Ann.et, 11.2, "the drag time kept")
+	same(board.spots.highway_race.Ann.time, result.places[1].seconds, "Ann's server time under the route")
+	same(result.best.improved, true, "the card says it is on the board")
+	same(result.best.old, nil, "her first time here")
+end)
+
+World.test("only a strictly faster time replaces a player's best at a route", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local r = route("highway_race")
+	local function run(speed)
+		soloToGreen(world, ann)
+		driveRoute(world, ann, r, speed)
+		world:advance(2)
+		return last(world, ann, "result")
+	end
+	local first = run(30)
+	local slower = run(20)
+	same(slower.best.improved, false, "a slower run is not a best")
+	same(world:dataFile("leaderboard.json").spots.highway_race.Ann.time, first.places[1].seconds, "the first time kept")
+	local faster = run(50)
+	same(faster.best.improved, true, "a faster run is")
+	same(faster.best.old, first.places[1].seconds, "the card shows the old best")
+	same(world:dataFile("leaderboard.json").spots.highway_race.Ann.time, faster.places[1].seconds, "replaced")
+	same(last(world, ann, "status").mine.highway_race, faster.places[1].seconds, "the set-up card knows it")
+end)
+
 World.test("leaving the server ends the race here and releases the car", function(world)
 	local ann = world:join("Ann", 1000, 0)
 	atStart(ann, "highway_race")
