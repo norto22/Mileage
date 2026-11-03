@@ -1,0 +1,17 @@
+{
+  "domElement": "<mileagerace></mileagerace>",
+  "name": "Mileage Race",
+  "types": [
+    "ui.apps.categories.beammp"
+  ],
+  "css": {
+    "right": "0px",
+    "top": "64px",
+    "width": "280px",
+    "height": "90px"
+  },
+  "description": "The race under way on a Mileage server: countdown, place, lap, checkpoint and time, in a small strip at the top right.",
+  "author": "Mileage",
+  "version": "1.0",
+  "directive": "mileagerace"
+}

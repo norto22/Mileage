@@ -85,7 +85,10 @@ function M.onGetRawPoiListForLevel(levelIdentifier, elements)
 			clusterType = "missionMarker",
 			markerInfo = {
 				missionMarker = {pos = pos, rot = rot, radius = RADIUS, icon = ICON},
-				bigmapMarker = {pos = pos, icon = ICON, name = spot.main.name, description = describe(spot)},
+				-- cardIcon is the icon of the place's row in the list beside the big map; the
+				-- game takes it from its own place types otherwise, and has none for these.
+				bigmapMarker = {pos = pos, icon = ICON, cardIcon = "raceFlag", name = spot.main.name,
+					description = describe(spot)},
 			},
 		})
 	end

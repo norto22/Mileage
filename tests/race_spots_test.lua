@@ -175,6 +175,7 @@ World.test("with race spots on, the map has a place with a mission marker at eac
 	local start = clientRoutes()[2].grid.pos
 	expect(math.abs(marker.pos.x - start.x) < 0.01 and math.abs(marker.pos.y - start.y) < 0.01, "at the start line")
 	same(city.markerInfo.bigmapMarker.name, "City Race 1", "named on the big map")
+	same(city.markerInfo.bigmapMarker.cardIcon, "raceFlag", "a race flag in the big map's list")
 	same(city.markerInfo.bigmapMarker.description, "Race spot · 2 laps · 5.0 km", "laps and length")
 	same(byId.mileageSpot_race_track.markerInfo.bigmapMarker.description, "Race spot · 2 laps · 8.1 km · 3 layouts",
 		"the race track's layouts share one place")

@@ -1,8 +1,10 @@
 // Mileage prompts: race challenges and money requests to this player, the race
-// countdown, race panel and result, race events and the server leaderboard. Fed by the
-// game's Mileage extensions through guihooks (mileage/offers.lua and the race, event and
-// leaderboard extensions); every answer goes back through bngApi.engineLua with ids and
-// names base64-encoded. Every text from the server or another player is bound as text.
+// countdown, race panel and result, race events and the server leaderboard. While the
+// race window (Mileage-Race) is on the page, it shows the countdown and the race panel
+// instead (moRaceWindowShows). Fed by the game's Mileage extensions through guihooks
+// (mileage/offers.lua and the race, event and leaderboard extensions); every answer goes
+// back through bngApi.engineLua with ids and names base64-encoded. Every text from the
+// server or another player is bound as text.
 //
 // NOTE: top-level declarations must be `var` or function declarations: the game's UI
 // app service evaluates app.js again in the same scope when it refreshes apps, and a
@@ -183,6 +185,10 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 	$scope.$on('MileageRace', function (event, data) {
 		if (!data) return;
 		$scope.$evalAsync(function () {
+			if (moRaceWindowShows(data.phase)) {
+				$scope.race = null;
+				return;
+			}
 			var shown = raceView(data);
 			$scope.race = shown ? {id: data.race, phase: data.phase, view: shown} : null;
 		});
@@ -577,6 +583,10 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 				if (current && current.kind === "invite" && current.id === data.id) $scope.spot = null;
 				return;
 			}
+			if (moRaceWindowShows(data.phase)) {
+				$scope.spot = null;
+				return;
+			}
 			var shown = spotView(data, current);
 			if (!shown) return;
 			var kind = data.phase === "invite" ? "invite" : data.phase;
@@ -793,6 +803,14 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 	bngApi.engineLua('if mileage_aiRace then mileage_aiRace.sendState() end');
 	bngApi.engineLua('if mileage_spotRace then mileage_spotRace.sendState() end');
 }]);
+
+// Whether the race window (Mileage-Race) is on the page and shows this phase of a race:
+// the countdown, GO, the race and the wait after a finish. The prompts app then leaves
+// them to it.
+function moRaceWindowShows(phase) {
+	var open = typeof mileageRaceWindowsOpen === "number" && mileageRaceWindowsOpen > 0;
+	return open && (phase === "countdown" || phase === "go" || phase === "racing" || phase === "finished");
+}
 
 // Seconds as m:ss.s.
 function moTime(seconds) {
