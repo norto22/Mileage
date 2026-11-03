@@ -12,7 +12,7 @@ Mileage was called CareerMP until v0.3.0. A server still running CareerMP needs 
 ## What works
 - Joining a server and starting a career (BeamNG.drive 0.40.4.0)
 - Buying a car, customising parts and parcel deliveries
-- Drag racing another player on one tree
+- Drag racing another player on one tree, or a solo run when nobody joins within 10 seconds
 - Tuning, painting, insurance and repairs
 - Seeing damage on other players' cars
 - Paint sync
