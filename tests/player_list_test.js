@@ -74,7 +74,7 @@ test("#51: the ping button shows each player's ping and does nothing when clicke
 	scope.emit("onBeamMPPlayerPings", JSON.stringify({Ann: 40}));
 	scope.emit("onBeamMPPlayerList", PLAYERS);
 	const pings = table.rows.slice(1).map((row) => row.cells[2].children[0]);
-	assert.deepStrictEqual(pings.map((btn) => btn.children[0].text), ["40ms", "?ms"], "ping texts");
+	assert.deepStrictEqual(pings.map((btn) => btn.children[0].text), ["24ms", "?ms"], "ping texts (#109: 16 ms lower)");
 	for (const btn of pings) {
 		assert.strictEqual(btn.getAttribute("class"), "tp-button buttons", "button look");
 		assert.strictEqual(btn.getAttribute("onclick"), undefined, "click action");

@@ -10,7 +10,7 @@ var players = [];
 // throws "Identifier 'pingList' has already been declared" on the second evaluation,
 // which aborts the script before angular.module(...).directive() runs, so the
 // mileageplayerlist directive never registers and the app silently fails to load.
-var pingList = [];
+var pingList = {};
 var nickname = "";
 var app = angular.module('beamng.apps');
 app.directive('mileageplayerlist', [function () {
@@ -121,11 +121,17 @@ app.controller("PlayerList", ['$scope', '$filter', 'Settings', function ($scope,
 	}
 
 	$scope.$on('onBeamMPPlayerPings', function(event, data) {
-		pingList = JSON.parse(data);
-		for(let i = 0; i < pingList.length; i++) {
-			pingList[i] = pingList[i]-16;
-			if (pingList[i] > 999) pingList[i] = 999;
+		// BeamMP sends the pings keyed by player name. Each reads 16 ms lower, never below 0
+		// or above 999. A ping that is not a number is left out, so its row reads ?ms.
+		const parsed = JSON.parse(data);
+		const pings = {};
+		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+			for (const name of Object.keys(parsed)) {
+				const ping = parsed[name];
+				if (typeof ping === "number" && isFinite(ping)) pings[name] = Math.min(999, Math.max(0, ping - 16));
+			}
 		}
+		pingList = pings;
 	})
 
 	var customButtons = []
@@ -259,7 +265,8 @@ app.controller("PlayerList", ['$scope', '$filter', 'Settings', function ($scope,
 				// Insert the button inside the cell. It only shows the ping; clicking it
 				// does nothing.
 				var btn = document.createElement("BUTTON");
-				var pingText = pingList[parsedList[i].name] || "?";
+				var ping = Object.prototype.hasOwnProperty.call(pingList, parsedList[i].name) ? pingList[parsedList[i].name] : undefined;
+				var pingText = typeof ping === "number" ? String(ping) : "?";
 				btn.appendChild(document.createTextNode(pingText+='ms'));
 				btn.setAttribute("class", "tp-button buttons");
 				pingCell.appendChild(btn);
