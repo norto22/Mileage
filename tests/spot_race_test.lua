@@ -1250,15 +1250,15 @@ end)
 
 --== the prize ===================================================================
 
--- Ann races the highway race against one opponent driving at speed (0: held still), Ann at
--- 40 m/s; returns her result.
-local function raceOne(world, ann, speed)
+-- Ann races the highway race against one opponent (or opponents) driving at speed (0: held
+-- still), Ann at 40 m/s; returns her result.
+local function raceOne(world, ann, speed, opponents)
 	local r = route("highway_race")
 	roadsAt(world, r)
 	withClass(ann)
 	world.opponentSpeed = speed
 	atStart(ann, "highway_race")
-	request(world, ann, "highway_race", 1, {})
+	request(world, ann, "highway_race", opponents or 1, {})
 	world:advance(6)
 	driveRoute(world, ann, r, 40)
 	for _ = 1, 70 do
@@ -1287,6 +1287,29 @@ World.test("a player who beats a driving opponent is paid the owner's prize and 
 	same(ann.history[#ann.history].label, "Race spot prize", "labelled")
 	same(wins(world, "Ann"), 1, "a race win")
 	same(world:printedMatching("Ann wins, $2000 prize"), 1, "the console says so")
+end)
+
+World.test("the prize grows by half for each racer past two: six racers pay three times the owner's prize", function(world)
+	world:setConfig("server", "spotRacePrize", "2000")
+	local ann = world:join("Ann", 1000, 0)
+	local result = raceOne(world, ann, 30, 5)
+	same(#result.places, 6, "Ann and five opponents")
+	same(result.winner, "Ann", "Ann won")
+	same(result.prize, 6000, "2000 x (1 + 0.5 x 4)")
+	world:advance(2)
+	same(ann.money, 7000, "paid into Ann's career")
+end)
+
+World.test("the winner is paid when the only rival stood still; the leaderboard win still needs a rival at race pace", function(world)
+	world:setConfig("server", "spotRacePrize", "2000")
+	local ann = world:join("Ann", 1000, 0)
+	local result = raceOne(world, ann, 0)
+	same(result.winner, "Ann", "Ann was first")
+	same(result.withheld, nil, "nothing withheld")
+	same(result.prize, 2000, "the owner's prize")
+	world:advance(2)
+	same(ann.money, 3000, "paid")
+	same(wins(world, "Ann"), 0, "but no race win against a car that never drove")
 end)
 
 World.test("no prize while the owner has set none; the win still counts", function(world)
