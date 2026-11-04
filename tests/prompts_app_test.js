@@ -356,6 +356,23 @@ test("the leaderboard lists race wins and each strip's best drag times, names as
 
 //== race events ===================================================================
 
+test("an event whose prize grows says it is for two racers, and its race panel shows the prize for the field", () => {
+	const {scope} = load();
+	scope.emit("MileageEvent", {id: "e1-6", phase: "announce", route: "R", prize: 25000, grows: true, seconds: 300,
+		joined: 3, youJoined: false});
+	assert.deepStrictEqual(rows(scope.event.view), ["Route: R", "Prize: $25,000 for two racers, +50% per extra racer",
+		"Joined: 3 players"]);
+	scope.emit("MileageRace", {phase: "countdown", race: "e1-6", other: "the race event", stake: 0, event: true,
+		prize: 50000, racers: 4, count: 3});
+	assert.strictEqual(scope.race.view.note, "vs the race event · prize $50,000 for 4 racers");
+	scope.emit("MileageRace", {phase: "go", race: "e1-6", other: "the race event", stake: 0, event: true,
+		prize: 50000, racers: 4});
+	assert.strictEqual(scope.race.view.note, "vs the race event · prize $50,000 for 4 racers");
+	scope.emit("MileageRace", {phase: "countdown", race: "e1-7", other: "the race event", stake: 0, event: true,
+		prize: 0, racers: 2, count: 3});
+	assert.strictEqual(scope.race.view.note, "vs the race event · no stake", "no prize line for a $0 event");
+});
+
 test("an event invitation shows the route, prize and players, and Join sends once with the id encoded", () => {
 	const {scope, lua} = load();
 	scope.emit("MileageEvent", {id: "e1-5", phase: "announce", route: "Service station garage to Alder Dragway",
@@ -803,7 +820,12 @@ test("the countdown, the race panel and the off-route warning", () => {
 	scope.emit("MileageSpotRace", {phase: "countdown", id: "s1", routeName: "City Race 1", count: 3, you: "Taylor",
 		racers: [{name: "Taylor"}, {name: "Sam"}, {name: "Ibishu Pessima", car: true}, {name: "ETK 800", car: true}]});
 	assert.strictEqual(scope.spot.view.big, "3");
-	assert.deepStrictEqual(rowsOf(scope.spot.view), ["Grid: You, Sam, 2 cars"]);
+	assert.deepStrictEqual(rowsOf(scope.spot.view), ["Grid: You, Sam, 2 cars"], "no prize row without a prize");
+	scope.emit("MileageSpotRace", {phase: "countdown", id: "s1", routeName: "City Race 1", count: 2, you: "Taylor",
+		prize: 4000, racers: [{name: "Taylor"}, {name: "Sam"}, {name: "Ibishu Pessima", car: true},
+			{name: "ETK 800", car: true}]});
+	assert.deepStrictEqual(rowsOf(scope.spot.view), ["Grid: You, Sam, 2 cars",
+		"Prize for first place: $4,000 for 4 racers"]);
 	scope.emit("MileageSpotRace", {phase: "racing", id: "s1", routeName: "City Race 1", place: 2, of: 5, lap: 1, laps: 2,
 		checkpoint: 7, checkpoints: 13, elapsed: 72.4, ahead: "Ibishu Pessima", gap: 1.8, you: "Taylor"});
 	assert.deepStrictEqual(rowsOf(scope.spot.view), ["Place: 2 / 5", "Lap: 1 / 2", "Checkpoint: 7 / 13", "Time: 1:12.4",

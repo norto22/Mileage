@@ -623,9 +623,10 @@ local function onCountdown(message)
 	race.phase = "countdown"
 	race.countdownLeft = tonumber(message.seconds) or 5
 	race.racers = type(message.racers) == "table" and message.racers or {}
+	race.prize = tonumber(message.prize) or 0
 	if not race.frozen then setFrozen(true) end
 	ui({phase = "countdown", id = race.id, routeName = routeName(), count = math.ceil(race.countdownLeft),
-		racers = race.racers})
+		racers = race.racers, prize = race.prize})
 end
 
 -- This racer's row in the server's standings, its place and the racer ahead of it.
@@ -816,7 +817,7 @@ local function updateRace(dt)
 			ui({phase = "go", id = race.id, routeName = routeName()})
 		elseif math.ceil(race.countdownLeft) ~= before then
 			ui({phase = "countdown", id = race.id, routeName = routeName(), count = math.ceil(race.countdownLeft),
-				racers = race.racers})
+				racers = race.racers, prize = race.prize})
 		end
 		return
 	end

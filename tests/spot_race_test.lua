@@ -1693,6 +1693,29 @@ World.test("the prize grows by half for each racer past two: six racers pay thre
 	same(ann.money, 7000, "paid into Ann's career")
 end)
 
+World.test("from a settings file before the $2000 prizes, four racers pay $4000 and the countdown says so", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local result = raceOne(world, ann, 30, 3)
+	same(#result.places, 4, "Ann and three opponents")
+	same(last(world, ann, "countdown").prize, 4000, "the countdown shows the prize for four")
+	local drawn = {}
+	for _, m in ipairs(world:ui(ann, "MileageSpotRace")) do
+		if m.phase == "countdown" then table.insert(drawn, m) end
+	end
+	expect(#drawn >= 2, "the countdown card is drawn each second")
+	for _, m in ipairs(drawn) do same(m.prize, 4000, "every second of the countdown card carries the prize") end
+	same(result.winner, "Ann", "Ann won")
+	same(result.prize, 4000, "$2000 x (1 + 0.5 x 2)")
+	world:advance(2)
+	same(ann.money, 5000, "paid into Ann's career")
+end, {settingsFile = "old"})
+
+World.test("with the server prize off the countdown carries a prize of 0", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	raceOne(world, ann, 30, 1)
+	same(last(world, ann, "countdown").prize, 0, "no prize")
+end)
+
 World.test("every racer who started counts towards the prize, one out after the green too, one who pulled out before not", function(world)
 	world:setConfig("server", "spotRacePrize", "2000")
 	local ann = world:join("Ann", 1000, 0)

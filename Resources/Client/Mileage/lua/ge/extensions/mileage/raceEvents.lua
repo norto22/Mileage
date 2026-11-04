@@ -111,7 +111,7 @@ local function startAtGrid(message)
 		return
 	end
 	race.startEventRace({id = message.id, finish = message.finish, radius = message.radius,
-		seconds = message.seconds})
+		seconds = message.seconds, prize = message.prize, racers = message.racers})
 end
 
 local function rxMileageEvent(data)

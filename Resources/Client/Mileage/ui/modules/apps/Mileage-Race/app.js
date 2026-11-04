@@ -62,7 +62,10 @@ mileageRaceApp.controller('MileageRace', ['$scope', function ($scope) {
 	function streetView(data) {
 		var other = String(data.other || "");
 		var stake = Number(data.stake) || 0, reward = Number(data.reward) || 0;
+		// An event race shows the prize for the racers who started in place of the stake.
+		var eventPrize = data.event ? Number(data.prize) || 0 : 0;
 		var money = data.rolling ? (reward > 0 ? ["race reward " + mrDollars(reward)] : []) :
+			eventPrize > 0 ? ["prize " + mrDollars(eventPrize) + " for " + (Number(data.racers) || 0) + " racers"] :
 			[stake > 0 ? mrDollars(stake) + " stake" : "no stake"];
 		switch (data.phase) {
 		case "countdown":

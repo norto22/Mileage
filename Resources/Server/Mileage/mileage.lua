@@ -4073,8 +4073,9 @@ local function startCountdown(race)
 	for _, racer in ipairs(race.order) do
 		if race.racers[racer.key] then table.insert(names, {name = racer.name, car = racer.car ~= nil}) end
 	end
+	-- The prize for first place with everyone on the grid, players and cars.
 	sendRacers(race, {phase = "countdown", id = race.id, seconds = SPOT_COUNTDOWN_SECONDS, route = race.route.id,
-		racers = names})
+		racers = names, prize = Money.grownPrize(serverNumber("spotRacePrize", 0, PRIZE_HIGH), #names)})
 end
 
 -- Every player in the race gets a grid place behind the start facing the route: the

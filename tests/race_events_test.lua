@@ -163,6 +163,12 @@ World.test("four starters pay twice the typed prize, and the start says so", fun
 	local start = lastEvent(world, ann, "start")
 	same(start.prize, 50000, "the start carries the prize for four")
 	same(start.racers, 4, "four racers")
+	local panels = world:ui(ann, "MileageRace")
+	local countdown = panels[#panels]
+	same(countdown.phase, "countdown", "Ann's race panel counts down")
+	same(countdown.event, true, "as an event race")
+	same(countdown.prize, 50000, "with the prize for four")
+	same(countdown.racers, 4, "and the racer count")
 	local finish = {x = -203.27, y = -203.98, z = 118.82}
 	raceTo(world, finish, {{p = cat, after = 60}, {p = ann, after = 3}})
 	same(cat.money, 51000, "Cat won the prize for four")
