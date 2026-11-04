@@ -2751,3 +2751,46 @@ World.test("when the only other racer leaves during the countdown, the field sho
 	same(#field.racers, 1, "Ann alone")
 	same(field.prize, 0, "a racer alone is never paid")
 end, {settingsFile = "fresh"})
+
+World.test("a player racing one opponent car is shown and paid the prize for two, as cars count", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local result = raceOne(world, ann, 30, 1)
+	same(#last(world, ann, "countdown").racers, 2, "Ann and the car on the grid")
+	same(last(world, ann, "countdown").prize, 2000, "the car counts as a racer")
+	same(lastCard(world, ann, "countdown").prize, 2000, "and the countdown card shows it")
+	same(result.winner, "Ann", "Ann won")
+	same(result.prize, 2000, "paid what the countdown showed")
+end, {settingsFile = "fresh"})
+
+World.test("opponent cars that could not start are not counted: the racer alone is shown no prize", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	withClass(ann)
+	world.spawnRefused = true
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 2, {})
+	local countdown = last(world, ann, "countdown")
+	expect(countdown, "the race goes on alone")
+	same(#countdown.racers, 1, "only Ann on the grid")
+	same(countdown.prize, 0, "no prize for the two cars that never started")
+	same(lastCard(world, ann, "countdown").prize, 0, "nor on the card")
+end, {settingsFile = "fresh"})
+
+World.test("when the only other racer leaves during the countdown, the card drops the prize for every second left",
+		function(world)
+	local ann, bob = threePlayers(world)
+	request(world, ann, "highway_race", 0, {"Bob"})
+	answer(world, bob, "join")
+	if not last(world, ann, "countdown") then untilPhase(world, ann, "countdown", 30) end
+	same(lastCard(world, ann, "countdown").prize, 2000, "two on the grid")
+	world:leave(bob)
+	world:pump()
+	local before = #world:ui(ann, "MileageSpotRace")
+	same(lastCard(world, ann).phase, "countdown", "the countdown card is redrawn")
+	same(lastCard(world, ann).prize, 0, "with no prize")
+	for _ = 1, 3 do
+		world:advance(1)
+		local card = lastCard(world, ann)
+		if card.phase == "countdown" then same(card.prize, 0, "no prize at count " .. tostring(card.count)) end
+	end
+	expect(#world:ui(ann, "MileageSpotRace") > before, "the card was redrawn after the field")
+end, {settingsFile = "fresh"})
