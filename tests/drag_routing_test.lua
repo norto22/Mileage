@@ -545,6 +545,67 @@ test("#25: a check answered within 30 s still counts after a newer check has gon
 	expect(math.abs(info.rtt - 20.2) < 1e-6, "stored round trip: " .. tostring(info.rtt))
 end)
 
+test("#25: a check exactly 30 s old is not yet forgotten when the next goes out", function()
+	local sync = clock()
+	local first = unanswered(sync, 0)
+	unanswered(sync, 30)
+	game.now = START + 30.5
+	sync.onMileageDragMessage("mileageClockPong", 5, {token = first, t1 = START + 15})
+	expect(sync.getOffsetInfo(5), "no estimate from the check answered at 30.5 s")
+end)
+
+test("#25: a player never checked is checked at once, even in the game's first 10 s", function()
+	local sync = clock()
+	game.now = 3
+	sync.probe(5)
+	same(#sent, 1, "checks sent 3 s after the game started")
+	game.now = 9
+	sync.probe(5)
+	same(#sent, 1, "checks sent again 6 s later")
+end)
+
+-- The clock loop with the drag mode switched as given and the lobby naming `targets`
+-- (nil: the lobby is not loaded).
+local function clockLoop(enabled, targets)
+	local sync = clock()
+	game.now = START
+	multiplayer_gamemodes_drag_drag = {isEnabled = function() return enabled end}
+	mileage_dragLobby = targets and {clockCheckTargets = function() return targets end} or nil
+	return sync
+end
+
+test("#25: with the lobby not loaded the clock loop checks nobody and raises nothing", function()
+	local sync = clockLoop(true, nil)
+	local ok, err = pcall(sync.onUpdate)
+	expect(ok, "raised: " .. tostring(err))
+	same(#sent, 0, "checks sent")
+end)
+
+test("#25: the clock loop checks the lobby's targets only while multiplayer drag is on", function()
+	local sync = clockLoop(false, {[5] = true, [6] = true})
+	sync.onUpdate()
+	same(#sent, 0, "checks sent with multiplayer drag off")
+	multiplayer_gamemodes_drag_drag.isEnabled = function() return true end
+	sync.onUpdate()
+	local to = {}
+	for _, m in ipairs(sent) do table.insert(to, m.data.token:match("^(%d+)%-")) end
+	table.sort(to)
+	same(table.concat(to, ","), "5,6", "players checked with it on")
+	sync.onUpdate()
+	same(#sent, 2, "checks sent on the next frame")
+end)
+
+test("#25: the leader of one strip checks only the players at that strip, not those at a strip it no longer leads", function()
+	local lobby = newGame({"A", "B"})
+	arrive(lobby, 2, "A")
+	arrive(lobby, 4, "B")
+	game.authority.B = false
+	local ids = {}
+	for id in pairs(lobby.clockCheckTargets()) do table.insert(ids, tostring(id)) end
+	table.sort(ids)
+	same(table.concat(ids, ","), "2", "targets")
+end)
+
 --== edges of the strip routing and the clock age =============================
 
 test("#18: a race id that is not text, or does not start with a known strip and a dash, has no strip", function()

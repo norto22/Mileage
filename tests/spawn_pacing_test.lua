@@ -642,6 +642,32 @@ test("#141: an error drawing a marker stops pacing: BeamMP builds every car and 
 	end
 end)
 
+test("#141: a queued colour changed in BeamMP's settings during a join is used from the next frame", function()
+	local module = setup()
+	module.onCareerActive(true)
+	for i = 0, 5 do spawn("1-" .. i, 1) end
+	run(0.5)
+	bm.settings.blobColorQueued = "#0000ff"
+	run(FRAME)
+	same(#bm.spheres, 5, "markers Mileage drew")
+	for _, sphere in ipairs(bm.spheres) do
+		local c = sphere.colour
+		expect(c.r == 0 and c.g == 0 and c.b == 1, string.format("marker colour %s,%s,%s", c.r, c.g, c.b))
+	end
+end)
+
+test("#141: a waiting car whose place moves keeps its marker and name tag over its new place", function()
+	local module = setup()
+	module.onCareerActive(true)
+	local failures = {}
+	bm.check = everyFrameLooksQueued(failures)
+	for i = 0, 5 do spawn("1-" .. i, 1) end
+	run(0.5)
+	for _, sid in ipairs(waitingCars()) do bm.positions[sid].z = bm.positions[sid].z + 4 end
+	run(0.5)
+	noFailures(failures)
+end)
+
 --== #141: the waiting count ====================================================
 
 -- Counts sent to BeamMP's UI, per frame, checked against the cars waiting after it.
