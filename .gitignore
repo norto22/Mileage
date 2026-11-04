@@ -6,3 +6,6 @@ __pycache__/
 
 # Release packages written by tools/build.py --package
 dist/
+
+# Rule files left in the repository root by local code scans
+semgrep-*.rules
