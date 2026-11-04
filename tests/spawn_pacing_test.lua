@@ -4,8 +4,11 @@
 -- The stand-in MPVehicleGE follows BeamMP 4.23.1's queue (MPVehicleGE.lua): a queued
 -- spawn sets queueWaiting; onPreRender builds every waiting car (applyQueuedEvents) once
 -- the player has been slow for queueApplyTimeout seconds, or at once with no car;
--- applyPlayerQueues builds one owner's waiting cars. The game's hook dispatcher caches
--- the function it calls until extensions.hookUpdate drops the cache.
+-- applyPlayerQueues builds one owner's waiting cars, and both send the queue count
+-- (UI.updateQueue(getQueueCounts())) when they built something. After the queue,
+-- onPreRender draws each car not built yet a marker: the queued colour while it has a
+-- queued spawn, magenta without one; a name tag goes 1 m above a drawn marker. The game's
+-- hook dispatcher caches the function it calls until extensions.hookUpdate drops the cache.
 
 local SOURCE = "Resources/Client/Mileage/lua/ge/extensions/mileage/spawnPacing.lua"
 local COMPAT = "Resources/Client/Mileage/lua/ge/extensions/mileage/compat.lua"
@@ -17,7 +20,10 @@ local logs, bm
 local function newBeamMP(opts)
 	opts = opts or {}
 	bm = {vehicles = {}, built = {}, edits = {}, queueWaiting = false, timer = 0, slow = true, hasCar = true,
-		applyTime = 3, now = 0, frame = 0, originalCalls = 0, cached = nil, meterBuilt = 0}
+		applyTime = 3, now = 0, frame = 0, originalCalls = 0, cached = nil, meterBuilt = 0,
+		settings = {enableBlobs = true, showBlobQueued = true, blobColorQueued = "#00ff00",
+			highlightQueuedPlayers = false},
+		marks = {}, tags = {}, spheres = {}, counts = {}, positions = {}}
 	local M = {}
 	bm.listCalls = 0
 	function M.getVehicles()
@@ -25,9 +31,24 @@ local function newBeamMP(opts)
 		if bm.failGetVehicles or bm.listCalls == bm.failOnCall then error("vehicle list broke") end
 		return bm.vehicles
 	end
+	local function getQueueCounts()
+		local spawns, edits, players = 0, 0, {}
+		for _, v in pairs(bm.vehicles) do
+			if v.spawnQueue then
+				spawns = spawns + 1
+				if bm.settings.highlightQueuedPlayers then players[v.ownerID] = true end
+			end
+			if v.editQueue then
+				edits = edits + 1
+				if bm.settings.highlightQueuedPlayers then players[v.ownerID] = true end
+			end
+		end
+		return spawns, edits, players
+	end
 	local function applyVehicleQueues(sid, v)
 		if v.spawnQueue then
 			v.spawnQueue = nil
+			v.isSpawned = true
 			table.insert(bm.built, {sid = sid, at = bm.now, frame = bm.frame})
 		end
 		if v.editQueue then
@@ -36,23 +57,50 @@ local function newBeamMP(opts)
 		end
 	end
 	function M.applyQueuedEvents()
+		local changed = false
 		for sid, v in pairs(bm.vehicles) do
-			if v.spawnQueue or v.editQueue then applyVehicleQueues(sid, v) end
+			if v.spawnQueue or v.editQueue then applyVehicleQueues(sid, v); changed = true end
 		end
+		if changed then UI.updateQueue(getQueueCounts()) end
 		bm.queueWaiting = false
 	end
 	function M.applyPlayerQueues(playerID)
-		local empty = true
+		local empty, changed = true, false
 		for sid, v in pairs(bm.vehicles) do
 			if v.spawnQueue or v.editQueue then
-				if v.ownerID == playerID then applyVehicleQueues(sid, v) else empty = false end
+				if v.ownerID == playerID then applyVehicleQueues(sid, v); changed = true else empty = false end
 			end
 		end
+		if changed then UI.updateQueue(getQueueCounts()) end
 		if empty then bm.queueWaiting = false end
+	end
+	-- The marker and name tag of every other player's car, as BeamMP draws them.
+	local function drawMarkers()
+		for sid, v in pairs(bm.vehicles) do
+			if not v.isLocal and v.position then
+				local z = v.position.z
+				if bm.settings.enableBlobs and not v.isSpawned then
+					local colour
+					if v.spawnQueue then
+						if bm.settings.showBlobQueued then colour = "queued" end
+					else
+						colour = "magenta"
+					end
+					if colour then
+						table.insert(bm.marks, {sid = sid, colour = colour})
+						z = z + 1
+					end
+				end
+				bm.tags[sid] = z
+			end
+		end
 	end
 	function M.onPreRender(dt)
 		bm.originalCalls = bm.originalCalls + 1
-		if not bm.queueWaiting then return end
+		if bm.queueWaiting then M.applyQueue(dt) end
+		drawMarkers()
+	end
+	function M.applyQueue(dt)
 		if bm.hasCar then
 			if bm.slow then
 				bm.timer = bm.timer + dt
@@ -75,9 +123,14 @@ local function newBeamMP(opts)
 	return M
 end
 
--- A spawn arriving from the server for another player's car.
+-- A spawn arriving from the server for another player's car, at its own place.
 local function spawn(sid, owner)
-	bm.vehicles[sid] = bm.vehicles[sid] or {ownerID = owner}
+	if not bm.vehicles[sid] then
+		local n = 0
+		for _ in pairs(bm.positions) do n = n + 1 end
+		bm.positions[sid] = vec3(10 * n, 5, 2)
+		bm.vehicles[sid] = {ownerID = owner, isSpawned = false, position = bm.positions[sid]}
+	end
 	bm.vehicles[sid].spawnQueue = {data = sid}
 	bm.queueWaiting = true
 end
@@ -88,7 +141,25 @@ local function setup(opts)
 	function log(level, tag, msg) table.insert(logs, level .. " " .. tag .. ": " .. msg) end
 	function setExtensionUnloadMode() end
 	MPCoreNetwork = {isMPSession = function() return opts.mp ~= false end}
+	vec3 = function(x, y, z) return {x = x, y = y, z = z} end
+	ColorF = function(r, g, b, a) return {r = r, g = g, b = b, a = a} end
 	newBeamMP(opts)
+	settings = {getValue = function(key) return bm.settings[key] end}
+	MPHelpers = {hex2rgb = function(hex)
+		local r, g, b = hex:match("^#(%x%x)(%x%x)(%x%x)$")
+		return {tonumber(r, 16) / 255, tonumber(g, 16) / 255, tonumber(b, 16) / 255}
+	end}
+	debugDrawer = {drawSphere = function(_, pos, radius, colour, useZ)
+		if bm.failDraw then error("drawer broke") end
+		table.insert(bm.spheres, {pos = pos, radius = radius, colour = colour, useZ = useZ})
+	end}
+	bm.updateQueue = function(spawns, edits, players)
+		local owners = {}
+		for owner in pairs(players or {}) do table.insert(owners, tostring(owner)) end
+		table.sort(owners)
+		table.insert(bm.counts, {frame = bm.frame, spawns = spawns, edits = edits, owners = table.concat(owners, ",")})
+	end
+	UI = {updateQueue = bm.updateQueue}
 	extensions = {
 		mileage_compat = dofile(COMPAT),
 		hookUpdate = function(name) if name == "onPreRender" then bm.cached = MPVehicleGE.onPreRender end end,
@@ -98,12 +169,69 @@ local function setup(opts)
 end
 
 -- Runs frames through the game's cached hook.
+-- After each frame, `bm.check` (when set) looks at what it drew.
 local function run(seconds)
 	for _ = 1, math.floor(seconds / FRAME + 0.5) do
 		bm.now = bm.now + FRAME
 		bm.frame = bm.frame + 1
+		bm.marks, bm.tags, bm.spheres = {}, {}, {}
 		bm.cached(FRAME)
+		if bm.check then bm.check() end
 	end
+end
+
+local function waitingCars()
+	local list = {}
+	for sid, v in pairs(bm.vehicles) do
+		if v.spawnQueue and not v.isLocal then table.insert(list, sid) end
+	end
+	table.sort(list)
+	return list
+end
+
+local function isBuilt(sid)
+	for _, b in ipairs(bm.built) do if b.sid == sid then return true end end
+	return false
+end
+
+-- Each frame: every waiting car has one marker, in the queued colour (BeamMP's, or one
+-- Mileage drew at its place, radius 1, green at half alpha), and its name tag 1 m above.
+-- No car is left marked as built that was not, nor with its place moved.
+local function everyFrameLooksQueued(failures)
+	return function()
+		for _, sid in ipairs(waitingCars()) do
+			local v, place = bm.vehicles[sid], bm.positions[sid]
+			local marks = {}
+			for _, m in ipairs(bm.marks) do if m.sid == sid then table.insert(marks, m.colour) end end
+			for _, sphere in ipairs(bm.spheres) do
+				if sphere.pos.x == place.x and sphere.pos.y == place.y and sphere.pos.z == place.z then
+					local c = sphere.colour
+					local queued = sphere.radius == 1 and c.r == 0 and c.g == 1 and c.b == 0
+						and math.abs(c.a - 127 / 255) < 1e-9
+					table.insert(marks, queued and "queued" or "wrong sphere")
+				end
+			end
+			local problem
+			if #marks ~= 1 or marks[1] ~= "queued" then
+				problem = "markers " .. table.concat(marks, "+")
+			elseif bm.tags[sid] ~= place.z + 1 then
+				problem = "name tag at " .. tostring(bm.tags[sid])
+			end
+			if problem then table.insert(failures, string.format("frame %d %s: %s", bm.frame, sid, problem)) end
+		end
+		for sid, v in pairs(bm.vehicles) do
+			if v.isSpawned and not isBuilt(sid) then
+				table.insert(failures, string.format("frame %d %s: marked as built", bm.frame, sid))
+			end
+			if bm.positions[sid] and v.position ~= bm.positions[sid] then
+				table.insert(failures, string.format("frame %d %s: place moved", bm.frame, sid))
+			end
+		end
+	end
+end
+
+local function noFailures(failures)
+	same(#failures, 0, "frames wrong, first: " .. tostring(failures[1]))
 end
 
 local function builtCount() return #bm.built end
@@ -405,4 +533,188 @@ test("the log says once that pacing is active", function()
 	module.onCareerActive(true)
 	module.onCareerActive(true)
 	same(countLines(logs, "join pacing active"), 1, "active lines")
+end)
+
+--== #141: waiting cars look queued =============================================
+
+test("#141: six cars waiting: every waiting car shows one queued marker and its name tag 1 m up, every frame", function()
+	local module = setup()
+	module.onCareerActive(true)
+	local failures = {}
+	bm.check = everyFrameLooksQueued(failures)
+	for i = 0, 5 do spawn("1-" .. i, 1) end
+	run(5)
+	same(builtCount(), 6, "built")
+	noFailures(failures)
+end)
+
+test("#141: with markers off or queued markers hidden nothing is drawn and no name tag moves", function()
+	for _, key in ipairs({"enableBlobs", "showBlobQueued"}) do
+		local module = setup()
+		module.onCareerActive(true)
+		bm.settings[key] = false
+		local failures = {}
+		bm.check = function()
+			if #bm.spheres > 0 or #bm.marks > 0 then
+				table.insert(failures, string.format("%s off, frame %d: markers drawn", key, bm.frame))
+			end
+			for sid, z in pairs(bm.tags) do
+				if bm.positions[sid] and z ~= bm.positions[sid].z then
+					table.insert(failures, string.format("%s off, frame %d %s: name tag at %s", key, bm.frame, sid, z))
+				end
+			end
+		end
+		for i = 0, 5 do spawn("1-" .. i, 1) end
+		run(5)
+		same(builtCount(), 6, key .. " off: built")
+		noFailures(failures)
+	end
+end)
+
+test("#141: a car removed while it waits is left as BeamMP had it, and the others still look queued", function()
+	local module = setup()
+	module.onCareerActive(true)
+	local failures = {}
+	bm.check = everyFrameLooksQueued(failures)
+	for i = 0, 4 do spawn("1-" .. i, 1) end
+	run(1)
+	local removed = bm.vehicles["1-3"]
+	bm.vehicles["1-3"] = nil
+	run(4)
+	same(removed.isSpawned, false, "the removed car's built flag")
+	same(removed.position, bm.positions["1-3"], "the removed car's place")
+	same(builtCount(), 4, "built")
+	noFailures(failures)
+end)
+
+test("#141: a waiting car BeamMP already marked as built (a respawn) gets no marker and keeps its name tag", function()
+	local module = setup()
+	module.onCareerActive(true)
+	for i = 0, 3 do spawn("1-" .. i, 1) end
+	bm.vehicles["1-3"].isSpawned = true
+	local drawnFor3, tagMoved = 0, false
+	bm.check = function()
+		local place = bm.positions["1-3"]
+		for _, sphere in ipairs(bm.spheres) do if sphere.pos.x == place.x then drawnFor3 = drawnFor3 + 1 end end
+		if bm.vehicles["1-3"].spawnQueue and bm.tags["1-3"] ~= place.z then tagMoved = true end
+		if bm.vehicles["1-3"].isSpawned ~= true then tagMoved = true end
+	end
+	run(1)
+	same(drawnFor3, 0, "markers drawn for the respawn")
+	expect(not tagMoved, "the respawn's name tag or built flag changed")
+end)
+
+test("#141: without BeamMP's helpers, ColorF or the debug drawer no marker is drawn, one line says so, and pacing goes on", function()
+	for _, missing in ipairs({"MPHelpers", "ColorF", "debugDrawer"}) do
+		local module = setup()
+		module.onCareerActive(true)
+		_G[missing] = nil
+		local failures = {}
+		bm.check = function()
+			for _, m in ipairs(bm.marks) do
+				if m.colour ~= "queued" then table.insert(failures, missing .. " missing: BeamMP drew " .. m.colour) end
+			end
+			if #bm.spheres > 0 then table.insert(failures, missing .. " missing: Mileage drew a marker") end
+			for sid, v in pairs(bm.vehicles) do
+				if v.isSpawned and not isBuilt(sid) then table.insert(failures, missing .. " missing: " .. sid .. " marked as built") end
+			end
+		end
+		for i = 0, 5 do spawn("1-" .. i, 1) end
+		run(5)
+		same(builtCount(), 6, missing .. " missing: built")
+		same(framesWithTwo(), 0, missing .. " missing: frames that built two cars")
+		same(countLines(logs, "queued markers"), 1, missing .. " missing: lines")
+		noFailures(failures)
+	end
+end)
+
+test("#141: an error drawing a marker stops pacing: BeamMP builds every car and none stays marked as built", function()
+	local module = setup()
+	module.onCareerActive(true)
+	bm.failDraw = true
+	for i = 0, 5 do spawn("1-" .. i, 1) end
+	local ok, err = pcall(run, 3.1)
+	expect(ok, "raised: " .. tostring(err))
+	same(builtCount(), 6, "built by BeamMP's own rule")
+	same(countLines(logs, "join pacing failed"), 1, "error lines")
+	for sid, v in pairs(bm.vehicles) do
+		same(v.position, bm.positions[sid], sid .. " place")
+	end
+end)
+
+--== #141: the waiting count ====================================================
+
+-- Counts sent to BeamMP's UI, per frame, checked against the cars waiting after it.
+local function everyCountComplete(failures)
+	local seen = 0
+	return function()
+		local inFrame = 0
+		for i = seen + 1, #bm.counts do
+			local c = bm.counts[i]
+			inFrame = inFrame + 1
+			local waiting = #waitingCars()
+			if c.spawns ~= waiting then
+				table.insert(failures, string.format("frame %d: count %d with %d waiting", bm.frame, c.spawns, waiting))
+			end
+		end
+		if inFrame > 1 then table.insert(failures, string.format("frame %d: %d counts sent", bm.frame, inFrame)) end
+		seen = #bm.counts
+		if UI.updateQueue ~= bm.updateQueue then
+			table.insert(failures, string.format("frame %d: UI.updateQueue is not BeamMP's", bm.frame))
+		end
+	end
+end
+
+test("#141: six cars waiting: each count sent while they are built shows every car still to come, once a frame", function()
+	local module = setup()
+	module.onCareerActive(true)
+	local failures = {}
+	bm.check = everyCountComplete(failures)
+	for i = 0, 5 do spawn("1-" .. i, 1) end
+	run(2.9)
+	same(#bm.counts, 0, "counts sent before BeamMP builds anything")
+	run(2)
+	same(builtCount(), 6, "built")
+	same(#bm.counts, 6, "counts sent, one per car built")
+	same(bm.counts[1].spawns, 5, "the first count")
+	same(bm.counts[6].spawns, 0, "the last count")
+	noFailures(failures)
+end)
+
+test("#141: the count includes held cars' queued edits and, with queued players highlighted, their owners", function()
+	local module = setup()
+	module.onCareerActive(true)
+	bm.settings.highlightQueuedPlayers = true
+	for i = 0, 2 do spawn("1-" .. i, 1) end
+	for i = 0, 1 do spawn("2-" .. i, 2) end
+	bm.vehicles["2-1"].editQueue = "{}"
+	run(3.05)
+	same(builtCount(), 1, "built")
+	local c = bm.counts[#bm.counts]
+	same(c.spawns, 4, "spawns counted")
+	same(c.edits, 1, "edits counted")
+	same(c.owners, "1,2", "owners listed")
+end)
+
+test("#141: UI.updateQueue is BeamMP's again after an error in BeamMP's call, and after pacing is removed", function()
+	local module = setup()
+	module.onCareerActive(true)
+	for i = 0, 3 do spawn("1-" .. i, 1) end
+	local original = bm.original
+	module.onBeamMPServerLeave()
+	local fail = true
+	MPVehicleGE.onPreRender = function(dt)
+		if fail then fail = false; UI.updateQueue(0, 0); error("BeamMP broke") end
+		return original(dt)
+	end
+	bm.original = MPVehicleGE.onPreRender
+	module.onCareerActive(true)
+	local ok = pcall(run, FRAME)
+	expect(not ok, "BeamMP's error raised")
+	same(UI.updateQueue, bm.updateQueue, "UI.updateQueue after BeamMP's error")
+	same(bm.counts[#bm.counts].spawns, 4, "the count sent once the cars were back")
+	module.onCareerActive(true)
+	run(3.05)
+	module.onCareerActive(false)
+	same(UI.updateQueue, bm.updateQueue, "UI.updateQueue after pacing is removed")
 end)
