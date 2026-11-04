@@ -120,6 +120,43 @@ test("a street race shows the opponent, the time, the finish and the stake", () 
 	assert.strictEqual(scope.live, null);
 });
 
+test("a race spot's countdown shows the prize for first place with everyone on the grid", () => {
+	const {scope} = load();
+	scope.emit("MileageSpotRace", {phase: "countdown", id: "s1", routeName: "City Race 1", count: 3, you: "Taylor",
+		prize: 4000, racers: [{name: "Taylor"}, {name: "Sam"}, {name: "Ibishu Pessima", car: true}, {name: "ETK 800", car: true}]});
+	assert.strictEqual(lineOf(scope.live.view), "You, Sam, 2 cars · prize $4,000 for 4 racers");
+	scope.emit("MileageSpotRace", {phase: "countdown", id: "s1", routeName: "City Race 1", count: 2, you: "Taylor",
+		prize: 0, racers: [{name: "Taylor"}, {name: "Sam"}]});
+	assert.strictEqual(lineOf(scope.live.view), "You, Sam", "no prize line when the server prize is off");
+});
+
+test("a race spot countdown shows no prize line for a missing, text, zero or negative prize, and a grid that is not a list", () => {
+	const {scope} = load();
+	const racers = [{name: "Taylor"}, {name: "Sam"}];
+	for (const prize of [undefined, "lots", 0, -2000, null]) {
+		scope.emit("MileageSpotRace", {phase: "countdown", id: "s1", routeName: "City Race 1", count: 3, you: "Taylor",
+			prize, racers});
+		assert.strictEqual(lineOf(scope.live.view), "You, Sam", "no prize line for " + String(prize));
+	}
+	scope.emit("MileageSpotRace", {phase: "countdown", id: "s1", routeName: "City Race 1", count: 3, you: "Taylor",
+		prize: 0, racers: "Taylor"});
+	assert.strictEqual(lineOf(scope.live.view), "", "a grid that is not a list shows no names");
+	assert.strictEqual(scope.live.view.big, "3", "the count still shows");
+});
+
+test("a race event's countdown and GO show the prize for the racers who started", () => {
+	const {scope} = load();
+	scope.emit("MileageRace", {phase: "countdown", race: "e1", other: "the race event", stake: 0, event: true,
+		prize: 50000, racers: 4, count: 3});
+	assert.strictEqual(lineOf(scope.live.view), "vs the race event · prize $50,000 for 4 racers");
+	scope.emit("MileageRace", {phase: "go", race: "e1", other: "the race event", stake: 0, event: true,
+		prize: 50000, racers: 4});
+	assert.strictEqual(lineOf(scope.live.view), "vs the race event · prize $50,000 for 4 racers");
+	scope.emit("MileageRace", {phase: "countdown", race: "e2", other: "the race event", stake: 0, event: true,
+		prize: 0, racers: 2, count: 3});
+	assert.strictEqual(lineOf(scope.live.view), "vs the race event · no stake", "no prize line for a $0 event");
+});
+
 test("a race against a traffic car shows its model, keep driving and the race reward", () => {
 	const {scope} = load();
 	scope.emit("MileageRace", {phase: "countdown", race: "a1", rolling: true, other: "Ibishu Pessima", reward: 750, count: 3});

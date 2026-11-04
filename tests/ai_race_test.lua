@@ -300,7 +300,7 @@ World.test("a status tells each game whether racing traffic is on, the reward an
 	local status = heard(world, ann, "status")
 	same(#status, 1, "one status at the career start")
 	same(status[1].allowed, true, "on by default")
-	same(status[1].prize, 0, "no reward until set")
+	same(status[1].prize, 0, "no reward with the test world's prize at 0")
 	same(status[1].prizeAgainIn, 0, "no wait")
 	world:setConfig("server", "aiRacePrize", "2000")
 	same(heard(world, ann, "status")[2].prize, 2000, "the new reward")
@@ -458,7 +458,7 @@ World.test("when the traffic car is faster nobody is paid and nobody gets a win"
 	same(world:printedMatching("the traffic car wins, no reward"), 1, "the console line")
 end)
 
-World.test("the race reward is off until set, and waits per winner", function(world)
+World.test("a race reward of 0 pays nothing, and a set reward waits per winner", function(world)
 	local ann, t = annAndCar(world)
 	raceAnn(world, ann, t, 30, 40)
 	same(card(world, ann, "result").winner, "Ann", "she won")
@@ -900,6 +900,30 @@ World.test("a joined player who beats the traffic car first gets 150%", function
 	same(card(world, bob, "result").prize, 3000, "Bob is told")
 	expect(t.entry.roleName == "standard" and t.entry.enableRespawn, "the car is back in traffic")
 end)
+
+--== the $2000 default ======================================================
+
+World.test("from a settings file before the $2000 prizes, beating the car alone pays $2000 and waits 5 minutes",
+	function(world)
+	local ann, t = annAndCar(world)
+	raceAnn(world, ann, t, 40, 40)
+	same(ann.money, 3000, "the default reward")
+	same(card(world, ann, "result").prizeAgainIn, 300, "a 5-minute wait")
+end, {settingsFile = "old"})
+
+World.test("from a settings file before the $2000 prizes, a joined player who wins gets $3000", function(world)
+	local ann, t, bob = threeNear(world)
+	press(world, ann)
+	world:as(bob, function() mileage_aiRace.press() end)
+	world:pump()
+	t.car.speed = 75
+	world:advance(35)
+	world:drive(bob, FINISH.x, FINISH.y, FINISH.z)
+	world:advance(10)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	world:advance(10)
+	same(bob.money, 4000, "Bob gets 150% of the $2,000 default")
+end, {settingsFile = "old"})
 
 World.test("an invited player who gives up drops out and the others race on", function(world)
 	local ann, t, bob = threeNear(world, 2000)

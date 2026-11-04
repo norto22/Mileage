@@ -136,6 +136,9 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 		var other = String(data.other || "");
 		var stake = Number(data.stake) || 0;
 		var stakeText = stake > 0 ? moDollars(stake) + " stake" : "no stake";
+		// An event race shows the prize for the racers who started instead.
+		var eventPrize = data.event ? Number(data.prize) || 0 : 0;
+		if (eventPrize > 0) stakeText = "prize " + moDollars(eventPrize) + " for " + (Number(data.racers) || 0) + " racers";
 		switch (data.phase) {
 		case "staking":
 			return {title: "Race vs " + other, note: stake > 0 ? "Taking both stakes..." : "Getting ready..."};
@@ -274,6 +277,11 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 			if (pot > 0) parts.push(moDollars(pot) + " stakes");
 			if (prize > 0) parts.push(moDollars(prize) + " prize");
 			if (parts.length > 0) rows.push({label: "You get", value: parts.join(" + ")});
+			// The same pair earned the server prize within the owner's drag wait.
+			var againIn = typeof data.prizeAgainIn === "number" ? data.prizeAgainIn : 0;
+			if (prize === 0 && againIn > 0) {
+				rows.push({label: "Server prize", value: "again in " + Math.ceil(againIn / 60) + " min"});
+			}
 			return {title: pot + prize > 0 ? "You won " + moDollars(pot + prize) : "You won", rows: rows, close: true};
 		}
 		if (stake > 0) rows.push({label: "You lost", value: "your " + moDollars(stake) + " stake"});
@@ -646,7 +654,14 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 				.map(function (r) { return r.name === you ? "You" : String(r.name); });
 			var cars = (Array.isArray(data.racers) ? data.racers : []).filter(function (r) { return r.car; }).length;
 			if (cars > 0) names.push(cars + " car" + (cars === 1 ? "" : "s"));
-			return {title: routeName, big: String(data.count), rows: [{label: "Grid", value: names.join(", ")}]};
+			var countdownRows = [{label: "Grid", value: names.join(", ")}];
+			// The prize for first place with everyone on the grid, as the server pays it.
+			var gridPrize = Number(data.prize) || 0;
+			if (gridPrize > 0) {
+				var gridSize = Array.isArray(data.racers) ? data.racers.length : 0;
+				countdownRows.push({label: "Prize for first place", value: moDollars(gridPrize) + " for " + gridSize + " racers"});
+			}
+			return {title: routeName, big: String(data.count), rows: countdownRows};
 		case "go":
 			return {title: routeName, big: "GO", giveUp: true};
 		case "racing":
@@ -860,7 +875,8 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 		case "joined":
 		case "left":
 			var minutes = Math.max(1, Math.ceil((Number(data.seconds) || 0) / 60));
-			var rows = [{label: "Route", value: route}, {label: "Prize", value: moDollars(data.prize) + " to the winner"},
+			var prizeText = data.grows === true ? " for two racers, +50% per extra racer" : " to the winner";
+			var rows = [{label: "Route", value: route}, {label: "Prize", value: moDollars(data.prize) + prizeText},
 				{label: "Joined", value: (Number(data.joined) || 0) + " player" + (data.joined === 1 ? "" : "s")}];
 			return {
 				title: "Race event in " + minutes + " minute" + (minutes === 1 ? "" : "s"),

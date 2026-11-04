@@ -1,6 +1,7 @@
 -- Drag money: the server decides a two-player drag run from the strip leader's start and
 -- green and each racer's own reports, by the game's heads-up or bracket rule, and pays the
--- owner's drag prize to the winner of every decided run. Only a run both racers' games
+-- owner's drag prize to the winner of a decided run, at most once per drag wait for the same
+-- two racers. Only a run both racers' games
 -- confirmed, at the server's own copy of the strip, counts. Every case checks the money in
 -- the players' saves.
 
@@ -135,7 +136,91 @@ World.test("the result card reaches the prompts app once; a UI reload does not b
 	same(#world:ui(bob, "MileageDragRace"), 1, "not shown again")
 end, withPrize)
 
-World.test("every win pays the prize again, with no wait", function(world)
+local withWait = {server = {dragRacePrize = PRIZE, dragRacePrizeCooldownMinutes = 5}}
+
+local function plainWin(world, leader, a, b, winner)
+	local id = run(world, leader, a, b)
+	finish(world, a, id, 1, winner == a and 11.2 or 11.9)
+	finish(world, b, id, 2, winner == b and 11.2 or 11.9)
+	atStrip(world, a, 1)
+	atStrip(world, b, 2)
+end
+
+World.test("the same pair's next win within the drag wait pays no prize, and the card says when it pays again",
+		function(world)
+	local ann, bob = pair(world)
+	plainWin(world, ann, ann, bob, ann)
+	same(ann.savedMoney, 10000 + PRIZE, "the first win pays")
+	world:advance(60)
+	plainWin(world, ann, ann, bob, ann)
+	same(ann.savedMoney, 10000 + PRIZE, "no second prize within the wait")
+	local card = lastCard(world, ann)
+	same(card.phase, "result", "the winner still gets a result card")
+	same(card.prize, 0, "no prize on it")
+	expect(card.prizeAgainIn > 200 and card.prizeAgainIn <= 240, "when it pays again: " .. tostring(card.prizeAgainIn))
+	expect(world:printedMatching("Ann beat Bob, prize held back for the wait") == 1, "console says why")
+	world:advance(300)
+	plainWin(world, ann, ann, bob, ann)
+	same(ann.savedMoney, 10000 + 2 * PRIZE, "after the wait the prize pays again")
+	same(lastCard(world, ann).prizeAgainIn, 0, "no wait on a paid card")
+end, withWait)
+
+World.test("the drag wait is the pair's: the other racer winning next pays no prize either", function(world)
+	local ann, bob = pair(world)
+	plainWin(world, ann, ann, bob, ann)
+	plainWin(world, ann, ann, bob, bob)
+	same(bob.savedMoney, 10000, "Bob's win within the pair's wait pays nothing")
+	expect(lastCard(world, bob).prizeAgainIn > 0, "his card says when it pays again")
+end, withWait)
+
+World.test("a racer who beat someone else is still paid against a new opponent within the wait", function(world)
+	local ann, bob = pair(world)
+	plainWin(world, ann, ann, bob, ann)
+	world:leave(bob)
+	world:advance(2)
+	local cat = world:join("Cat", 10000)
+	atStrip(world, ann, 1)
+	atStrip(world, cat, 2)
+	plainWin(world, ann, ann, cat, ann)
+	same(ann.savedMoney, 10000 + 2 * PRIZE, "the win against Cat pays")
+end, withWait)
+
+-- Rejects a wait started by every decided run: a run with no winner hands over no prize.
+World.test("a run with no winner does not start the drag wait: the pair's next win pays", function(world)
+	local ann, bob = pair(world)
+	local id = run(world, ann, ann, bob)
+	finish(world, ann, id, 1, 11.5)
+	finish(world, bob, id, 2, 11.5)
+	atStrip(world, ann, 1)
+	atStrip(world, bob, 2)
+	plainWin(world, ann, ann, bob, ann)
+	same(ann.savedMoney, 10000 + PRIZE, "the win after a tie pays the prize")
+	same(lastCard(world, ann).prizeAgainIn, 0, "no wait on its card")
+end, withWait)
+
+-- Rejects a wait whose end is fixed when the prize is paid: the owner's setting is read when
+-- the next run is decided.
+World.test("the drag wait is the setting when the run is decided: set to 0 within the wait, the next win pays", function(world)
+	local ann, bob = pair(world)
+	plainWin(world, ann, ann, bob, ann)
+	world:setConfig("server", "dragRacePrizeCooldownMinutes", 0)
+	plainWin(world, ann, ann, bob, ann)
+	same(ann.savedMoney, 10000 + 2 * PRIZE, "paid again at once")
+	world:setConfig("server", "dragRacePrizeCooldownMinutes", 60)
+	plainWin(world, ann, ann, bob, ann)
+	same(ann.savedMoney, 10000 + 2 * PRIZE, "a longer wait holds the next one back")
+	expect(lastCard(world, ann).prizeAgainIn > 3000, "the card counts from the longer wait")
+end, withWait)
+
+World.test("from a settings file before the $2000 prizes, a drag win pays $2000", function(world)
+	local ann, bob = pair(world)
+	plainWin(world, ann, ann, bob, ann)
+	same(ann.savedMoney, 12000, "the $2000 default")
+	plainWin(world, ann, ann, bob, ann)
+	same(ann.savedMoney, 12000, "and the 5-minute wait")
+end, {settingsFile = "old"})
+
+World.test("with the drag wait at 0 every win pays the prize again", function(world)
 	local ann, bob = pair(world)
 	for _ = 1, 2 do
 		local id = run(world, ann, ann, bob)
@@ -626,6 +711,20 @@ World.test("a staked run: the jumper's faster time loses, the clean finisher tak
 	same(card.times.Ann, 11.6, "Ann's time")
 	same(races(world), 0, "race record gone once paid")
 end, withPrize)
+
+World.test("a staked run within the drag wait still pays both stakes, without the prize", function(world)
+	local ann, bob = pair(world)
+	plainWin(world, ann, ann, bob, ann)
+	staked(world, ann, bob, 1000)
+	local id = run(world, ann, ann, bob)
+	finish(world, ann, id, 1, 11.2)
+	finish(world, bob, id, 2, 11.9)
+	same(ann.savedMoney, 10000 + PRIZE + 1000, "the first prize and Bob's stake, no second prize")
+	local card = lastCard(world, ann)
+	same(card.pot, 2000, "the pot")
+	same(card.prize, 0, "no prize")
+	expect(card.prizeAgainIn > 0, "the card says when it pays again")
+end, withWait)
 
 World.test("the held card says when the pair's run is out, when it ended before the green, and again after a UI reload",
 		function(world)

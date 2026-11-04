@@ -525,16 +525,85 @@ function World:spawnCar(p, model, opts)
 		if on then self.frozen = on == "1" end
 		local list = cmd:match("^ai%.driveUsingPath%({wpTargetList = {(.-)}")
 		if list then
-			self.path = {}
-			for name in list:gmatch('"([^"]+)"') do table.insert(self.path, name) end
+			-- refuseDrives: how many drive commands this car's AI ignores (math.huge: all).
+			if (self.refuseDrives or 0) > 0 then
+				self.refuseDrives = self.refuseDrives - 1
+				return
+			end
+			local path = {}
+			for name in list:gmatch('"([^"]+)"') do table.insert(path, name) end
+			if not world:aiBuildsRoute(path) then
+				self.racing, self.routeFailed = false, true
+				return
+			end
+			self.path = path
 			self.laps = tonumber(cmd:match("noOfLaps = (%d+)")) or 1
 			self.aggression = tonumber(cmd:match("aggression = ([%d%.]+)"))
-			self.pathIndex, self.lap, self.racing = 1, 1, true
+			self.pathIndex, self.lap, self.racing, self.routeFailed = 1, 1, true, false
 		end
 	end
 	self.spawned[s.sid] = s
 	self:serverOutput(function() onVehicleSpawnHandler(p.id, s.vid) end)
 	return car
+end
+
+-- The game's road graph (lua/common/graphpath.lua) over world.roadNodes: only points with
+-- a link are in it, every link both ways, and each point leads on to "<name>+1" and
+-- "<name>+2", the road getRandomPathG gives beyond it. getPath(a, b) is {} when a or b is
+-- not in the graph, {a} when no road joins them, else the points from a to b.
+function World:roadGraph()
+	local graph = {}
+	local function join(a, b)
+		graph[a] = graph[a] or {}
+		graph[b] = graph[b] or {}
+		graph[a][b], graph[b][a] = true, true
+	end
+	for name, node in pairs(self.roadNodes or {}) do
+		for other in pairs(node.links or {}) do join(name, other) end
+	end
+	local named = {}
+	for name in pairs(graph) do table.insert(named, name) end
+	for _, name in ipairs(named) do
+		join(name, name .. "+1")
+		join(name .. "+1", name .. "+2")
+	end
+	local gp = {graph = graph}
+	function gp:getPath(a, b)
+		if graph[a] == nil or graph[b] == nil then return {} end
+		local from, queue, at = {[a] = false}, {a}, 1
+		while queue[at] and from[b] == nil do
+			local name = queue[at]
+			at = at + 1
+			for other in pairs(graph[name]) do
+				if from[other] == nil then
+					from[other] = name
+					table.insert(queue, other)
+				end
+			end
+		end
+		if from[b] == nil then return {a} end
+		local path, name = {}, b
+		while name do
+			table.insert(path, 1, name)
+			name = from[name]
+		end
+		return path
+	end
+	function gp:getRandomPathG(node) return {node, node .. "+1", node .. "+2"} end
+	return gp
+end
+
+-- Whether the game's AI builds a route through path from where it stands, as ai.lua's
+-- newManualPath does: the first point reached by road from the car, and a road between
+-- every two points in a row. It tries once per command and stands still when it cannot.
+function World:aiBuildsRoute(path)
+	local gp = self:roadGraph()
+	if #path == 0 or gp.graph[path[1]] == nil or (self.unreachable or {})[path[1]] then return false end
+	for i = 1, #path - 1 do
+		local route = gp:getPath(path[i], path[i + 1])
+		if #route == 0 or (#route == 1 and path[i + 1] ~= path[i]) then return false end
+	end
+	return true
 end
 
 -- Spawned cars sent a race path drive it; a frozen one, or one at speed 0, stands.
@@ -700,9 +769,7 @@ function World:loadGame(p)
 			if (world.unreachable or {})[node] or not (world.roadNodes or {})[node] then return {} end
 			return {"from", node}
 		end,
-		getGraphpath = function()
-			return {getRandomPathG = function(_, node) return {node, node .. "+1", node .. "+2"} end}
-		end,
+		getGraphpath = function() return world:roadGraph() end,
 	}
 	-- The game's traffic and parked car amounts (p.amounts: road and parked as set, roadCars
 	-- and parkedCars as spawned; every set goes to p.amountsSet) and its vehicle pool, which
@@ -954,7 +1021,19 @@ end
 REAL_IO = REAL_IO or {open = io.open, rename = os.rename, remove = os.remove, time = os.time}
 World.realOpen = REAL_IO.open
 
--- opts.config: server settings to start with (merged into a config with autoUpdate off).
+-- The race prize settings every world starts with unless a test asks for the real defaults:
+-- prizes off, the 10-minute waits and no drag wait, so a test proves what it names and no
+-- server prize joins its money unless it sets one.
+World.OLD_PRIZE_SETTINGS = {
+	racePrize = 0, aiRacePrize = 0, spotRacePrize = 0, dragRacePrize = 0,
+	racePrizeCooldownMinutes = 10, aiRacePrizeCooldownMinutes = 10, spotRacePrizeCooldownMinutes = 10,
+	dragRacePrizeCooldownMinutes = 0,
+}
+
+-- opts.server: server settings to start with (merged into a config with autoUpdate off and
+-- the prize settings above). opts.settingsFile: "old" writes a settings file from before
+-- the $2000 defaults (no prize settings and no drag wait), "fresh" writes none, so the
+-- server starts as a new install; either way the real defaults apply.
 function World.new(opts)
 	opts = opts or {}
 	local self = setmetatable({players = {}, toServer = {}, toClients = {}, serverLog = {}, clientLog = {},
@@ -994,8 +1073,13 @@ function World.new(opts)
 		return self.epoch + math.floor(self.now)
 	end
 	local server = {autoUpdate = false, autoExit = false}
+	if opts.settingsFile == nil then
+		for k, v in pairs(World.OLD_PRIZE_SETTINGS) do server[k] = v end
+	end
 	for k, v in pairs(opts.server or {}) do server[k] = v end
-	self.disk["Resources/Server/Mileage/config/config.json"] = encode({server = server, client = opts.client or {}})
+	if opts.settingsFile ~= "fresh" then
+		self.disk["Resources/Server/Mileage/config/config.json"] = encode({server = server, client = opts.client or {}})
+	end
 	self:startServer()
 	return self
 end

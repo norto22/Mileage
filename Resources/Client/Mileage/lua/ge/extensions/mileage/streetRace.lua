@@ -38,11 +38,16 @@ local function report(fields)
 	TriggerServerEvent("mileageRaceReport", jsonEncode(fields))
 end
 
--- A rolling race's panel also shows that nobody stops, and the race reward.
+-- A rolling race's panel also shows that nobody stops, and the race reward; an event
+-- race's shows the prize for the racers who started.
 local function ui(data)
 	if race and race.rolling and data.race == race.id then
 		data.rolling = true
 		data.reward = race.reward
+	elseif race and race.event and data.race == race.id then
+		data.event = true
+		data.prize = race.prize
+		data.racers = race.racers
 	end
 	guihooks.trigger("MileageRace", data)
 end
@@ -265,10 +270,11 @@ end
 
 --- A race event's race, after mileage/raceEvents.lua moved this car to the grid: the
 --- same countdown, timing and finish report as a street race, without stakes.
---- info: {id, finish, radius, seconds}
+--- info: {id, finish, radius, seconds, prize, racers}
 function M.startEventRace(info)
 	if type(info) ~= "table" or type(info.id) ~= "string" or not isPoint(info.finish) then return false end
 	race = {id = info.id, phase = "countdown", other = "the race event", stake = 0, event = true,
+		prize = tonumber(info.prize) or 0, racers = tonumber(info.racers) or 0,
 		finish = info.finish, radius = tonumber(info.radius) or 20, countdownLeft = tonumber(info.seconds) or 5}
 	setFrozen(true)
 	local c = compat()

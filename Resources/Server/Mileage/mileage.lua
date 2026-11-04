@@ -12,8 +12,8 @@
 -- `lineage` field in versions/client.json and versions/server.json.
 local LINEAGE = "norto22/Mileage"
 
-local HARD_CLIENT_VERSION = {major = 0, minor = 7, revision = 1, lineage = LINEAGE}
-local HARD_SERVER_VERSION = {major = 0, minor = 7, revision = 1, lineage = LINEAGE}
+local HARD_CLIENT_VERSION = {major = 0, minor = 7, revision = 2, lineage = LINEAGE}
+local HARD_SERVER_VERSION = {major = 0, minor = 7, revision = 2, lineage = LINEAGE}
 
 local RAW = "https://raw.githubusercontent.com/"
 local GITHUB_REPO = "norto22/Mileage/"
@@ -58,26 +58,29 @@ local defaultConfig = {
 		raceStakeMax = 10000,
 		-- Money the server adds for the winner of a race between players, 0 to 1000000;
 		-- 0 is off. The same two players earn it at most once per cooldown (0 to 1440 min).
-		racePrize = 0,
-		racePrizeCooldownMinutes = 10,
+		racePrize = 2000,
+		racePrizeCooldownMinutes = 5,
 		-- Players may race one of their own traffic cars on the road ("Race this car" in the
 		-- prompts app). aiRacePrize is the race reward the server pays the first player who
 		-- beats the traffic car, 0 to 1000000 (0 is off), plus half of it for each player who
 		-- joined; one player earns it at most once per cooldown (0 to 1440 min).
 		allowAiRaces = true,
-		aiRacePrize = 0,
-		aiRacePrizeCooldownMinutes = 10,
+		aiRacePrize = 2000,
+		aiRacePrizeCooldownMinutes = 5,
 		-- Race spots at the game's West Coast routes: a player starts a race there against up
-		-- to spotRaceOpponentsMax opponents (0 to 5) and invited players. spotRacePrize is paid
-		-- to a player who finishes first overall, 0 to 1000000 (0 is off); one player earns it
-		-- at most once per cooldown (0 to 1440 min).
+		-- to spotRaceOpponentsMax opponents (0 to 5) and invited players. spotRacePrize is the
+		-- prize for a race of two, paid to a player who finishes first overall, plus half of it
+		-- for each racer past two, 0 to 1000000 (0 is off); one player earns it at most once
+		-- per cooldown (0 to 1440 min).
 		allowSpotRaces = true,
-		spotRacePrize = 0,
-		spotRacePrizeCooldownMinutes = 10,
+		spotRacePrize = 2000,
+		spotRacePrizeCooldownMinutes = 5,
 		spotRaceOpponentsMax = 5,
 		-- Money the server adds for the winner of a drag race between two players at the
-		-- strip, 0 to 1000000; 0 is off. Every win pays it, with no wait between prizes.
-		dragRacePrize = 0,
+		-- strip, 0 to 1000000; 0 is off. The same two players earn it at most once per
+		-- cooldown (0 to 1440 min; 0 pays every win).
+		dragRacePrize = 2000,
+		dragRacePrizeCooldownMinutes = 5,
 		-- The shortest race allowed, in metres from start to finish (0 to 20000), and the
 		-- time after which a race nobody finished ends with both stakes back (1 to 120 min).
 		raceMinDistance = 500,
@@ -551,6 +554,25 @@ local function prepareConfig()
 		WriteJson(configPath .. "config.json", Config)
 	else
 		local updateFound
+		-- A file from before the $2000 prizes has no drag wait setting. Its prizes still at
+		-- the old default of 0 and waits still at the old 10 minutes move to the new defaults,
+		-- once: the drag wait is added below, so the next start finds it and moves nothing.
+		if type(Config.server) == "table" and Config.server.dragRacePrizeCooldownMinutes == nil then
+			local old = {racePrize = 0, aiRacePrize = 0, spotRacePrize = 0, dragRacePrize = 0,
+				racePrizeCooldownMinutes = 10, aiRacePrizeCooldownMinutes = 10, spotRacePrizeCooldownMinutes = 10}
+			local keys = {}
+			for key in pairs(old) do table.insert(keys, key) end
+			table.sort(keys)
+			for _, key in ipairs(keys) do
+				local new = defaultConfig.server[key]
+				if Config.server[key] == old[key] then
+					Config.server[key] = new
+					updateFound = true
+					print(string.format("[Mileage] ---------- Mileage Config server %s moved from %d to %d (the new default);"
+						.. " to keep it as it was: Mileage SetConfig server %s %d", key, old[key], new, key, old[key]))
+				end
+			end
+		end
 		for section, fields in pairs(defaultConfig) do
 			print("[Mileage] ---------- Mileage Config Checking " .. section)
 			if Config[section] == nil then
@@ -612,6 +634,12 @@ end
 -- share only what they must through this table, which keeps the plugin's main chunk
 -- under Lua's limit of 200 local names. Money.start loads their data on a server start.
 local Money = {}
+-- The prize for a race of this many racers: the base prize for two, and half of it again
+-- for each racer past two, rounded down; never less than the base. Race spots, races
+-- against traffic cars and race events share it.
+Money.grownPrize = function(base, racers)
+	return math.floor(base * (1 + 0.5 * math.max(0, racers - 2)))
+end
 -- When each car reached the server (signalTimer seconds), by server vehicle id.
 Money.spawnedAt = {}
 
@@ -1259,6 +1287,7 @@ local function features()
 		raceMinDistance = serverNumber("raceMinDistance", 0, 20000),
 		raceTimeLimitMinutes = serverNumber("raceTimeLimitMinutes", 1, 120),
 		dragRacePrize = serverNumber("dragRacePrize", 0, 1000000),
+		dragRacePrizeCooldownMinutes = serverNumber("dragRacePrizeCooldownMinutes", 0, 1440),
 		sessionSendingMax = tonumber(Config.server.sessionSendingMax) or 0,
 	}
 end
@@ -2161,8 +2190,9 @@ end
 -- did not finish always last. The run is decided once every racer reported or left, or
 -- DECIDE_SECONDS after the green. A racer leaving or the leader ending the run after the
 -- green never decides it early. The owner's prize (dragRacePrize) is paid to the winner of
--- every decided run, with no wait; a pair holding a staked drag race (the Races section,
--- kind "drag") settles it with this run.
+-- a decided run, at most once per drag wait (dragRacePrizeCooldownMinutes) for the same two
+-- racers; a pair holding a staked drag race (the Races section, kind "drag") settles it
+-- with this run.
 --
 -- dragRuns[run] = {id, strip, names = {a, b}, ids = {[name] = playerId}, lanes = {[name] =
 -- lane}, dragType, startedAt, staged = {[name] = true}, green, counts, race, reports =
@@ -2190,6 +2220,21 @@ local RUNS_MAX = 32
 local DRAG_TYPES = {headsUpRace = true, bracketRace = true}
 
 local dragRuns = {}
+-- When each pair of racers last earned the drag prize (os.time), by both names in order;
+-- kept in memory only, like the other prize waits.
+local dragPrizeEarnedAt = {}
+
+local function dragPairKey(a, b)
+	if a > b then a, b = b, a end
+	return a .. "|" .. b
+end
+
+-- Seconds until this pair may earn the drag prize again; 0 when they may now.
+local function dragPrizeAgainIn(key)
+	local earned = dragPrizeEarnedAt[key]
+	if not earned then return 0 end
+	return math.max(0, serverNumber("dragRacePrizeCooldownMinutes", 0, 1440) * 60 - (os.time() - earned))
+end
 
 local function runCount()
 	local n = 0
@@ -2307,6 +2352,10 @@ local function decide(run)
 	local winner, noWinner = winnerOf(run)
 	local why = winner and whyOf(run, winner) or noWinner
 	local prize = winner and serverNumber("dragRacePrize", 0, 1000000) or 0
+	-- The same pair earns the prize at most once per drag wait, whichever of them wins.
+	local pair = dragPairKey(run.names[1], run.names[2])
+	local againIn = prize > 0 and dragPrizeAgainIn(pair) or 0
+	if againIn > 0 then prize = 0 end
 	local times, outcomes = {}, {}
 	for _, name in ipairs(run.names) do
 		outcomes[name] = outcomeOf(run, name)
@@ -2319,16 +2368,19 @@ local function decide(run)
 		startTransfer({kind = "prize", from = SERVER_PARTY, to = winner, amount = prize,
 			giveLabel = "Drag race prize vs " .. loser})
 	end
+	if winner and prize > 0 then dragPrizeEarnedAt[pair] = os.time() end
 	print(string.format("[Mileage] Drag run %s at %s: %s%s", consoleText(run.id), consoleText(run.strip),
 		winner and (consoleText(winner) .. " beat " .. consoleText(loser)) or ("no winner (" .. why .. ")"),
-		(winner and prize > 0) and string.format(", prize $%d", prize) or ""))
-	-- A plain run shows a card only when it paid a prize; a staked run always does.
-	if not staked and not (winner and prize > 0) then return end
+		(winner and prize > 0) and string.format(", prize $%d", prize)
+			or (againIn > 0 and ", prize held back for the wait" or "")))
+	-- A plain run shows a card only when it paid a prize or held one back for the wait; a
+	-- staked run always does.
+	if not staked and not (winner and (prize > 0 or againIn > 0)) then return end
 	for _, name in ipairs(run.names) do
 		local id = Money.playerIdByName(name)
 		if id then
 			sendJson("races", id, "rxMileageDragRace", {race = run.race, run = run.id, phase = "result",
-				winner = winner, why = why, times = times, outcomes = outcomes, prize = prize,
+				winner = winner, why = why, times = times, outcomes = outcomes, prize = prize, prizeAgainIn = againIn,
 				stake = staked and staked.stake or 0, pot = staked and staked.pot or 0,
 				you = name, other = otherName(run, name)})
 		end
@@ -2746,11 +2798,13 @@ end
 local function announcement(e, phase)
 	local secondsLeft = math.max(0, e.at - os.time())
 	return {id = e.id, phase = phase, route = eventRouteText(e), random = e.route == "random", prize = e.prize,
-		seconds = secondsLeft, joined = joinedCount(e.joined)}
+		grows = true, seconds = secondsLeft, joined = joinedCount(e.joined)}
 end
 
+-- The typed prize is for two racers; each racer past two who starts adds half of it.
 local function announce(minutes)
-	local text = string.format("Race event in %d minute%s: %s, $%d to the winner. Join from the Mileage prompts.",
+	local text = string.format("Race event in %d minute%s: %s, $%d for two racers, +50%% per extra racer."
+		.. " Join from the Mileage prompts.",
 		minutes, minutes == 1 and "" or "s", eventRouteText(event), event.prize)
 	chatAll(text)
 	local message = announcement(event, "announce")
@@ -2813,6 +2867,9 @@ local function startEventRace()
 		return
 	end
 	live.racers = #names
+	-- The prize for the racers who start, kept for those who give up or leave later; the
+	-- stored event keeps the typed prize.
+	live.prize = Money.grownPrize(live.prize, live.racers)
 	-- The cars are still where the players left them; reading them tells the server whether
 	-- it can see cars before any finish arrives.
 	Money.readCars(names, live.finish)
@@ -3168,8 +3225,9 @@ local REFUSED = {
 	distance = "The finish must be 1.5 to 4 km away. Try again.",
 }
 
+-- The reward with this many joined players: the host and the traffic car are two racers.
 local function rewardFor(joined)
-	return math.floor(serverNumber("aiRacePrize", 0, PRIZE_HIGH) * (1 + 0.5 * joined))
+	return Money.grownPrize(serverNumber("aiRacePrize", 0, PRIZE_HIGH), joined + 2)
 end
 
 -- Seconds until name may earn the race reward again; 0 when they may now.
@@ -4007,17 +4065,25 @@ end
 
 --== the grid and the countdown ===============================================
 
+-- Everyone on the grid, players and cars, and the prize for first place with them all; 0
+-- for a racer alone, whom the race never pays.
+local function gridField(race)
+	local names = {}
+	for _, racer in ipairs(race.order) do
+		if race.racers[racer.key] then table.insert(names, {name = racer.name, car = racer.car ~= nil}) end
+	end
+	if #names < 2 then return names, 0 end
+	return names, Money.grownPrize(serverNumber("spotRacePrize", 0, PRIZE_HIGH), #names)
+end
+
 local function startCountdown(race)
 	local now = signalTimer:GetCurrent()
 	race.phase = "countdown"
 	race.goAt = now + SPOT_COUNTDOWN_SECONDS
 	race.deadline = race.goAt + serverNumber("raceTimeLimitMinutes", 1, 120) * 60
-	local names = {}
-	for _, racer in ipairs(race.order) do
-		if race.racers[racer.key] then table.insert(names, {name = racer.name, car = racer.car ~= nil}) end
-	end
+	local names, prize = gridField(race)
 	sendRacers(race, {phase = "countdown", id = race.id, seconds = SPOT_COUNTDOWN_SECONDS, route = race.route.id,
-		racers = names})
+		racers = names, prize = prize})
 end
 
 -- Every player in the race gets a grid place behind the start facing the route: the
@@ -4196,10 +4262,9 @@ local function ranked(race)
 	return true
 end
 
--- The prize for a race of this many racers: the owner's prize for two, and half of it
--- again for each racer past two, rounded down.
+-- The prize for a race of this many racers, from the owner's prize for two.
 local function prizeFor(racers)
-	return math.floor(serverNumber("spotRacePrize", 0, PRIZE_HIGH) * (1 + 0.5 * math.max(0, racers - 2)))
+	return Money.grownPrize(serverNumber("spotRacePrize", 0, PRIZE_HIGH), racers)
 end
 
 -- Every racer who started: players and opponents, those out since the green included.
@@ -4409,6 +4474,10 @@ local function dropOut(race, racer, why)
 		if everyoneAnswered(race) then startGrid(race) end
 	elseif race.phase == "grid" and allReady(race) then
 		startCountdown(race)
+	elseif race.phase == "countdown" then
+		-- The countdown goes on; the others' cards show the grid and prize without them.
+		local names, prize = gridField(race)
+		sendRacers(race, {phase = "field", id = race.id, racers = names, prize = prize})
 	end
 end
 

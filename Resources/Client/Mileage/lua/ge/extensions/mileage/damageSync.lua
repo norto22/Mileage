@@ -29,6 +29,7 @@ local MAX_MESSAGE_BYTES = 32768
 local MAX_BEAMS = 400
 local MAX_NODES = 500
 local MAX_PARTS = 64
+local MAX_LATCHES = 64
 -- A game that joins a busy server builds many copies at once; their full-damage requests
 -- go out at most this many a second (the server passes 4), and one that gets no answer
 -- is asked again every RETRY_SECONDS, at most REQUEST_TRIES times in all.
@@ -216,6 +217,23 @@ local function numberRows(list, maxRows)
 	return table.concat(parts, ",")
 end
 
+-- A latch list: how many latch groups the owner's car has (at most MAX_LATCHES), then
+-- pairs of a group and its state code, every one a whole number. Returns the count and
+-- the pairs as Lua number text, or nil when anything else is in it. Whether the groups
+-- and states fit this game's copy is the copy's own check.
+local function latchRows(list)
+	if type(list) ~= "table" or #list % 2 ~= 1 then return nil end
+	for i = 1, #list do
+		local x = list[i]
+		if not isNumber(x) or x < 0 or x > 2147483647 or x ~= math.floor(x) then return nil end
+	end
+	local count = list[1]
+	if count > MAX_LATCHES or (#list - 1) / 2 > count then return nil end
+	local parts = {}
+	for i = 2, #list do parts[i - 1] = string.format("%d", list[i]) end
+	return count, table.concat(parts, ",")
+end
+
 -- A part number of a whole shape, or the number of its parts: 1 to MAX_PARTS.
 local function isPartNumber(x)
 	return isNumber(x) and x >= 1 and x <= MAX_PARTS and x == math.floor(x)
@@ -238,6 +256,13 @@ local function rxCareerDamage(data)
 		warnOnce("malformed", "a damage message for " .. message.v .. " was not in the expected form")
 		return
 	end
+	-- Latch states travel with dents; a list not in the expected form is dropped, the
+	-- dents with it still applied.
+	local latchCount, latches = nil, nil
+	if message.l ~= nil then
+		latchCount, latches = latchRows(message.l)
+		if not latchCount then warnOnce("latches", "a latch list for " .. message.v .. " was not in the expected form") end
+	end
 	local cleared = message.c == 1 and 1 or 0
 	local command = string.format("mileageDamage.applyDamage(%d,{%s},{%s})", cleared, beams, nodes)
 	if numbered then
@@ -251,11 +276,13 @@ local function rxCareerDamage(data)
 			awaiting[gameVehicleID] = {sid = message.v, wait = RETRY_SECONDS, tries = 1}
 		end
 		command = string.format("mileageDamage.applyDamage(%d,{%s},{%s},%d,%d)", cleared, beams, nodes, part, parts)
-	elseif cleared == 1 or (beams == "" and nodes == "") then
-		-- A cleared notice, or an undamaged car's full damage: nothing more to wait for.
+	elseif cleared == 1 or (beams == "" and nodes == "" and message.l == nil) then
+		-- A cleared notice, or an undamaged car's full damage: nothing more to wait for. A
+		-- message of latches alone is no answer.
 		awaiting[gameVehicleID] = nil
 	end
 	veh:queueLuaCommand(command)
+	if latchCount then veh:queueLuaCommand(string.format("mileageDamage.applyLatches(%d,{%s})", latchCount, latches)) end
 end
 
 -- From a copy's vehicle Lua: it has every part of its owner's whole shape and applied it.
@@ -275,10 +302,11 @@ local function rxCareerDamageRequest(data)
 	if veh then veh:queueLuaCommand("mileageDamage.answerFull()") end
 end
 
--- From a copy's vehicle Lua: it disagrees with its owner (wantFull = 1), or the owner
--- reset it and it still carries damage (wantFull = 0). The copy is reset where it is, as
--- BeamMP applies another player's reset, and asks the owner for full damage if needed.
-local function resetCopy(gameVehicleID, wantFull)
+-- From a copy's vehicle Lua: it disagrees with its owner on `beams` beams (wantFull = 1),
+-- or the owner reset it and it still carries damage (wantFull = 0). The copy is reset
+-- where it is, as BeamMP applies another player's reset, and asks the owner for full
+-- damage if needed.
+local function resetCopy(gameVehicleID, wantFull, beams)
 	if roles[gameVehicleID] ~= "copy" then return end
 	local veh = be:getObjectByID(gameVehicleID)
 	local serverVehicleID = MPVehicleGE.getServerVehicleID(gameVehicleID)
@@ -290,9 +318,22 @@ local function resetCopy(gameVehicleID, wantFull)
 	veh:setPositionRotation(pos.x, pos.y, pos.z, rot.x, rot.y, rot.z, rot.w)
 	veh:resetBrokenFlexMesh()
 	if wantFull == 1 then
-		log("I", logTag, "copy of " .. serverVehicleID .. " disagreed with its owner - reset and resynced")
+		local on = ""
+		if type(beams) == "number" and beams >= 1 then
+			on = string.format(" on %d beam%s", beams, beams == 1 and "" or "s")
+		end
+		log("I", logTag, "copy of " .. serverVehicleID .. " disagreed with its owner" .. on .. " - reset and resynced")
 		requestFull(gameVehicleID, serverVehicleID)
 	end
+end
+
+-- From a copy's vehicle Lua: it set `count` latch groups back to its owner's state.
+local function latchesSetAgain(gameVehicleID, count)
+	if roles[gameVehicleID] ~= "copy" then return end
+	local serverVehicleID = MPVehicleGE.getServerVehicleID(gameVehicleID)
+	if not isServerVehicleID(serverVehicleID) or type(count) ~= "number" then return end
+	log("I", logTag, string.format("copy of %s: %d latch%s unlike its owner's set again", serverVehicleID, count,
+		count == 1 and "" or "es"))
 end
 
 --== hooks ===================================================================
@@ -334,6 +375,7 @@ end
 M.onLocalDamage = onLocalDamage
 M.resetCopy = resetCopy
 M.shapeApplied = shapeApplied
+M.latchesSetAgain = latchesSetAgain
 M.onUpdate = onUpdate
 M.onVehicleSpawned = onVehicleSpawned
 M.onVehicleDestroyed = forget

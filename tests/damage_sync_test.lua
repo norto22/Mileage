@@ -80,9 +80,10 @@ end
 
 local world, logs
 
--- Runs fn inside a car's vehicle Lua: obj, v, beamstate and the extension are its own.
+-- Runs fn inside a car's vehicle Lua: obj, v, beamstate, controller and the extension are
+-- its own.
 local function inVehicle(car, fn, ...)
-	obj, v, beamstate, mileageDamage = car.obj, car.v, car.beamstate, car.ext
+	obj, v, beamstate, mileageDamage, controller = car.obj, car.v, car.beamstate, car.ext, car.controller
 	return fn(...)
 end
 
@@ -255,8 +256,31 @@ local function addCar(game, owner, vid, opts)
 	function veh:resetBrokenFlexMesh() end
 	car.veh = veh
 
-	-- What the game does to the car on a reset: pristine beams, no damage.
+	-- opts.latches: names of the car's latch groups (doors, bonnet, boot), each one of the
+	-- game's advancedCouplerControl controllers, all latched. car.latch[name] is a group's
+	-- state; car.latchSets lists, in order, every state set through the game's own
+	-- setState; a group in car.wontLatch stays open when it is set latched.
+	car.latch, car.latchSets, car.wontLatch = {}, {}, {}
+	local latchControls = {}
+	for _, name in ipairs(opts.latches or {}) do
+		car.latch[name] = "attached"
+		local c = {name = name, typeName = "advancedCouplerControl"}
+		function c.getGroupState() return car.latch[name] end
+		function c.setState(data)
+			local state = data and data[name .. "_groupState"]
+			if not state then return end
+			table.insert(car.latchSets, name .. "=" .. state)
+			if not (state == "attached" and car.wontLatch[name]) then car.latch[name] = state end
+		end
+		table.insert(latchControls, c)
+	end
+	car.controller = {getControllersByType = function(typeName)
+		return typeName == "advancedCouplerControl" and latchControls or {}
+	end}
+
+	-- What the game does to the car on a reset: pristine beams, no damage, every latch shut.
 	function car.reset()
+		for name in pairs(car.latch) do car.latch[name] = "attached" end
 		for cid in pairs(car.restLen) do car.restLen[cid] = 1 end
 		car.broken = {}
 		car.beamstate.damage = 0
@@ -338,7 +362,7 @@ local function twoGames(opts)
 	local owners, copies = addGame(0), addGame(1)
 	local owner = addCar(owners, 0, 0, opts)
 	local copy = addCar(copies, 0, 0, {nodes = opts.nodes, beams = opts.beams, hydros = opts.hydros,
-		settling = opts.settling, fwd = {x = 1, y = 0, z = 0}})
+		settling = opts.settling, latches = opts.latches, fwd = {x = 1, y = 0, z = 0}})
 	owners.playerVehicle = owner.gid
 	return owner, copy, owners, copies
 end
@@ -475,7 +499,7 @@ test("a wreck of 1000 beams goes out as 400, 400 and 200 over three ticks", func
 	same(table.concat(counts, ","), "400,400,200", "beams per message")
 end)
 
-test("a message of ordinary dents holds at most 500 points", function()
+test("a message of ordinary dents carries no points, so 300 beams go in one", function()
 	local car = ownerCar({beams = 300, nodes = 600, separate = true})
 	tick(car)
 	takeMessages(car)
@@ -483,30 +507,64 @@ test("a message of ordinary dents holds at most 500 points", function()
 	for cid = 0, 299 do car.restLen[cid] = 0.9 end
 	tick(car)
 	local m = takeMessages(car)[1]
-	same(math.floor(#m.n / 4), 500, "points in the message")
-	same(math.floor(#m.b / 4), 250, "beams, cut short by the point limit")
+	same(#m.n, 0, "points in the message")
+	same(math.floor(#m.b / 4), 300, "beams")
 	tick(car)
-	same(math.floor(#takeMessages(car)[1].b / 4), 50, "beams in the next message")
+	same(#takeMessages(car), 0, "nothing left for the next tick")
 end)
 
-test("a dent applied to a copy facing another way lands in the same place on the car", function()
+test("a dent applied to a copy facing another way takes the owner's beam shape and moves no point", function()
 	local owner = ownerCar()
 	dent(owner, 7, 0.8, {0.05, -0.12, 0.03})
 	tick(owner)
 	local m = takeMessages(owner)[1]
 	local copy = copyCar({fwd = {x = 1, y = 0, z = 0}})
-	inVehicle(copy, copy.ext.applyDamage, 0, m.b, m.n)
 	local node = owner.v.data.beams[7].id1
-	local ox, oy, oz = toCarFrame(owner, owner.nodePos[node])
-	local cx, cy, cz = toCarFrame(copy, copy.nodePos[node])
-	expect(math.abs(ox - cx) < 0.002 and math.abs(oy - cy) < 0.002 and math.abs(oz - cz) < 0.002,
-		string.format("point %d: owner (%.3f, %.3f, %.3f), copy (%.3f, %.3f, %.3f)", node, ox, oy, oz, cx, cy, cz))
-	expect(math.abs(copy.nodePos[node].x - owner.nodePos[node].x) > 0.1, "the copy's frame was used")
-	same(copy.restLen[7], 0.8, "rest length")
+	local before = vec3(copy.nodePos[node])
+	inVehicle(copy, copy.ext.applyDamage, 0, m.b, m.n)
+	same(copy.nodePos[node].x .. "," .. copy.nodePos[node].y .. "," .. copy.nodePos[node].z,
+		before.x .. "," .. before.y .. "," .. before.z, "point " .. node .. " left to the copy's physics")
+	same(copy.restLen[7], 0.8, "the owner's rest length, which shapes the dent")
 	same(copy.beamstate.deformedBeams[7], 0.3, "deformation recorded")
 end)
 
-test("a copy refuses unknown beams and points and values out of range, and applies the rest", function()
+test("a dent from an owner on an older Mileage, with points, is applied with its points left alone", function()
+	local copy = copyCar()
+	local before = vec3(copy.nodePos[4])
+	inVehicle(copy, copy.ext.applyDamage, 0, {7, 0.8, 1, 0.3}, {4, 0.1, 0.2, 0.3, 999, 0, 0, 0})
+	same(copy.restLen[7], 0.8, "beam 7")
+	same(copy.broken[7], true, "broken")
+	same(copy.nodePos[4].x .. "," .. copy.nodePos[4].y, before.x .. "," .. before.y, "point 4 left alone")
+	same(#copy.applyLog, 1, "only the beam was set")
+	same(countLines(logs, "refused part of another player's damage message"), 0, "nothing refused: the points are not read")
+end)
+
+test("a small dent on the owner moves no point of the copy, whose wheel has turned", function()
+	local owner = ownerCar()
+	tick(owner)
+	takeMessages(owner)
+	local copy = copyCar({fwd = {x = 1, y = 0, z = 0}})
+	-- Beam 22 is a tyre beam between points 22 and 23. On the copy the wheel has turned
+	-- further, so those points sit 0.3 m from where they are on the owner's car.
+	for _, n in ipairs({22, 23}) do
+		local x, y, z = toCarFrame(copy, copy.nodePos[n])
+		copy.nodePos[n] = fromCarFrame(copy, x, y + 0.3, z - 0.1)
+	end
+	local before = {[22] = vec3(copy.nodePos[22]), [23] = vec3(copy.nodePos[23])}
+	dent(owner, 22, 0.998)
+	tick(owner)
+	local m = takeMessages(owner)[1]
+	inVehicle(copy, copy.ext.applyDamage, 0, m.b, m.n)
+	for _, n in ipairs({22, 23}) do
+		local moved = math.sqrt((copy.nodePos[n].x - before[n].x) ^ 2 + (copy.nodePos[n].y - before[n].y) ^ 2
+			+ (copy.nodePos[n].z - before[n].z) ^ 2)
+		expect(moved < 1e-9, string.format("copy point %d moved %.3f m", n, moved))
+	end
+	same(copy.restLen[22], 0.998, "the owner's rest length on the copy")
+	same(copy.beamstate.deformedBeams[22], 0.3, "the deformation recorded")
+end)
+
+test("a copy refuses unknown beams and values out of range, and applies the rest, its points left alone", function()
 	local copy = copyCar()
 	local before = vec3(copy.nodePos[3])
 	inVehicle(copy, copy.ext.applyDamage, 0,
@@ -517,9 +575,9 @@ test("a copy refuses unknown beams and points and values out of range, and appli
 		 10, 0.9, 2, 0.2,     -- broken flag not 0 or 1
 		 11, 0.9, 0, 50,      -- deformation out of range
 		 12, 0.5, 1, 1},      -- applied, broken
-		{3, 25, 0, 0,         -- offset out of range
-		 999, 0, 0, 0,        -- unknown point
-		 4, 0.1, 0.2, 0.3})   -- applied
+		{3, 25, 0, 0,         -- points of a small update are never placed
+		 999, 0, 0, 0,
+		 4, 0.1, 0.2, 0.3})
 	same(copy.restLen[7], 0.8, "beam 7")
 	same(copy.restLen[8], 1, "beam 8")
 	same(copy.restLen[9], 1, "beam 9")
@@ -528,8 +586,6 @@ test("a copy refuses unknown beams and points and values out of range, and appli
 	same(copy.restLen[12], 0.5, "beam 12")
 	same(copy.broken[12], true, "beam 12 broken")
 	same(copy.nodePos[3].x, before.x, "point 3 left alone")
-	local x, y, z = toCarFrame(copy, copy.nodePos[4])
-	expect(math.abs(x - 0.1) < 1e-6 and math.abs(y - 0.2) < 1e-6 and math.abs(z - 0.3) < 1e-6, "point 4 placed")
 	same(countLines(logs, "refused part of another player's damage message"), 1, "logged once")
 end)
 
@@ -1012,6 +1068,24 @@ local function phantomBreaks(copy, first, n)
 	copy.beamstate.damage = copy.beamstate.damage + 1000
 end
 
+test("a copy put right logs which car and how many beams disagreed", function()
+	local owner, copy = syncedGames()
+	phantomBreaks(copy, 30, 1)
+	step(3)
+	same(countLines(logs, "copy of 0-0 disagreed with its owner on 1 beam - reset and resynced"), 1, "one beam")
+	step(10)
+	phantomBreaks(copy, 30, 3)
+	step(3)
+	same(countLines(logs, "copy of 0-0 disagreed with its owner on 3 beams - reset and resynced"), 1, "three beams")
+end)
+
+test("a reset request without a beam count, from an older vehicle side, still resets and logs", function()
+	local owner, copy, owners, copies = syncedGames()
+	as(copies, function() copies.ge.resetCopy(copy.gid, 1) end)
+	same(copy.veh.resets, 1, "reset in place")
+	same(countLines(logs, "copy of 0-0 disagreed with its owner - reset and resynced"), 1, "logged without a count")
+end)
+
 test("a copy with 25 beams of damage its owner never reported is reset and given the owner's damage", function()
 	local owner, copy, owners, copies = syncedGames()
 	local requestsBefore = #sentToServer("careerDamageRequest", 1)
@@ -1049,7 +1123,7 @@ end)
 local function resetRequests(car)
 	local counts = {resync = 0, cleared = 0}
 	for _, cmd in ipairs(car.game.geQueue) do
-		local id, wantFull = cmd:match("^mileage_damageSync%.resetCopy%((%d+),(%d)%)$")
+		local id, wantFull = cmd:match("^mileage_damageSync%.resetCopy%((%d+),(%d)[,%d]*%)$")
 		if id then
 			same(tonumber(id), car.gid, "car in the reset request")
 			if wantFull == "1" then counts.resync = counts.resync + 1 else counts.cleared = counts.cleared + 1 end
@@ -1310,15 +1384,11 @@ test("a full-damage request for this game's own traffic car is not answered", fu
 	same(countLines(traffic.vehicleQueue, "sendFull"), 0, "full-damage answers queued")
 end)
 
-test("a copy applies a rest length of 100 m and offsets of 20 m, and refuses 0 m and just past 20 m", function()
+test("a copy applies a rest length of 100 m and refuses 0 m", function()
 	local copy = copyCar()
-	inVehicle(copy, copy.ext.applyDamage, 0, {7, 100, 0, 0, 8, 0, 0, 0}, {4, 20, -20, 20, 5, 20.01, 0, 0})
+	inVehicle(copy, copy.ext.applyDamage, 0, {7, 100, 0, 0, 8, 0, 0, 0}, {})
 	same(copy.restLen[7], 100, "beam 7 at 100 m")
 	same(copy.restLen[8], 1, "beam 8 left alone")
-	local x, y, z = toCarFrame(copy, copy.nodePos[4])
-	expect(math.abs(x - 20) < 1e-6 and math.abs(y + 20) < 1e-6 and math.abs(z - 20) < 1e-6, "point 4 placed at the limit")
-	local fx = toCarFrame(copy, copy.nodePos[5])
-	expect(math.abs(fx - 20.01) > 1e-3, "point 5 left alone")
 end)
 
 test("a copy given no beam or point lists changes nothing and does not raise", function()
@@ -1328,19 +1398,15 @@ test("a copy given no beam or point lists changes nothing and does not raise", f
 	same(copy.restLen[7], 1, "beam 7")
 end)
 
-test("an owner whose direction cannot be read keeps its changes and sends them once it can", function()
+test("an owner whose direction cannot be read still sends its dents, which need no frame", function()
 	local car = ownerCar()
 	tick(car)
 	takeMessages(car)
-	local fwd = car.fwd
 	car.fwd = {x = 0, y = 0, z = 0}
 	dent(car, 7, 0.8)
 	tick(car)
-	same(#takeMessages(car), 0, "messages without a frame")
-	car.fwd = fwd
-	tick(car)
 	local m = takeMessages(car)
-	same(#m, 1, "messages once the frame is back")
+	same(#m, 1, "messages without a frame")
 	same(table.concat(beamIds(m[1]), ","), "7", "beams")
 end)
 
@@ -2279,4 +2345,212 @@ test("a numbered part for this game's own car is dropped and opens no wait", fun
 	step(12)
 	same(owner.restLen[7], 1, "the owner's own beam 7")
 	same(#sentToServer("careerDamageRequest", 0) - before, 0, "requests from the owner's game")
+end)
+
+--== doors, bonnet and boot: latch states ====================================
+
+-- Latch groups given out of name order: they are numbered door_FL 1, hood 2, tailgate 3.
+local LATCHES = {"tailgate", "door_FL", "hood"}
+
+-- The "l" list of each message, as text ("" for a message without one).
+local function latchLists(messages)
+	local lists = {}
+	for _, m in ipairs(messages) do table.insert(lists, m.l and table.concat(m.l, ",") or "") end
+	return table.concat(lists, " | ")
+end
+
+test("an owner sends a door it opens, and every latch after a whole-car send", function()
+	local car = ownerCar({latches = LATCHES})
+	tick(car)
+	same(latchLists(takeMessages(car)), "", "the announcement of an undamaged car")
+	tick(car)
+	same(latchLists(takeMessages(car)), "3,1,1,2,1,3,1", "then every latch group, all latched")
+	tick(car, 2)
+	same(#takeMessages(car), 0, "nothing while no latch changes")
+	car.latch.hood = "detached"
+	tick(car)
+	local m = takeMessages(car)
+	same(latchLists(m), "3,2,0", "the bonnet opened")
+	same(#m[1].b .. "," .. #m[1].n, "0,0", "with empty beam and point lists, as older games expect")
+	car.latch.hood = "attached"
+	tick(car)
+	same(latchLists(takeMessages(car)), "3,2,1", "and shut")
+	car.latch.door_FL = "broken"
+	car.latch.tailgate = "desyncedDetached"
+	tick(car)
+	same(latchLists(takeMessages(car)), "3,1,2,3,0", "a door broken off and the boot open")
+	car.latch.hood = "coupling"
+	tick(car)
+	same(#takeMessages(car), 0, "a latch still closing is neither")
+	inVehicle(car, car.ext.answerFull)
+	tick(car)
+	same(latchLists(takeMessages(car)), "", "the flagged answer")
+	tick(car)
+	same(latchLists(takeMessages(car)), "3,1,2,3,0", "then every group again, the closing one left out")
+	car.latch.hood = "attached"
+	dent(car, 7, 0.8)
+	tick(car)
+	m = takeMessages(car)
+	same(table.concat(beamIds(m[1]), ","), "7", "a dent")
+	same(latchLists(m), "3,2,1", "and the latch that changed, in one message")
+	car.reset()
+	tick(car)
+	same(takeMessages(car)[1].c, 1, "a cleared notice after a reset")
+	tick(car)
+	same(latchLists(takeMessages(car)), "3,1,1,2,1,3,1", "then every latch, all shut again")
+end)
+
+test("a door opened on the owner opens on the copy, a shut one shuts, a broken one breaks", function()
+	local owner, copy = twoGames({latches = LATCHES})
+	step(2.5)
+	same(#copy.latchSets, 0, "nothing set while both cars are latched alike")
+	owner.latch.door_FL = "detached"
+	step(1.5)
+	same(copy.latch.door_FL, "detached", "the door opened on the copy")
+	same(copy.latchSets[1], "door_FL=detached", "through the game's own latch control")
+	owner.latch.door_FL = "attached"
+	step(1.5)
+	same(copy.latch.door_FL, "attached", "and shut again")
+	owner.latch.hood = "broken"
+	step(1.5)
+	same(copy.latch.hood, "broken", "the bonnet broken off")
+	same(table.concat(copy.latchSets, " "), "door_FL=detached door_FL=attached hood=broken", "every set, nothing more")
+	same(copy.latch.tailgate, "attached", "the boot left alone")
+end)
+
+test("a latch list that does not fit the copy is refused whole, and the beams with it still apply", function()
+	local owner, copy, owners, copies = twoGames({latches = LATCHES})
+	step(2.5)
+	local bad = {
+		"[4,1,0]",      -- the owner's car has another number of latch groups
+		"[3,1,3]",      -- no such state
+		"[3,0,1]",      -- no group 0
+		"[3,4,1]",      -- past the last group
+		"[3,1.5,1]",    -- not a whole number
+		'["3",1,0]',    -- text
+		"[3,1]",        -- not in pairs
+		"[65,1,0]",     -- more groups than any car shares
+		"5",            -- not a list
+	}
+	for i, list in ipairs(bad) do
+		local len = 0.5 + i / 100
+		deliver(copies, string.format('{"v":"0-0","c":0,"b":[7,%.2f,0,0.3],"n":[],"l":%s}', len, list))
+		same(copy.restLen[7], tonumber(string.format("%.2f", len)), list .. ": the beam applied")
+	end
+	same(#copy.latchSets, 0, "no latch set")
+	same(countLines(logs, "refused another player's latch list"), 1, "the copy's warning, once")
+	same(countLines(logs, "a latch list for 0-0 was not in the expected form"), 1, "the receiving game's warning, once")
+end)
+
+test("a message with a latch list does not end a copy's wait for its owner's whole shape", function()
+	local copies, cars = silentOwner(1)
+	step(1)
+	same(requestsFor("0-0"), 1, "asked once")
+	deliver(copies, '{"v":"0-0","c":0,"b":[],"n":[],"l":[0]}')
+	step(6)
+	same(requestsFor("0-0"), 2, "asked again: a latch list is no answer")
+	deliver(copies, '{"v":"0-0","c":0,"b":[],"n":[]}')
+	step(12)
+	same(requestsFor("0-0"), 2, "an empty answer ends the wait, as before")
+end)
+
+test("a copy whose door came open on its own is put back", function()
+	local owner, copy = twoGames({latches = LATCHES})
+	step(4)
+	copy.latch.door_FL = "detached"
+	step(1)
+	same(#copy.latchSets, 0, "not after one check")
+	step(1.5)
+	same(copy.latch.door_FL, "attached", "set back to the owner's state after two checks")
+	same(copy.latchSets[1], "door_FL=attached", "through the game's own latch control")
+	same(copy.veh.resets, 0, "the car is not reset")
+	same(countLines(logs, "copy of 0-0: 1 latch unlike its owner's set again"), 1, "logged")
+end)
+
+test("a latch the copy cannot close is tried again only after 10 s, one line a try", function()
+	local owner, copy = twoGames({latches = LATCHES})
+	step(4)
+	copy.wontLatch.hood = true
+	copy.latch.hood = "detached"
+	copy.latch.tailgate = "detached"
+	step(3)
+	same(countLines(logs, "copy of 0-0: 2 latches unlike its owner's set again"), 1, "the first try, both groups")
+	same(copy.latch.tailgate, "attached", "the boot shut")
+	same(copy.latch.hood, "detached", "the bonnet will not")
+	step(8)
+	same(countLines(logs, "unlike its owner's set again"), 1, "no second try within 10 s")
+	step(3)
+	same(countLines(logs, "copy of 0-0: 1 latch unlike its owner's set again"), 1, "the second try, the bonnet alone")
+end)
+
+test("a copy that never heard a latch list from its owner never touches its latches", function()
+	local copy = copyCar({latches = LATCHES})
+	inVehicle(copy, copy.ext.applyDamage, 0, {7, 0.8, 0, 0.3}, {})
+	copy.latch.door_FL = "detached"
+	tick(copy, 5)
+	same(#copy.latchSets, 0, "latches set")
+	same(copy.latch.door_FL, "detached", "the door left as the copy's physics has it")
+end)
+
+test("a car without latch groups, or without the game's controller module, sends no latch list", function()
+	for _, noModule in ipairs({false, true}) do
+		local car = ownerCar()
+		if noModule then car.controller = nil end
+		tick(car)
+		takeMessages(car)
+		dent(car, 7, 0.8)
+		tick(car)
+		local m = takeMessages(car)
+		same(#m, 1, "the dent")
+		same(m[1].l, nil, "no latch list")
+	end
+end)
+
+test("a copy reset in place while its owner's door is open opens that door again, the car not reset twice", function()
+	local owner, copy = twoGames({latches = LATCHES})
+	owner.latch.door_FL = "detached"
+	step(4)
+	same(copy.latch.door_FL, "detached", "the door open on the copy, as on the owner")
+	copy.reset()
+	same(copy.latch.door_FL, "attached", "the game's reset shut it")
+	step(3)
+	same(copy.latch.door_FL, "detached", "opened again to the owner's state")
+	same(copy.latchSets[#copy.latchSets], "door_FL=detached", "through the game's own latch control")
+	same(copy.veh.resets, 0, "the copy is not reset for it")
+end)
+
+test("a car of 64 latch groups shares every one, group 64 included; a car of 65 shares none, with one warning", function()
+	local names = {}
+	for i = 1, 64 do names[i] = string.format("latch%02d", i) end
+	local owner, copy = twoGames({latches = names})
+	step(2.5)
+	owner.latch.latch64 = "detached"
+	step(1.5)
+	same(copy.latch.latch64, "detached", "the 64th group opened on the copy")
+	same(table.concat(copy.latchSets, " "), "latch64=detached", "and nothing else set")
+	same(countLines(logs, "latch"), 0, "no latch warning for 64 groups")
+
+	names[65] = "latch65"
+	local car = ownerCar({latches = names})
+	tick(car, 2)
+	for _, before in ipairs(takeMessages(car)) do same(before.l, nil, "no latch list in the announcement") end
+	dent(car, 7, 0.8)
+	tick(car)
+	local m = takeMessages(car)
+	same(#m, 1, "the dent")
+	same(m[1].l, nil, "no latch list from a car of 65 groups")
+	same(countLines(logs, "this car has 65 latch groups (limit 64); its latches are not shared"), 1, "warned once")
+end)
+
+test("the receiving game refuses a latch list of more pairs than groups, or a negative number, before the copy sees it", function()
+	local owner, copy, owners, copies = twoGames({latches = LATCHES})
+	step(2.5)
+	for i, list in ipairs({"[3,1,0,2,0,3,0,1,1]", "[3,-1,0]", "[-3,1,0]"}) do
+		local len = 0.5 + i / 100
+		deliver(copies, string.format('{"v":"0-0","c":0,"b":[7,%.2f,0,0.3],"n":[],"l":%s}', len, list))
+		same(copy.restLen[7], tonumber(string.format("%.2f", len)), list .. ": the beam applied")
+	end
+	same(#copy.latchSets, 0, "no latch set")
+	same(countLines(logs, "a latch list for 0-0 was not in the expected form"), 1, "the receiving game's warning, once")
+	same(countLines(logs, "refused another player's latch list"), 0, "none reached the copy")
 end)

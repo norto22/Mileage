@@ -38,8 +38,11 @@ mileageRaceApp.controller('MileageRace', ['$scope', function ($scope) {
 				.map(function (r) { return r.name === you ? "You" : String(r.name); });
 			var cars = racers.filter(function (r) { return r && r.car; }).length;
 			if (cars > 0) names.push(cars + " car" + (cars === 1 ? "" : "s"));
-			return {big: String(data.count), label: routeName, line: names.length > 0 ? [names.join(", ")] : [],
-				countdown: true};
+			var gridLine = names.length > 0 ? [names.join(", ")] : [];
+			// The prize for first place with everyone on the grid, as the server pays it.
+			var gridPrize = Number(data.prize) || 0;
+			if (gridPrize > 0) gridLine.push("prize " + mrDollars(gridPrize) + " for " + racers.length + " racers");
+			return {big: String(data.count), label: routeName, line: gridLine, countdown: true};
 		case "go":
 			return {big: "GO", label: routeName, line: [], countdown: true, giveUp: "Give up"};
 		case "racing":
@@ -62,7 +65,10 @@ mileageRaceApp.controller('MileageRace', ['$scope', function ($scope) {
 	function streetView(data) {
 		var other = String(data.other || "");
 		var stake = Number(data.stake) || 0, reward = Number(data.reward) || 0;
+		// An event race shows the prize for the racers who started in place of the stake.
+		var eventPrize = data.event ? Number(data.prize) || 0 : 0;
 		var money = data.rolling ? (reward > 0 ? ["race reward " + mrDollars(reward)] : []) :
+			eventPrize > 0 ? ["prize " + mrDollars(eventPrize) + " for " + (Number(data.racers) || 0) + " racers"] :
 			[stake > 0 ? mrDollars(stake) + " stake" : "no stake"];
 		switch (data.phase) {
 		case "countdown":

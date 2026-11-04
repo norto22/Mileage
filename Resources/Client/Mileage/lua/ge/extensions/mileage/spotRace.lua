@@ -263,6 +263,9 @@ local SPAWN_WAIT_SECONDS = 10
 -- How far past the finish of a one-lap route the opponents keep driving.
 local BEYOND_METRES = 250
 local STUCK_SPEED, STUCK_SECONDS = 1, 15
+-- An opponent still within START_METRES of its grid place RETRY_SECONDS after the green is
+-- sent off again; at REMOVE_SECONDS it is taken out of the race.
+local START_METRES, RETRY_SECONDS, REMOVE_SECONDS = 3, 5, 12
 
 -- The cars to race and their push: the game's group for the class of this car as it is now
 -- (its latest performance test, upgrades counted), or this car's own model where the game
@@ -383,19 +386,75 @@ local function roadNames(road, route)
 	return names
 end
 
--- Green: each opponent drives the route, every lap, at its class's push: every node of
--- the race road where there is one, else the road node nearest each checkpoint.
-local function driveOpponents()
+-- The road node nearest each checkpoint, in order.
+local function checkpointNames()
 	local c = compat()
 	local names = {}
-	if race.road then
-		names = roadNames(race.road, race.route)
-	else
-		for _, checkpoint in ipairs(race.route.checkpoints) do
-			local node = c and c.getClosestRoadNode(checkpoint.pos)
-			if node and names[#names] ~= tostring(node) then table.insert(names, tostring(node)) end
-		end
+	for _, checkpoint in ipairs(race.route.checkpoints) do
+		local node = c and c.getClosestRoadNode(checkpoint.pos)
+		if node and names[#names] ~= tostring(node) then table.insert(names, tostring(node)) end
 	end
+	return names
+end
+
+-- names with every road point the game's AI cannot drive left out. The game's AI builds
+-- its route once, at the command, and gives up on all of it, for the whole race, at a
+-- first point the car does not reach by road or two points in a row no road joins
+-- (ai.lua newManualPath); a car with no route never moves. So the first point kept is one
+-- the car at fromPos reaches, each next one is joined by road to the one kept before, and
+-- a list that ends on its first point (laps repeat) still does. Returns the list and how
+-- many points were left out; names as they are where the game cannot tell.
+local function drivablePath(names, fromPos)
+	local c = compat()
+	if not c or #names == 0 then return names, 0 end
+	local loops = #names > 1 and names[#names] == names[1]
+	local kept = {}
+	for i = 1, #names - (loops and 1 or 0) do
+		local name = names[i]
+		local ok
+		if #kept == 0 then
+			ok = c.roadReaches(fromPos, name)
+			if ok then ok = c.roadJoins(name, name) end
+		else
+			ok = c.roadJoins(kept[#kept], name)
+		end
+		if ok == nil then return names, 0 end
+		if ok then table.insert(kept, name) end
+	end
+	if loops then
+		while #kept > 1 and not c.roadJoins(kept[#kept], kept[1]) do table.remove(kept) end
+		if #kept > 1 then table.insert(kept, kept[1]) end
+	end
+	return kept, #names - #kept
+end
+
+-- The drive command for road points names, or nil for none.
+local function driveCommand(names)
+	if #names == 0 then return nil end
+	local nodes = {}
+	for i, name in ipairs(names) do nodes[i] = string.format("%q", name) end
+	return "ai.driveUsingPath({wpTargetList = {" .. table.concat(nodes, ", ") .. "}, noOfLaps = "
+		.. race.route.laps .. ", aggression = " .. race.aggression .. ", avoidCars = 'on'})"
+end
+
+-- Sends one opponent off on names, checked for its own place on the grid first.
+local function sendOff(veh, opponent, names, what)
+	local path, dropped = drivablePath(names, opponent.gridPos)
+	if dropped > 0 then
+		log("W", logTag, string.format("%s: dropped %d of %d %s the game's AI cannot drive for %s (car %s)",
+			tostring(race.route.id), dropped, #names, what, opponent.name, tostring(opponent.sid)))
+	end
+	local command = driveCommand(path)
+	if command then
+		veh:queueLuaCommand(command)
+		veh:queueLuaCommand("ai.setRacing(true)")
+	end
+end
+
+-- names made a whole race: on more than one lap ending on its first node, on one lap
+-- going on past the finish.
+local function racePath(names)
+	local c = compat()
 	if #names > 1 and race.route.laps > 1 then
 		-- The game's race driving repeats laps only on a path that ends on its first node
 		-- (ai.lua's loopPath), as its own races build theirs.
@@ -409,18 +468,20 @@ local function driveOpponents()
 			if tostring(name) ~= names[#names] then table.insert(names, tostring(name)) end
 		end
 	end
-	local nodes = {}
-	for i, name in ipairs(names) do nodes[i] = string.format("%q", name) end
+	return names
+end
+
+-- Green: each opponent drives the route, every lap, at its class's push: every node of
+-- the race road where there is one, else the road node nearest each checkpoint.
+local function driveOpponents()
+	local names = racePath(race.road and roadNames(race.road, race.route) or checkpointNames())
 	for _, opponent in ipairs(race.opponents) do
 		local veh = be:getObjectByID(opponent.vid)
 		if veh then
 			opponent.lastPos = point(veh:getPosition())
+			opponent.gridPos = opponent.lastPos
 			veh:queueLuaCommand("controller.setFreeze(0)")
-			if #nodes > 0 then
-				veh:queueLuaCommand("ai.driveUsingPath({wpTargetList = {" .. table.concat(nodes, ", ") .. "}, noOfLaps = "
-					.. race.route.laps .. ", aggression = " .. race.aggression .. ", avoidCars = 'on'})")
-				veh:queueLuaCommand("ai.setRacing(true)")
-			end
+			sendOff(veh, opponent, names, "road points")
 		end
 	end
 end
@@ -562,9 +623,19 @@ local function onCountdown(message)
 	race.phase = "countdown"
 	race.countdownLeft = tonumber(message.seconds) or 5
 	race.racers = type(message.racers) == "table" and message.racers or {}
+	race.prize = tonumber(message.prize) or 0
 	if not race.frozen then setFrozen(true) end
 	ui({phase = "countdown", id = race.id, routeName = routeName(), count = math.ceil(race.countdownLeft),
-		racers = race.racers})
+		racers = race.racers, prize = race.prize})
+end
+
+-- A racer left during the countdown: the grid and prize change, the count goes on.
+local function onField(message)
+	if not race or race.id ~= message.id or race.phase ~= "countdown" then return end
+	race.racers = type(message.racers) == "table" and message.racers or race.racers
+	race.prize = tonumber(message.prize) or 0
+	ui({phase = "countdown", id = race.id, routeName = routeName(), count = math.ceil(race.countdownLeft or 0),
+		racers = race.racers, prize = race.prize})
 end
 
 -- This racer's row in the server's standings, its place and the racer ahead of it.
@@ -616,7 +687,36 @@ local function passCheckpoints(state, pos, key)
 	return false
 end
 
--- Each opponent's checkpoints; out when its car is gone or stands for STUCK_SECONDS.
+-- An opponent that has not left its grid place: sent off again on the checkpoints' road
+-- points RETRY_SECONDS after the green (the game's AI builds a route only when it is given
+-- one, so the whole command goes again), then deleted and reported stuck at
+-- REMOVE_SECONDS, so the race goes on without it. Returns true once it is taken out.
+local function watchStart(opponent, veh, pos)
+	if opponent.started or not opponent.gridPos then return false end
+	if distance(pos, opponent.gridPos) > START_METRES then
+		opponent.started = true
+		return false
+	end
+	local car = string.format("%s: %s (car %s)", tostring(race.route.id), opponent.name, tostring(opponent.sid))
+	if race.elapsed >= REMOVE_SECONDS then
+		opponent.ended = "stuck"
+		local ok, err = pcall(function() veh:delete() end)
+		if not ok then log("E", logTag, "an opponent could not be deleted: " .. tostring(err)) end
+		log("W", logTag, car .. " never left the grid; taken out of the race")
+		send({out = {race = race.id, racer = opponent.key, why = "stuck"}})
+		return true
+	end
+	if race.elapsed >= RETRY_SECONDS and not opponent.retried then
+		opponent.retried = true
+		log("I", logTag, string.format("%s has not moved %d s after the green; sent off again", car, RETRY_SECONDS))
+		race.retryNames = race.retryNames or racePath(checkpointNames())
+		sendOff(veh, opponent, race.retryNames, "checkpoint road points")
+	end
+	return false
+end
+
+-- Each opponent's checkpoints; out when its car is gone or stands for STUCK_SECONDS, or
+-- taken out when it never leaves the grid.
 local function watchOpponents(dt)
 	for _, opponent in ipairs(race.opponents) do
 		if not opponent.ended then
@@ -624,7 +724,7 @@ local function watchOpponents(dt)
 			if not veh then
 				opponent.ended = "gone"
 				send({out = {race = race.id, racer = opponent.key, why = "gone"}})
-			else
+			elseif not watchStart(opponent, veh, point(veh:getPosition())) then
 				local pos = point(veh:getPosition())
 				local before = opponent.lastPos or pos
 				if passCheckpoints(opponent, pos, opponent.key) then
@@ -726,7 +826,7 @@ local function updateRace(dt)
 			ui({phase = "go", id = race.id, routeName = routeName()})
 		elseif math.ceil(race.countdownLeft) ~= before then
 			ui({phase = "countdown", id = race.id, routeName = routeName(), count = math.ceil(race.countdownLeft),
-				racers = race.racers})
+				racers = race.racers, prize = race.prize})
 		end
 		return
 	end
@@ -848,6 +948,8 @@ local function rxMileageSpotRace(data)
 		onGrid(message)
 	elseif phase == "countdown" then
 		onCountdown(message)
+	elseif phase == "field" then
+		onField(message)
 	elseif phase == "standings" then
 		if race and race.id == message.id then race.rows = type(message.rows) == "table" and message.rows or {} end
 	elseif phase == "result" then

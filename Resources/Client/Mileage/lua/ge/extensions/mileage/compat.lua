@@ -438,6 +438,29 @@ function M.getRoadBeyond(node, dir, metres)
 	return {}
 end
 
+-- Whether the game's road graph joins road points a and b, as the game's AI asks before
+-- it drives a list of them (lua/common/graphpath.lua getPath): false when either is off
+-- the graph or no road joins them, nil when the game cannot tell.
+local UNCHECKED = "race spot opponents are given their road points unchecked"
+
+function M.roadJoins(a, b)
+	local fn = pickOrWarn(map, "map", "getGraphpath", UNCHECKED)
+	if not fn then return nil end
+	local ok, route = pcall(function() return fn():getPath(a, b, 1) end)
+	if not ok or type(route) ~= "table" then return nil end
+	return #route > 1 or (#route == 1 and a == b)
+end
+
+-- Whether a car at pos ({x, y, z}) reaches road point node by road, as the game's AI asks
+-- of the first point it is given; nil when the game cannot tell.
+function M.roadReaches(pos, node)
+	local fn = pickOrWarn(map, "map", "getPointNodePath", UNCHECKED)
+	if not fn or type(pos) ~= "table" then return nil end
+	local ok, path = pcall(fn, vec3(pos.x, pos.y, pos.z), node)
+	if not ok or type(path) ~= "table" then return nil end
+	return path[1] ~= nil
+end
+
 --== traffic during a race spot race =========================================
 -- A race spot race thins this game's own traffic and parked cars with the game's own
 -- active amounts, which put the rest in its vehicle pool, hidden; police cars are taken
