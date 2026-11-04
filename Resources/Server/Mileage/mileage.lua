@@ -713,6 +713,7 @@ function onInit()
 	MP.RegisterEvent("mileageDragRun","mileageDragRun")
 	MP.RegisterEvent("mileageDragStaged","mileageDragStaged")
 	MP.RegisterEvent("mileageDragResult","mileageDragResult")
+	MP.RegisterEvent("mileageDragCallOff","mileageDragCallOff")
 	MP.RegisterEvent("mileageLeaderboard","mileageLeaderboard")
 	MP.RegisterEvent("mileagePerfReport","mileagePerfReport")
 
@@ -1299,7 +1300,7 @@ end
 -- Why player_id may not make this offer, or nil. exceptId: an open offer not to count,
 -- the one being accepted when it is checked again.
 local function offerProblem(player_id, offer, exceptId)
-	if offer.kind == "race" then
+	if offer.kind == "race" or offer.kind == "drag" then
 		if not serverSwitch("allowRacing") then return "racingOff" end
 	elseif offer.kind == "request" then
 		if not serverSwitch("allowTransactions") then return "paymentsOff" end
@@ -1321,8 +1322,11 @@ local function offerProblem(player_id, offer, exceptId)
 	end
 	if not isWhole(offer.amount) then return "stake" end
 	if offer.amount > serverNumber("raceStakeMax", 0, 1000000) then return "stakeMax" end
-	if not isPoint(offer.finish) or not isPoint(offer.start) then return "finish" end
-	if distance(offer.start, offer.finish) < serverNumber("raceMinDistance", 0, 20000) then return "distance" end
+	-- A drag race has no route: it is the pair's next run together at the strip.
+	if offer.kind == "race" then
+		if not isPoint(offer.finish) or not isPoint(offer.start) then return "finish" end
+		if distance(offer.start, offer.finish) < serverNumber("raceMinDistance", 0, 20000) then return "distance" end
+	end
 	-- Money.busy is set by the race and event sections: in a street race or a running event.
 	local busy = Money.busy
 	if busy and (busy(MP.GetPlayerName(player_id)) or busy(MP.GetPlayerName(target))) then return "busy" end
@@ -1357,6 +1361,9 @@ function mileageOffer(player_id, data)
 		open.start = {x = offer.start.x, y = offer.start.y, z = offer.start.z}
 		shown.distance = math.floor(distance(open.start, open.finish))
 		shown.prize = serverNumber("racePrize", 0, 1000000)
+	elseif offer.kind == "drag" then
+		shown.prize = serverNumber("dragRacePrize", 0, 1000000)
+		shown.minutes = serverNumber("raceTimeLimitMinutes", 1, 120)
 	end
 	offers[open.id] = open
 	sendJson("offers", open.to, "rxMileageOffer", shown)
@@ -1396,7 +1403,7 @@ function mileageOfferAnswer(player_id, data)
 	end
 	-- Everything is checked again now: either racer may have joined another race or an
 	-- event since the challenge was made, and a setting may have changed.
-	local why = offerProblem(offer.from, {kind = "race", to = offer.to, amount = offer.amount, finish = offer.finish,
+	local why = offerProblem(offer.from, {kind = offer.kind, to = offer.to, amount = offer.amount, finish = offer.finish,
 		start = offer.start}, offer.id)
 	if why then
 		closeOffer(offer, why)
@@ -1412,7 +1419,7 @@ local function offersTick()
 	for _, offer in pairs(offers) do
 		if now >= offer.expires then
 			closeOffer(offer, "expired")
-		elseif offer.kind == "race" and not serverSwitch("allowRacing") then
+		elseif (offer.kind == "race" or offer.kind == "drag") and not serverSwitch("allowRacing") then
 			closeOffer(offer, "racingOff")
 		elseif offer.kind == "request" and not serverSwitch("allowMoneyRequests") then
 			closeOffer(offer, "requestsOff")
@@ -1456,6 +1463,15 @@ end
 --
 -- Leaving or giving up before the countdown calls the race off (stakes back); from the
 -- countdown on it loses the stake to the other racer, and both leaving returns both.
+--
+-- A staked drag race (an accepted drag challenge) is a race of kind "drag" (a race with no
+-- kind is a street race). It is staked the same way, then waits in phase toStrip for the
+-- pair's next run together at the strip, until raceTimeLimitMinutes: Call off
+-- (mileageDragCallOff), either racer leaving, the time limit or a restart before that
+-- run's green gives both stakes back. A green that counts (the Drag money section) moves it
+-- to racing and keeps the run's id in race.run; that run's result settles it like a street
+-- race (Money.settleDragRace), and a run not decided DRAG_DECIDE_SECONDS after its green
+-- gives both stakes back.
 
 do
 local readData, writeData, startTransfer = Money.readData, Money.writeData, Money.startTransfer
@@ -1468,6 +1484,10 @@ local START_SECONDS = 15
 local COUNTDOWN_SECONDS = 3
 local DECIDE_SECONDS = 5
 local FINISH_RADIUS = 20
+-- A staked drag run not decided this long after its green gives both stakes back, and a
+-- held one's card is told the time left once a minute.
+local DRAG_DECIDE_SECONDS = 120
+local DRAG_RESEND_SECONDS = 60
 
 local racesData = {seq = 0, races = {}}
 -- The phase and timing of each race under way; not kept across a start.
@@ -1490,9 +1510,15 @@ local function otherRacer(race, name)
 	return nil
 end
 
+local function isDrag(race)
+	return race ~= nil and race.kind == "drag"
+end
+
+-- A drag race's messages go to the games' drag cards, a street race's to the race panel.
 local function sendRace(name, message)
 	local id = playerIdByName(name)
-	if id then sendJson("races", id, "rxMileageRace", message) end
+	local event = isDrag(racesData.races[message.race]) and "rxMileageDragRace" or "rxMileageRace"
+	if id then sendJson("races", id, event, message) end
 end
 
 local function sendBothRace(race, message)
@@ -1509,20 +1535,21 @@ end
 -- {role = {to, amount, label}} for the race's decision.
 local function payoutsFor(race)
 	local payouts = {}
+	local what = isDrag(race) and "Drag race" or "Race"
 	if race.decision == "refund" then
 		for name, amount in pairs(race.held) do
 			payouts["refund:" .. name] = {to = name, amount = amount,
-				label = "Race stake back vs " .. (otherRacer(race, name) or "?")}
+				label = what .. " stake back vs " .. (otherRacer(race, name) or "?")}
 		end
 	else
 		local winner = race.decision:match("^winner:(.+)$")
 		if winner then
 			local loser = otherRacer(race, winner) or "?"
 			if (race.pot or 0) > 0 then
-				payouts.pot = {to = winner, amount = race.pot, label = "Race win vs " .. loser}
+				payouts.pot = {to = winner, amount = race.pot, label = what .. " win vs " .. loser}
 			end
 			if (race.prize or 0) > 0 then
-				payouts.prize = {to = winner, amount = race.prize, label = "Race prize vs " .. loser}
+				payouts.prize = {to = winner, amount = race.prize, label = what .. " prize vs " .. loser}
 			end
 		end
 	end
@@ -1582,12 +1609,30 @@ local function endLive(race)
 	liveRaces[race.id] = nil
 end
 
+-- A drag race card to each racer: fields, plus the race, the other racer and the stake.
+local function sendDrag(race, fields)
+	for _, name in ipairs({race.a, race.b}) do
+		local message = {race = race.id, you = name, other = otherRacer(race, name), stake = race.stake}
+		for k, v in pairs(fields) do message[k] = v end
+		sendRace(name, message)
+	end
+end
+
+-- The whole minutes a held drag race has left to start its run.
+local function dragMinutesLeft(live)
+	return math.max(0, math.ceil((live.deadline - signalTimer:GetCurrent()) / 60))
+end
+
 -- The race ends before its countdown: both stakes go back.
 local function callOff(race, why)
 	local live = liveRaces[race.id]
 	endLive(race)
 	decide(race, "refund")
-	sendBothRace(race, {race = race.id, phase = "calledOff", why = why, stake = race.stake})
+	if isDrag(race) then
+		sendDrag(race, {phase = "calledOff", why = why})
+	else
+		sendBothRace(race, {race = race.id, phase = "calledOff", why = why, stake = race.stake})
+	end
 	settleRace(race)
 	if live then print("[Mileage] Race " .. race.id .. " between " .. consoleText(race.a) .. " and "
 		.. consoleText(race.b) .. " called off: " .. why) end
@@ -1634,6 +1679,17 @@ local function beginStart(race)
 	local live = liveRaces[race.id]
 	if not live or live.phase ~= "staking" then return end
 	if (race.held[race.a] or 0) < race.stake or (race.held[race.b] or 0) < race.stake then return end
+	if isDrag(race) then
+		-- Both stakes held: the pair's next run together at the strip decides them.
+		live.phase = "toStrip"
+		live.deadline = signalTimer:GetCurrent() + serverNumber("raceTimeLimitMinutes", 1, 120) * 60
+		live.resendAt = signalTimer:GetCurrent() + DRAG_RESEND_SECONDS
+		sendDrag(race, {phase = "toStrip", minutesLeft = dragMinutesLeft(live),
+			prize = serverNumber("dragRacePrize", 0, 1000000)})
+		print(string.format("[Mileage] Drag race %s between %s and %s: $%d each held until their next run together",
+			race.id, consoleText(race.a), consoleText(race.b), race.stake))
+		return
+	end
 	live.phase = "pose"
 	live.deadline = signalTimer:GetCurrent() + START_SECONDS
 	sendRace(race.a, {race = race.id, phase = "pose", other = race.b})
@@ -1650,6 +1706,7 @@ Money.startRace = function(offer)
 		decision = "none",
 		paid = {},
 		created = os.time(),
+		kind = offer.kind == "drag" and "drag" or nil,
 	}
 	racesData.races[race.id] = race
 	liveRaces[race.id] = {phase = "staking", finish = offer.finish, reports = {},
@@ -1658,15 +1715,68 @@ Money.startRace = function(offer)
 		callOff(race, "the server could not keep the race")
 		return
 	end
-	sendBothRace(race, {race = race.id, phase = "staking", stake = race.stake, a = race.a, b = race.b})
+	if isDrag(race) then
+		sendDrag(race, {phase = "staking", prize = serverNumber("dragRacePrize", 0, 1000000)})
+	else
+		sendBothRace(race, {race = race.id, phase = "staking", stake = race.stake, a = race.a, b = race.b})
+	end
 	if race.stake > 0 then
 		for _, name in ipairs({race.a, race.b}) do
 			startTransfer({kind = "stake", from = name, to = SERVER_PARTY, amount = race.stake,
-				takeLabel = "Race stake vs " .. otherRacer(race, name), race = race.id, role = "stake:" .. name})
+				takeLabel = (isDrag(race) and "Drag race" or "Race") .. " stake vs " .. otherRacer(race, name),
+				race = race.id, role = "stake:" .. name})
 		end
 	else
 		beginStart(race)
 	end
+end
+
+-- The held drag race of exactly the pair a and b, waiting for its run, and its live state.
+local function heldDragRace(a, b)
+	for id, live in pairs(liveRaces) do
+		local race = racesData.races[id]
+		if isDrag(race) and live.phase == "toStrip" and otherRacer(race, a) == b then return race, live end
+	end
+	return nil
+end
+
+-- The Drag money section: a run of a and b went green and counts. Their held drag race,
+-- if they have one, is now this run's; its id is returned.
+Money.dragRaceGreen = function(a, b, runId)
+	local race, live = heldDragRace(a, b)
+	if not race then return nil end
+	live.phase = "racing"
+	live.deadline = signalTimer:GetCurrent() + DRAG_DECIDE_SECONDS
+	race.run = runId
+	saveRaces()
+	sendDrag(race, {phase = "racing", run = runId})
+	return race.id
+end
+
+-- The Drag money section decided the run of a racing drag race: winner (or nil for both
+-- stakes back) and the owner's prize. Returns {stake, pot} for the result card, or nil
+-- when the race is not waiting for this result.
+Money.settleDragRace = function(raceId, winner, prize)
+	local race, live = racesData.races[raceId], liveRaces[raceId]
+	if not isDrag(race) or not live or live.phase ~= "racing" or race.decision ~= "none" then return nil end
+	endLive(race)
+	race.prize = winner and prize or 0
+	decide(race, winner and ("winner:" .. winner) or "refund")
+	print(string.format("[Mileage] Drag race %s between %s and %s: %s", race.id, consoleText(race.a), consoleText(race.b),
+		winner and string.format("%s wins the $%d pot", consoleText(winner), race.pot) or "both stakes go back"))
+	settleRace(race)
+	return {stake = race.stake, pot = winner and race.pot or 0}
+end
+
+-- Either racer calls off their held drag race {race}: before its run's green, both stakes back.
+function mileageDragCallOff(player_id, data)
+	received("races")
+	local message = decodeTable(data)
+	local race = message and type(message.race) == "string" and racesData.races[message.race]
+	local live = race and liveRaces[race.id]
+	local name = MP.GetPlayerName(player_id)
+	if not isDrag(race) or not live or not otherRacer(race, name) then return end
+	if live.phase == "staking" or live.phase == "toStrip" then callOff(race, consoleText(name) .. " called it off") end
 end
 
 -- Stakes and payouts of a race report here, before the transfer itself moves on.
@@ -1853,7 +1963,8 @@ function mileageRaceReport(player_id, data)
 	local race = racesData.races[report.race]
 	local live = liveRaces[report.race]
 	local name = MP.GetPlayerName(player_id)
-	if not race or not live or not otherRacer(race, name) then return end
+	-- A drag race is decided at the strip, never by a street race report.
+	if not race or not live or not otherRacer(race, name) or isDrag(race) then return end
 	local before = live.phase == "staking" or live.phase == "pose" or live.phase == "teleport"
 	if report.gaveUp == true or report.failed then
 		if before then
@@ -1910,7 +2021,17 @@ local function racesTick()
 		elseif live.phase == "countdown" and now >= live.goAt then
 			live.phase = "racing"
 		end
-		if race and liveRaces[id] then
+		if isDrag(race) and liveRaces[id] then
+			if now >= live.deadline then
+				callOff(race, (live.phase == "staking" and "the stakes did not arrive in time")
+					or (live.phase == "toStrip" and "no run together started in time")
+					or "the run was not decided")
+			elseif live.phase == "toStrip" and now >= live.resendAt then
+				live.resendAt = now + DRAG_RESEND_SECONDS
+				sendDrag(race, {phase = "toStrip", minutesLeft = dragMinutesLeft(live),
+					prize = serverNumber("dragRacePrize", 0, 1000000)})
+			end
+		elseif race and liveRaces[id] then
 			if live.firstReportAt and now - live.firstReportAt >= DECIDE_SECONDS then
 				local winner, best = nil, nil
 				for name, seconds in pairs(live.reports) do
@@ -1933,7 +2054,10 @@ local function racesPlayerLeft(name)
 	for id, live in pairs(liveRaces) do
 		local race = racesData.races[id]
 		local other = race and otherRacer(race, name)
-		if other then
+		if other and isDrag(race) then
+			-- Once its run went green, the Drag money section counts the leaver as not finished.
+			if live.phase ~= "racing" then callOff(race, consoleText(name) .. " left") end
+		elseif other then
 			if live.phase == "staking" or live.phase == "pose" or live.phase == "teleport" then
 				callOff(race, consoleText(name) .. " left")
 			elseif live.reports[name] then
@@ -1981,8 +2105,8 @@ Money.printRaces = function()
 	print(string.format("[Mileage] Races holding stakes: %d", #ids))
 	for _, id in ipairs(ids) do
 		local race = racesData.races[id]
-		print(string.format("  %s: %s vs %s, $%d stake, $%d held, %s, %s ago", id, consoleText(race.a),
-			consoleText(race.b), race.stake or 0, heldTotal(race), race.decision,
+		print(string.format("  %s%s: %s vs %s, $%d stake, $%d held, %s, %s ago", id, isDrag(race) and " (drag)" or "",
+			consoleText(race.a), consoleText(race.b), race.stake or 0, heldTotal(race), race.decision,
 			ageText(os.time() - (race.created or os.time()))))
 	end
 end

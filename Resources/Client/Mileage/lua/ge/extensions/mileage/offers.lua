@@ -6,12 +6,12 @@
 -- unavailable, and passes every offer to the Mileage prompts app through guihooks:
 --
 --   MileageFeatures       the server's switches and limits
---   MileagePlayerActions  {name, race, pay, request}: whether each action is open, and why not
+--   MileagePlayerActions  {name, race, drag, pay, request}: whether each action is open, and why not
 --   MileageOffer          an offer to this player, with its two answers
 --   MileageOfferClosed    {id, why, text}: an offer answered, expired or withdrawn
 --
 -- Called from the UI apps: mileage_offers.request(name, amount), .race(name, stake),
--- .answer(id, accept), .actionsFor(name), .sendState().
+-- .dragRace(name, stake), .answer(id, accept), .actionsFor(name), .sendState().
 
 local M = {}
 
@@ -87,15 +87,29 @@ local function raceCheck(name)
 	return check
 end
 
+-- Why this player cannot challenge name to a drag race, or nil: no route is needed, the
+-- race is the pair's next run together at the strip.
+local function dragProblem(name)
+	if features and not features.allowRacing then return "Racing is switched off on this server." end
+	if name == nickname() then return "You cannot race yourself." end
+	if not findPlayer(name) then return name .. " is not in this session." end
+	local race = streetRace()
+	if not race or type(race.eligibility) ~= "function" then return "Racing is not available in this game." end
+	return (race.eligibility())
+end
+
 --- Tells the player list what can be done with this player, and why not.
 function M.actionsFor(name)
 	local race = raceCheck(name)
+	local drag = dragProblem(name)
 	local pay, request = payProblem(name), requestProblem(name)
 	guihooks.trigger("MileagePlayerActions", {
 		name = name,
 		race = {ok = race.ok, why = race.why, distance = race.distance,
 			stakeMax = features and features.raceStakeMax or 0, prize = features and features.racePrize or 0,
 			cooldown = features and features.racePrizeCooldownMinutes or 0},
+		drag = {ok = drag == nil, why = drag, stakeMax = features and features.raceStakeMax or 0,
+			prize = features and features.dragRacePrize or 0, minutes = features and features.raceTimeLimitMinutes or 15},
 		pay = {ok = pay == nil, why = pay, money = money()},
 		request = {ok = request == nil, why = request},
 	})
@@ -118,15 +132,20 @@ function M.request(name, amount)
 	return true
 end
 
+-- Why this stake cannot be offered, or nil.
+local function stakeProblem(stake)
+	if not stake then return "Enter a stake of $0 or more, in whole dollars." end
+	if features and stake > (features.raceStakeMax or 0) then
+		return "That stake is above this server's limit of $" .. tostring(features.raceStakeMax) .. "."
+	end
+	if stake > money() then return "You do not have the money for that stake." end
+	return nil
+end
+
 function M.race(name, stake)
 	stake = wholeAmount(stake == nil and 0 or stake, true)
 	local check = raceCheck(name)
-	local why = check.why
-	if not why and not stake then why = "Enter a stake of $0 or more, in whole dollars." end
-	if not why and features and stake > (features.raceStakeMax or 0) then
-		why = "That stake is above this server's limit of $" .. tostring(features.raceStakeMax) .. "."
-	end
-	if not why and stake > money() then why = "You do not have the money for that stake." end
+	local why = check.why or stakeProblem(stake)
 	if why then
 		toast("error", "Challenge not sent", why)
 		return false
@@ -136,13 +155,25 @@ function M.race(name, stake)
 	return true
 end
 
+--- Challenges name to a drag race for a stake: their next run together at the strip.
+function M.dragRace(name, stake)
+	stake = wholeAmount(stake == nil and 0 or stake, true)
+	local why = dragProblem(name) or stakeProblem(stake)
+	if why then
+		toast("error", "Challenge not sent", why)
+		return false
+	end
+	TriggerServerEvent("mileageOffer", jsonEncode({kind = "drag", to = findPlayer(name).playerID, amount = stake}))
+	return true
+end
+
 function M.answer(id, accept)
 	local offer = type(id) == "string" and incoming[id]
 	if not offer then return false end
 	incoming[id] = nil
 	-- A challenge is only accepted from one of the player's own cars, outside a mission and
 	-- not in another race; otherwise it is declined here, before any stake is taken.
-	if accept == true and offer.kind == "race" then
+	if accept == true and (offer.kind == "race" or offer.kind == "drag") then
 		local race = streetRace()
 		local why = "Racing is not available in this game."
 		if race and type(race.eligibility) == "function" then why = race.eligibility() end
@@ -182,7 +213,7 @@ local function rxMileageOfferSent(data)
 	local offer = jsonDecode(data)
 	if type(offer) ~= "table" or type(offer.id) ~= "string" then return end
 	outgoing[offer.id] = offer
-	local what = offer.kind == "race" and "Challenge sent" or "Request sent"
+	local what = (offer.kind == "race" or offer.kind == "drag") and "Challenge sent" or "Request sent"
 	toast("info", what, "Waiting for " .. tostring(offer.to) .. " to answer.")
 end
 
@@ -192,7 +223,7 @@ local function rxMileageOfferClosed(data)
 	local text = type(closed.text) == "string" and closed.text or ""
 	if closed.id == nil then
 		-- The server turned this player's own offer down before showing it.
-		toast("error", closed.kind == "race" and "Challenge not sent" or "Request not sent", text)
+		toast("error", (closed.kind == "race" or closed.kind == "drag") and "Challenge not sent" or "Request not sent", text)
 		return
 	end
 	incoming[closed.id] = nil
@@ -200,7 +231,8 @@ local function rxMileageOfferClosed(data)
 	local mine = outgoing[closed.id]
 	outgoing[closed.id] = nil
 	if not mine then return end
-	local what = mine.kind == "race" and "your challenge" or "your request for $" .. tostring(mine.amount)
+	local what = (mine.kind == "race" or mine.kind == "drag") and "your challenge"
+		or "your request for $" .. tostring(mine.amount)
 	if closed.why == "accepted" then
 		toast("success", "Accepted", tostring(mine.to) .. " accepted " .. what .. ".")
 	elseif closed.why == "declined" then

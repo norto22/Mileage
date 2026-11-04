@@ -350,6 +350,319 @@ World.test("a racer leaving before the green ends the run with nothing paid", fu
 	same(ann.savedMoney, 10000, "nothing paid")
 end, withPrize)
 
+--== a staked drag challenge ==================================================
+
+local function shownOffer(world, p)
+	local closed = {}
+	for _, c in ipairs(world:ui(p, "MileageOfferClosed")) do closed[c.id] = true end
+	local last = nil
+	for _, offer in ipairs(world:ui(p, "MileageOffer")) do
+		if not closed[offer.id] then last = offer end
+	end
+	return last
+end
+
+-- a challenges b to a drag race for stake, and b accepts.
+local function staked(world, a, b, stake)
+	world:as(a, function() mileage_offers.dragRace(b.name, stake) end)
+	world:pump()
+	local offer = assert(shownOffer(world, b), "no drag challenge shown to " .. b.name)
+	world:as(b, function() mileage_offers.answer(offer.id, true) end)
+	world:pump()
+end
+
+local function races(world)
+	local data = world:dataFile("races.json")
+	local n, only = 0, nil
+	for _, race in pairs(data and data.races or {}) do n, only = n + 1, race end
+	return n, only
+end
+
+local function cards(world, p, phase)
+	local found = {}
+	for _, card in ipairs(world:received(p, "rxMileageDragRace")) do
+		if card.phase == phase then table.insert(found, card) end
+	end
+	return found
+end
+
+local function lastLabel(p)
+	return p.history[#p.history] and p.history[#p.history].label
+end
+
+World.test("accepting a drag challenge takes both stakes and holds them for the pair's next run together", function(world)
+	local ann, bob = pair(world)
+	staked(world, ann, bob, 1000)
+	same(ann.savedMoney, 9000, "Ann's stake taken")
+	same(bob.savedMoney, 9000, "Bob's stake taken")
+	same(lastLabel(ann), "Drag race stake vs Bob", "Ann's history")
+	local n, race = races(world)
+	same(n, 1, "one race kept")
+	same(race.kind, "drag", "a drag race")
+	same(race.held.Ann, 1000, "Ann's stake held")
+	same(race.held.Bob, 1000, "Bob's stake held")
+	local card = cards(world, bob, "toStrip")[1]
+	expect(card, "Bob told the stakes are held")
+	same(card.other, "Ann", "against Ann")
+	same(card.stake, 1000, "stake")
+	same(card.minutesLeft, 15, "the race time limit")
+	same(card.prize, PRIZE, "the drag prize")
+	same(#world:received(ann, "rxMileageRace"), 0, "no street race panel")
+end, withPrize)
+
+World.test("Call off from either racer before the run gives both stakes back once", function(world)
+	local ann, bob = pair(world)
+	staked(world, ann, bob, 1000)
+	local _, race = races(world)
+	send(world, bob, "mileageDragCallOff", {race = race.id})
+	send(world, ann, "mileageDragCallOff", {race = race.id})
+	same(ann.savedMoney, 10000, "Ann's stake back")
+	same(bob.savedMoney, 10000, "Bob's stake back")
+	same(lastLabel(ann), "Drag race stake back vs Bob", "Ann's history")
+	same(races(world), 0, "race record gone")
+	same(cards(world, ann, "calledOff")[1].why, "Bob called it off", "Ann told why")
+	same(world:savedTotal(), 20000, "total")
+end)
+
+World.test("the prompts app's Call off calls off the held race from the player's game", function(world)
+	local ann, bob = pair(world)
+	staked(world, ann, bob, 1000)
+	local called
+	world:as(bob, function() called = mileage_dragMoney.callOff() end)
+	world:pump()
+	same(called, true, "sent")
+	same(bob.savedMoney, 10000, "Bob's stake back")
+	same(ann.savedMoney, 10000, "Ann's stake back")
+end)
+
+World.test("a call off from a player not in the race, or for no race, changes nothing", function(world)
+	local ann, bob = pair(world)
+	local cat = world:join("Cat", 0)
+	staked(world, ann, bob, 1000)
+	local _, race = races(world)
+	send(world, cat, "mileageDragCallOff", {race = race.id})
+	send(world, ann, "mileageDragCallOff", {race = "r999"})
+	same(races(world), 1, "still held")
+	same(world:savedTotal(), 18000, "stakes still held")
+end)
+
+World.test("either racer leaving before the run gives both stakes back", function(world)
+	local ann, bob = pair(world)
+	staked(world, ann, bob, 1000)
+	world:leave(bob)
+	same(ann.savedMoney, 10000, "Ann's stake back")
+	world:rejoin(bob)
+	same(bob.savedMoney, 10000, "Bob's stake back when he returns")
+	same(races(world), 0, "race record gone")
+end)
+
+World.test("no run together before the time limit gives both stakes back; the time left is re-sent each minute",
+		function(world)
+	local ann, bob = pair(world)
+	staked(world, ann, bob, 1000)
+	world:advance(14 * 60 + 50)
+	same(races(world), 1, "held at 14:50")
+	expect(#cards(world, ann, "toStrip") >= 14, "the time left told each minute")
+	same(cards(world, ann, "toStrip")[3].minutesLeft, 13, "counting down")
+	world:advance(11)
+	same(ann.savedMoney, 10000, "Ann's stake back")
+	same(bob.savedMoney, 10000, "Bob's stake back")
+	same(cards(world, bob, "calledOff")[1].why, "no run together started in time", "why")
+end)
+
+World.test("a server restart with a held drag race gives both stakes back once", function(world)
+	local ann, bob = pair(world)
+	staked(world, ann, bob, 1000)
+	world:restart()
+	world:advance(12)
+	world:restart()
+	world:advance(12)
+	same(ann.savedMoney, 10000, "Ann's stake back")
+	same(bob.savedMoney, 10000, "Bob's stake back")
+	local backs = 0
+	for _, entry in ipairs(ann.history) do if entry.label == "Drag race stake back vs Bob" then backs = backs + 1 end end
+	same(backs, 1, "once")
+end)
+
+World.test("an older races.json without a kind settles as a street race", function(world)
+	local ann, bob = pair(world)
+	world.disk["Resources/Server/Mileage/data/races.json"] = World.encode({seq = 4, races = {r4 = {id = "r4", a = "Ann",
+		b = "Bob", stake = 500, held = {Ann = 500, Bob = 500}, decision = "winner:Ann", pot = 1000, prize = 0, paid = {},
+		created = 1}}})
+	world:restart()
+	world:advance(12)
+	same(ann.savedMoney, 11000, "Ann's pot")
+	same(lastLabel(ann), "Race win vs Bob", "a street race's label")
+end)
+
+World.test("while a drag race is held both racers are busy for other challenges, but plain runs still pay", function(world)
+	local ann, bob = pair(world)
+	local cat = world:join("Cat", 10000)
+	staked(world, ann, bob, 1000)
+	world:as(cat, function() mileage_offers.dragRace("Ann", 0) end)
+	world:pump()
+	local closed = world:received(cat, "rxMileageOfferClosed")
+	same(closed[#closed].why, "busy", "Cat cannot challenge Ann")
+	cat.route = {x = 0, y = 2400, z = 0}
+	world:as(cat, function() mileage_offers.race("Bob", 0) end)
+	world:pump()
+	closed = world:received(cat, "rxMileageOfferClosed")
+	same(closed[#closed].why, "busy", "nor race Bob")
+	atStrip(world, cat, 2)
+	world:serverOutput(function()
+		dragMP(bob.id, World.encode({msg = "mileageDragLeave", to = "host", data = {stripId = STRIP}}))
+	end)
+	local id = run(world, ann, ann, cat)
+	finish(world, ann, id, 1, 11.2)
+	finish(world, cat, id, 2, 11.9)
+	same(ann.savedMoney, 9000 + PRIZE, "Ann's plain win against Cat pays the prize")
+	same(races(world), 1, "the drag race with Bob still held")
+end, withPrize)
+
+World.test("a street race report for a drag race changes nothing", function(world)
+	local ann, bob = pair(world)
+	staked(world, ann, bob, 1000)
+	local _, race = races(world)
+	send(world, ann, "mileageRaceReport", {race = race.id, gaveUp = true})
+	send(world, bob, "mileageRaceReport", {race = race.id, finished = 30})
+	same(races(world), 1, "still held")
+	same(world:savedTotal(), 18000, "nothing moved")
+end)
+
+--== the staked run ===========================================================
+
+-- Both back on their lines for another run.
+local function again(world, a, b)
+	atStrip(world, a, 1)
+	atStrip(world, b, 2)
+end
+
+World.test("a staked run: the jumper's faster time loses, the clean finisher takes both stakes and the prize",
+		function(world)
+	local ann, bob = pair(world)
+	staked(world, ann, bob, 1000)
+	local id = run(world, ann, ann, bob)
+	same(cards(world, ann, "racing")[1].run, id, "the race is this run's")
+	same(races(world) and select(2, races(world)).run, id, "the run kept in races.json")
+	jumped(world, bob, id)
+	finish(world, bob, id, 2, 9.4)
+	finish(world, ann, id, 1, 11.6)
+	same(ann.savedMoney, 10000 + 1000 + PRIZE, "Ann: the stake plus the prize better off")
+	same(bob.savedMoney, 10000 - 1000, "Bob: the stake worse off")
+	same(world:savedTotal(), 20000 + PRIZE, "the pair: the prize better off")
+	local labels = {}
+	for _, entry in ipairs(ann.history) do labels[entry.label] = entry.amount end
+	same(labels["Drag race win vs Bob"], 2000, "the pot")
+	same(labels["Drag race prize vs Bob"], PRIZE, "the prize")
+	local card = lastCard(world, bob)
+	same(card.phase, "result", "result")
+	same(card.winner, "Ann", "winner")
+	same(card.pot, 2000, "pot")
+	same(card.prize, PRIZE, "prize")
+	same(card.stake, 1000, "stake")
+	same(card.outcomes.Bob, "jumped", "Bob jumped")
+	same(card.times.Ann, 11.6, "Ann's time")
+	same(races(world), 0, "race record gone once paid")
+end, withPrize)
+
+World.test("a run ended before its green, a green that does not count, or a run with someone else leaves the stakes held",
+		function(world)
+	local ann, bob = pair(world)
+	local cat = world:join("Cat", 10000)
+	staked(world, ann, bob, 1000)
+	local id = run(world, ann, ann, bob, {green = false})
+	send(world, ann, "mileageDragRun", {phase = "ended", run = id})
+	id = run(world, ann, ann, bob, {unstaged = bob})
+	finish(world, ann, id, 1, 11.2)
+	again(world, ann, bob)
+	atStrip(world, cat, 2)
+	id = run(world, ann, ann, cat)
+	finish(world, ann, id, 1, 11.2)
+	finish(world, cat, id, 2, 11.9)
+	same(races(world), 1, "still held")
+	same(#cards(world, ann, "racing"), 0, "never racing")
+	again(world, ann, bob)
+	id = run(world, ann, ann, bob)
+	finish(world, ann, id, 1, 11.2)
+	finish(world, bob, id, 2, 11.9)
+	same(ann.savedMoney, 11000, "the pair's own run settles it")
+	same(bob.savedMoney, 9000, "Bob lost his stake")
+end)
+
+World.test("from the green on, a racer who leaves loses the stake to a racer who finishes", function(world)
+	local ann, bob = pair(world)
+	staked(world, ann, bob, 1000)
+	local id = run(world, ann, ann, bob)
+	world:leave(bob)
+	same(races(world), 1, "the leave alone decides nothing")
+	finish(world, ann, id, 1, 12.0)
+	same(ann.savedMoney, 11000, "Ann takes both stakes")
+	world:rejoin(bob)
+	same(bob.savedMoney, 9000, "Bob lost his")
+	same(lastCard(world, ann).why, "left", "Ann told Bob left")
+end)
+
+World.test("from the green on, neither racer finishing gives both stakes back", function(world)
+	local ann, bob = pair(world)
+	staked(world, ann, bob, 1000)
+	run(world, ann, ann, bob)
+	world:advance(71)
+	same(ann.savedMoney, 10000, "Ann's back")
+	same(bob.savedMoney, 10000, "Bob's back")
+	same(lastLabel(bob), "Drag race stake back vs Ann", "Bob's history")
+	local card = lastCard(world, ann)
+	same(card.phase, "result", "result card")
+	same(card.winner, nil, "no winner")
+end, withPrize)
+
+World.test("a staked run without a prize pays only the pot, and a tie gives both stakes back", function(world)
+	local ann, bob = pair(world)
+	staked(world, ann, bob, 500)
+	local id = run(world, ann, ann, bob)
+	finish(world, ann, id, 1, 11.5)
+	finish(world, bob, id, 2, 11.5)
+	same(world:savedTotal(), 20000, "tie: both back")
+	again(world, ann, bob)
+	staked(world, ann, bob, 500)
+	id = run(world, ann, ann, bob)
+	finish(world, ann, id, 1, 11.9)
+	finish(world, bob, id, 2, 11.5)
+	same(bob.savedMoney, 10500, "Bob's pot, no prize")
+	same(ann.savedMoney, 9500, "Ann's stake lost")
+end)
+
+World.test("a call off once the run went green changes nothing", function(world)
+	local ann, bob = pair(world)
+	staked(world, ann, bob, 1000)
+	local id = run(world, ann, ann, bob)
+	local _, race = races(world)
+	send(world, bob, "mileageDragCallOff", {race = race.id})
+	finish(world, ann, id, 1, 11.2)
+	finish(world, bob, id, 2, 11.9)
+	same(ann.savedMoney, 11000, "the run still settles it")
+end)
+
+World.test("a restart after the decision pays only the payouts still missing", function(world)
+	local ann, bob = pair(world)
+	staked(world, ann, bob, 1000)
+	local id = run(world, ann, ann, bob)
+	world.filter = function(m)
+		if m.event == "rxMileageGive" and m.data:find("Drag race prize", 1, true) then return "drop" end
+	end
+	finish(world, ann, id, 1, 11.2)
+	finish(world, bob, id, 2, 11.9)
+	same(ann.savedMoney, 11000, "the pot given, the prize not yet")
+	world.filter = nil
+	world:restart()
+	world:advance(12)
+	same(ann.savedMoney, 11000 + PRIZE, "the prize after the restart")
+	same(prizeLines(ann), 1, "once")
+	local pots = 0
+	for _, entry in ipairs(ann.history) do if entry.label == "Drag race win vs Bob" then pots = pots + 1 end end
+	same(pots, 1, "the pot once")
+	same(races(world), 0, "record gone")
+end, withPrize)
+
 World.test("a prize under way when the server restarts is paid once", function(world)
 	local ann, bob = pair(world)
 	world.filter = function(m) if m.event == "rxMileageGive" then return "drop" end end
