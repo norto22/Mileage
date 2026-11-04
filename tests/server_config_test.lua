@@ -190,10 +190,10 @@ end)
 
 test("a fresh install and an existing config get the racing, request and event settings at their defaults", function()
 	local defaults = {allowRacing = true, allowMoneyRequests = true, allowEvents = true, raceStakeMax = 10000,
-		racePrize = 0, racePrizeCooldownMinutes = 10, raceMinDistance = 500, raceTimeLimitMinutes = 15,
-		allowAiRaces = true, aiRacePrize = 0, aiRacePrizeCooldownMinutes = 10,
-		allowSpotRaces = true, spotRacePrize = 0, spotRacePrizeCooldownMinutes = 10, spotRaceOpponentsMax = 5,
-		dragRacePrize = 0}
+		racePrize = 2000, racePrizeCooldownMinutes = 5, raceMinDistance = 500, raceTimeLimitMinutes = 15,
+		allowAiRaces = true, aiRacePrize = 2000, aiRacePrizeCooldownMinutes = 5,
+		allowSpotRaces = true, spotRacePrize = 2000, spotRacePrizeCooldownMinutes = 5, spotRaceOpponentsMax = 5,
+		dragRacePrize = 2000, dragRacePrizeCooldownMinutes = 5}
 	for _, existing in ipairs({false, true}) do
 		run(function()
 			local prepareConfig = loadPlugin()
@@ -205,6 +205,117 @@ test("a fresh install and an existing config get the racing, request and event s
 			if existing then same(written.server.longWindowMax, 10000, "the owner's other settings kept") end
 		end)
 	end
+end)
+
+--== race prizes: the $2000 defaults and the one-time move ==================
+
+local PRIZES = {"racePrize", "aiRacePrize", "spotRacePrize", "dragRacePrize"}
+local WAITS = {"racePrizeCooldownMinutes", "aiRacePrizeCooldownMinutes", "spotRacePrizeCooldownMinutes"}
+
+-- An owner's file from before the $2000 defaults: every prize off, the 10-minute waits,
+-- and no drag wait setting, as earlier versions wrote it.
+local function preUpdateConfig()
+	local config = ownersConfig()
+	for _, key in ipairs(PRIZES) do config.server[key] = 0 end
+	for _, key in ipairs(WAITS) do config.server[key] = 10 end
+	return config
+end
+
+local function movedLine(key, from, to)
+	return string.format("[Mileage] ---------- Mileage Config server %s moved from %d to %d (the new default);"
+		.. " to keep it as it was: Mileage SetConfig server %s %d", key, from, to, key, from)
+end
+
+test("a fresh install pays $2000 prizes with 5-minute waits and says nothing was moved", function()
+	run(function()
+		local prepareConfig = loadPlugin()
+		stored = nil
+		prepareConfig()
+		for _, key in ipairs(PRIZES) do same(written.server[key], 2000, key) end
+		for _, key in ipairs(WAITS) do same(written.server[key], 5, key) end
+		same(written.server.dragRacePrizeCooldownMinutes, 5, "drag wait")
+		same(countLines(printed, "moved from"), 0, "no moved lines")
+	end)
+end)
+
+test("a file from before the $2000 defaults moves its $0 prizes and 10-minute waits once, naming each", function()
+	run(function()
+		local prepareConfig = loadPlugin()
+		stored = preUpdateConfig()
+		prepareConfig()
+		for _, key in ipairs(PRIZES) do
+			same(written.server[key], 2000, key)
+			same(countLines(printed, movedLine(key, 0, 2000)), 1, key .. " moved line")
+		end
+		for _, key in ipairs(WAITS) do
+			same(written.server[key], 5, key)
+			same(countLines(printed, movedLine(key, 10, 5)), 1, key .. " moved line")
+		end
+		same(written.server.dragRacePrizeCooldownMinutes, 5, "drag wait added")
+		same(countLines(printed, "moved from"), 7, "one line per moved setting")
+		same(written.server.longWindowMax, 10000, "the owner's other settings kept")
+	end)
+end)
+
+test("the move keeps every prize and wait the owner set to something else", function()
+	run(function()
+		local prepareConfig = loadPlugin()
+		stored = preUpdateConfig()
+		stored.server.racePrize, stored.server.dragRacePrize = 500, 1
+		stored.server.aiRacePrizeCooldownMinutes, stored.server.spotRacePrizeCooldownMinutes = 30, 0
+		stored.server.spotRacePrize = "0"
+		prepareConfig()
+		same(written.server.racePrize, 500, "racePrize kept")
+		same(written.server.dragRacePrize, 1, "dragRacePrize kept")
+		same(written.server.aiRacePrizeCooldownMinutes, 30, "a 30-minute wait kept")
+		same(written.server.spotRacePrizeCooldownMinutes, 0, "a wait of 0 kept")
+		same(written.server.spotRacePrize, "0", "a prize written as text is left as it is")
+		same(written.server.aiRacePrize, 2000, "an untouched prize still moves")
+		same(written.server.racePrizeCooldownMinutes, 5, "an untouched wait still moves")
+		same(countLines(printed, "moved from"), 2, "lines only for what moved")
+	end)
+end)
+
+test("after the move, a prize the owner sets back to $0 stays at $0 through later starts", function()
+	run(function()
+		local prepareConfig = loadPlugin()
+		stored = preUpdateConfig()
+		prepareConfig()
+		stored, written, printed = written, nil, {}
+		SetConfig({"server", "racePrize", "0"})
+		same(written and written.server.racePrize, 0, "set back to 0")
+		for _ = 1, 2 do
+			stored, written, printed = written or stored, nil, {}
+			prepareConfig()
+			same(countLines(printed, "moved from"), 0, "nothing moves again")
+			same((written or stored).server.racePrize, 0, "still 0")
+		end
+	end)
+end)
+
+test("a file with the drag wait already set keeps a $0 prize and a 10-minute wait", function()
+	run(function()
+		local prepareConfig = loadPlugin()
+		stored = preUpdateConfig()
+		stored.server.dragRacePrizeCooldownMinutes = 0
+		prepareConfig()
+		local server = (written or stored).server
+		for _, key in ipairs(PRIZES) do same(server[key], 0, key) end
+		for _, key in ipairs(WAITS) do same(server[key], 10, key) end
+		same(countLines(printed, "moved from"), 0, "no moved lines")
+	end)
+end)
+
+test("a file with no server section gets the new defaults and no moved lines", function()
+	run(function()
+		local prepareConfig = loadPlugin()
+		stored = ownersConfig()
+		stored.server = nil
+		prepareConfig()
+		for _, key in ipairs(PRIZES) do same(written.server[key], 2000, key) end
+		same(written.server.dragRacePrizeCooldownMinutes, 5, "drag wait")
+		same(countLines(printed, "moved from"), 0, "no moved lines")
+	end)
 end)
 
 test("SetConfig refuses the removed extra-traffic settings and still sets road traffic", function()

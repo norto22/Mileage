@@ -1021,7 +1021,19 @@ end
 REAL_IO = REAL_IO or {open = io.open, rename = os.rename, remove = os.remove, time = os.time}
 World.realOpen = REAL_IO.open
 
--- opts.config: server settings to start with (merged into a config with autoUpdate off).
+-- The race prize settings every world starts with unless a test asks for the real defaults:
+-- prizes off, the 10-minute waits and no drag wait, so a test proves what it names and no
+-- server prize joins its money unless it sets one.
+World.OLD_PRIZE_SETTINGS = {
+	racePrize = 0, aiRacePrize = 0, spotRacePrize = 0, dragRacePrize = 0,
+	racePrizeCooldownMinutes = 10, aiRacePrizeCooldownMinutes = 10, spotRacePrizeCooldownMinutes = 10,
+	dragRacePrizeCooldownMinutes = 0,
+}
+
+-- opts.server: server settings to start with (merged into a config with autoUpdate off and
+-- the prize settings above). opts.settingsFile: "old" writes a settings file from before
+-- the $2000 defaults (no prize settings and no drag wait), "fresh" writes none, so the
+-- server starts as a new install; either way the real defaults apply.
 function World.new(opts)
 	opts = opts or {}
 	local self = setmetatable({players = {}, toServer = {}, toClients = {}, serverLog = {}, clientLog = {},
@@ -1061,8 +1073,13 @@ function World.new(opts)
 		return self.epoch + math.floor(self.now)
 	end
 	local server = {autoUpdate = false, autoExit = false}
+	if opts.settingsFile == nil then
+		for k, v in pairs(World.OLD_PRIZE_SETTINGS) do server[k] = v end
+	end
 	for k, v in pairs(opts.server or {}) do server[k] = v end
-	self.disk["Resources/Server/Mileage/config/config.json"] = encode({server = server, client = opts.client or {}})
+	if opts.settingsFile ~= "fresh" then
+		self.disk["Resources/Server/Mileage/config/config.json"] = encode({server = server, client = opts.client or {}})
+	end
 	self:startServer()
 	return self
 end

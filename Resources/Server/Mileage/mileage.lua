@@ -58,26 +58,29 @@ local defaultConfig = {
 		raceStakeMax = 10000,
 		-- Money the server adds for the winner of a race between players, 0 to 1000000;
 		-- 0 is off. The same two players earn it at most once per cooldown (0 to 1440 min).
-		racePrize = 0,
-		racePrizeCooldownMinutes = 10,
+		racePrize = 2000,
+		racePrizeCooldownMinutes = 5,
 		-- Players may race one of their own traffic cars on the road ("Race this car" in the
 		-- prompts app). aiRacePrize is the race reward the server pays the first player who
 		-- beats the traffic car, 0 to 1000000 (0 is off), plus half of it for each player who
 		-- joined; one player earns it at most once per cooldown (0 to 1440 min).
 		allowAiRaces = true,
-		aiRacePrize = 0,
-		aiRacePrizeCooldownMinutes = 10,
+		aiRacePrize = 2000,
+		aiRacePrizeCooldownMinutes = 5,
 		-- Race spots at the game's West Coast routes: a player starts a race there against up
-		-- to spotRaceOpponentsMax opponents (0 to 5) and invited players. spotRacePrize is paid
-		-- to a player who finishes first overall, 0 to 1000000 (0 is off); one player earns it
-		-- at most once per cooldown (0 to 1440 min).
+		-- to spotRaceOpponentsMax opponents (0 to 5) and invited players. spotRacePrize is the
+		-- prize for a race of two, paid to a player who finishes first overall, plus half of it
+		-- for each racer past two, 0 to 1000000 (0 is off); one player earns it at most once
+		-- per cooldown (0 to 1440 min).
 		allowSpotRaces = true,
-		spotRacePrize = 0,
-		spotRacePrizeCooldownMinutes = 10,
+		spotRacePrize = 2000,
+		spotRacePrizeCooldownMinutes = 5,
 		spotRaceOpponentsMax = 5,
 		-- Money the server adds for the winner of a drag race between two players at the
-		-- strip, 0 to 1000000; 0 is off. Every win pays it, with no wait between prizes.
-		dragRacePrize = 0,
+		-- strip, 0 to 1000000; 0 is off. The same two players earn it at most once per
+		-- cooldown (0 to 1440 min; 0 pays every win).
+		dragRacePrize = 2000,
+		dragRacePrizeCooldownMinutes = 5,
 		-- The shortest race allowed, in metres from start to finish (0 to 20000), and the
 		-- time after which a race nobody finished ends with both stakes back (1 to 120 min).
 		raceMinDistance = 500,
@@ -551,6 +554,25 @@ local function prepareConfig()
 		WriteJson(configPath .. "config.json", Config)
 	else
 		local updateFound
+		-- A file from before the $2000 prizes has no drag wait setting. Its prizes still at
+		-- the old default of 0 and waits still at the old 10 minutes move to the new defaults,
+		-- once: the drag wait is added below, so the next start finds it and moves nothing.
+		if type(Config.server) == "table" and Config.server.dragRacePrizeCooldownMinutes == nil then
+			local old = {racePrize = 0, aiRacePrize = 0, spotRacePrize = 0, dragRacePrize = 0,
+				racePrizeCooldownMinutes = 10, aiRacePrizeCooldownMinutes = 10, spotRacePrizeCooldownMinutes = 10}
+			local keys = {}
+			for key in pairs(old) do table.insert(keys, key) end
+			table.sort(keys)
+			for _, key in ipairs(keys) do
+				local new = defaultConfig.server[key]
+				if Config.server[key] == old[key] then
+					Config.server[key] = new
+					updateFound = true
+					print(string.format("[Mileage] ---------- Mileage Config server %s moved from %d to %d (the new default);"
+						.. " to keep it as it was: Mileage SetConfig server %s %d", key, old[key], new, key, old[key]))
+				end
+			end
+		end
 		for section, fields in pairs(defaultConfig) do
 			print("[Mileage] ---------- Mileage Config Checking " .. section)
 			if Config[section] == nil then
@@ -1259,6 +1281,7 @@ local function features()
 		raceMinDistance = serverNumber("raceMinDistance", 0, 20000),
 		raceTimeLimitMinutes = serverNumber("raceTimeLimitMinutes", 1, 120),
 		dragRacePrize = serverNumber("dragRacePrize", 0, 1000000),
+		dragRacePrizeCooldownMinutes = serverNumber("dragRacePrizeCooldownMinutes", 0, 1440),
 		sessionSendingMax = tonumber(Config.server.sessionSendingMax) or 0,
 	}
 end

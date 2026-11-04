@@ -275,6 +275,16 @@ World.test("a drag challenge accepted outside the player's own car, or in a miss
 	same(world:savedTotal(), 30000, "no stake taken")
 end)
 
+World.test("every game is told the drag prize's wait, kept within 0 to 1440 minutes", function(world)
+	local ann = three(world)
+	local function sent() local all = world:received(ann, "rxMileageFeatures"); return all[#all] end
+	same(sent().dragRacePrizeCooldownMinutes, 0, "the world's pinned wait")
+	world:setConfig("server", "dragRacePrizeCooldownMinutes", 7)
+	same(sent().dragRacePrizeCooldownMinutes, 7, "a changed wait")
+	world:setConfig("server", "dragRacePrizeCooldownMinutes", 99999)
+	same(sent().dragRacePrizeCooldownMinutes, 1440, "held to a day")
+end)
+
 World.test("the player list is told whether a drag race is open, its limit, prize and time", function(world)
 	local ann = three(world)
 	world:setConfig("server", "dragRacePrize", 750)
