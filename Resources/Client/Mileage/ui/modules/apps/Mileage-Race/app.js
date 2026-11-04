@@ -38,8 +38,11 @@ mileageRaceApp.controller('MileageRace', ['$scope', function ($scope) {
 				.map(function (r) { return r.name === you ? "You" : String(r.name); });
 			var cars = racers.filter(function (r) { return r && r.car; }).length;
 			if (cars > 0) names.push(cars + " car" + (cars === 1 ? "" : "s"));
-			return {big: String(data.count), label: routeName, line: names.length > 0 ? [names.join(", ")] : [],
-				countdown: true};
+			var gridLine = names.length > 0 ? [names.join(", ")] : [];
+			// The prize for first place with everyone on the grid, as the server pays it.
+			var gridPrize = Number(data.prize) || 0;
+			if (gridPrize > 0) gridLine.push("prize " + mrDollars(gridPrize) + " for " + racers.length + " racers");
+			return {big: String(data.count), label: routeName, line: gridLine, countdown: true};
 		case "go":
 			return {big: "GO", label: routeName, line: [], countdown: true, giveUp: "Give up"};
 		case "racing":

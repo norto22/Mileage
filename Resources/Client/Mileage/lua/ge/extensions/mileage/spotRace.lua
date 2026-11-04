@@ -629,6 +629,15 @@ local function onCountdown(message)
 		racers = race.racers, prize = race.prize})
 end
 
+-- A racer left during the countdown: the grid and prize change, the count goes on.
+local function onField(message)
+	if not race or race.id ~= message.id or race.phase ~= "countdown" then return end
+	race.racers = type(message.racers) == "table" and message.racers or race.racers
+	race.prize = tonumber(message.prize) or 0
+	ui({phase = "countdown", id = race.id, routeName = routeName(), count = math.ceil(race.countdownLeft or 0),
+		racers = race.racers, prize = race.prize})
+end
+
 -- This racer's row in the server's standings, its place and the racer ahead of it.
 local function placeOf(rows)
 	local me = myName()
@@ -939,6 +948,8 @@ local function rxMileageSpotRace(data)
 		onGrid(message)
 	elseif phase == "countdown" then
 		onCountdown(message)
+	elseif phase == "field" then
+		onField(message)
 	elseif phase == "standings" then
 		if race and race.id == message.id then race.rows = type(message.rows) == "table" and message.rows or {} end
 	elseif phase == "result" then

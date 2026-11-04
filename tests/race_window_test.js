@@ -120,6 +120,16 @@ test("a street race shows the opponent, the time, the finish and the stake", () 
 	assert.strictEqual(scope.live, null);
 });
 
+test("a race spot's countdown shows the prize for first place with everyone on the grid", () => {
+	const {scope} = load();
+	scope.emit("MileageSpotRace", {phase: "countdown", id: "s1", routeName: "City Race 1", count: 3, you: "Taylor",
+		prize: 4000, racers: [{name: "Taylor"}, {name: "Sam"}, {name: "Ibishu Pessima", car: true}, {name: "ETK 800", car: true}]});
+	assert.strictEqual(lineOf(scope.live.view), "You, Sam, 2 cars · prize $4,000 for 4 racers");
+	scope.emit("MileageSpotRace", {phase: "countdown", id: "s1", routeName: "City Race 1", count: 2, you: "Taylor",
+		prize: 0, racers: [{name: "Taylor"}, {name: "Sam"}]});
+	assert.strictEqual(lineOf(scope.live.view), "You, Sam", "no prize line when the server prize is off");
+});
+
 test("a race event's countdown and GO show the prize for the racers who started", () => {
 	const {scope} = load();
 	scope.emit("MileageRace", {phase: "countdown", race: "e1", other: "the race event", stake: 0, event: true,

@@ -4065,18 +4065,23 @@ end
 
 --== the grid and the countdown ===============================================
 
+-- Everyone on the grid, players and cars, and the prize for first place with them all.
+local function gridField(race)
+	local names = {}
+	for _, racer in ipairs(race.order) do
+		if race.racers[racer.key] then table.insert(names, {name = racer.name, car = racer.car ~= nil}) end
+	end
+	return names, Money.grownPrize(serverNumber("spotRacePrize", 0, PRIZE_HIGH), #names)
+end
+
 local function startCountdown(race)
 	local now = signalTimer:GetCurrent()
 	race.phase = "countdown"
 	race.goAt = now + SPOT_COUNTDOWN_SECONDS
 	race.deadline = race.goAt + serverNumber("raceTimeLimitMinutes", 1, 120) * 60
-	local names = {}
-	for _, racer in ipairs(race.order) do
-		if race.racers[racer.key] then table.insert(names, {name = racer.name, car = racer.car ~= nil}) end
-	end
-	-- The prize for first place with everyone on the grid, players and cars.
+	local names, prize = gridField(race)
 	sendRacers(race, {phase = "countdown", id = race.id, seconds = SPOT_COUNTDOWN_SECONDS, route = race.route.id,
-		racers = names, prize = Money.grownPrize(serverNumber("spotRacePrize", 0, PRIZE_HIGH), #names)})
+		racers = names, prize = prize})
 end
 
 -- Every player in the race gets a grid place behind the start facing the route: the
@@ -4467,6 +4472,10 @@ local function dropOut(race, racer, why)
 		if everyoneAnswered(race) then startGrid(race) end
 	elseif race.phase == "grid" and allReady(race) then
 		startCountdown(race)
+	elseif race.phase == "countdown" then
+		-- The countdown goes on; the others' cards show the grid and prize without them.
+		local names, prize = gridField(race)
+		sendRacers(race, {phase = "field", id = race.id, racers = names, prize = prize})
 	end
 end
 

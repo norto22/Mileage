@@ -300,7 +300,7 @@ World.test("a status tells each game whether racing traffic is on, the reward an
 	local status = heard(world, ann, "status")
 	same(#status, 1, "one status at the career start")
 	same(status[1].allowed, true, "on by default")
-	same(status[1].prize, 0, "no reward until set")
+	same(status[1].prize, 0, "no reward with the test world's prize at 0")
 	same(status[1].prizeAgainIn, 0, "no wait")
 	world:setConfig("server", "aiRacePrize", "2000")
 	same(heard(world, ann, "status")[2].prize, 2000, "the new reward")
@@ -458,7 +458,7 @@ World.test("when the traffic car is faster nobody is paid and nobody gets a win"
 	same(world:printedMatching("the traffic car wins, no reward"), 1, "the console line")
 end)
 
-World.test("the race reward is off until set, and waits per winner", function(world)
+World.test("a race reward of 0 pays nothing, and a set reward waits per winner", function(world)
 	local ann, t = annAndCar(world)
 	raceAnn(world, ann, t, 30, 40)
 	same(card(world, ann, "result").winner, "Ann", "she won")

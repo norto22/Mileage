@@ -1553,6 +1553,33 @@ World.test("an invited player who started another race cannot join; one who leav
 	same(standingsRow(world, ann, "Cat").out, "quit", "Cat is out: left the server")
 end)
 
+World.test("a racer who leaves during the countdown updates the grid and the prize the others see, without restarting it",
+		function(world)
+	world:setConfig("server", "spotRacePrize", "2000")
+	local ann, bob, cat = threePlayers(world)
+	request(world, ann, "highway_race", 0, {"Bob", "Cat"})
+	answer(world, bob, "join")
+	answer(world, cat, "join")
+	if not last(world, ann, "countdown") then untilPhase(world, ann, "countdown", 30) end
+	same(last(world, ann, "countdown").prize, 3000, "three on the grid")
+	world:advance(1)
+	same(#heard(world, ann, "go"), 0, "still counting down")
+	local before = #heard(world, ann, "countdown")
+	world:leave(cat)
+	world:pump()
+	local field = last(world, ann, "field")
+	expect(field, "Ann is sent the new field")
+	same(field.prize, 2000, "the prize for the two left")
+	same(#field.racers, 2, "Cat is off the grid")
+	same(#heard(world, ann, "countdown"), before, "no new countdown")
+	local drawn = world:ui(ann, "MileageSpotRace")
+	local card = drawn[#drawn]
+	same(card.phase, "countdown", "the countdown card is redrawn")
+	same(card.prize, 2000, "with the new prize")
+	same(#card.racers, 2, "and the new grid")
+	expect(card.count >= 1 and card.count <= 4, "the count goes on from where it was: " .. tostring(card.count))
+end)
+
 World.test("a joined player not on the grid in 20 s drops out and the race goes on", function(world)
 	local ann, bob = threePlayers(world)
 	request(world, ann, "highway_race", 0, {"Bob"})
