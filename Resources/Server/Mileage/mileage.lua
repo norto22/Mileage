@@ -2219,6 +2219,21 @@ local RUNS_MAX = 32
 local DRAG_TYPES = {headsUpRace = true, bracketRace = true}
 
 local dragRuns = {}
+-- When each pair of racers last earned the drag prize (os.time), by both names in order;
+-- kept in memory only, like the other prize waits.
+local dragPrizeEarnedAt = {}
+
+local function dragPairKey(a, b)
+	if a > b then a, b = b, a end
+	return a .. "|" .. b
+end
+
+-- Seconds until this pair may earn the drag prize again; 0 when they may now.
+local function dragPrizeAgainIn(key)
+	local earned = dragPrizeEarnedAt[key]
+	if not earned then return 0 end
+	return math.max(0, serverNumber("dragRacePrizeCooldownMinutes", 0, 1440) * 60 - (os.time() - earned))
+end
 
 local function runCount()
 	local n = 0
@@ -2336,6 +2351,10 @@ local function decide(run)
 	local winner, noWinner = winnerOf(run)
 	local why = winner and whyOf(run, winner) or noWinner
 	local prize = winner and serverNumber("dragRacePrize", 0, 1000000) or 0
+	-- The same pair earns the prize at most once per drag wait, whichever of them wins.
+	local pair = dragPairKey(run.names[1], run.names[2])
+	local againIn = prize > 0 and dragPrizeAgainIn(pair) or 0
+	if againIn > 0 then prize = 0 end
 	local times, outcomes = {}, {}
 	for _, name in ipairs(run.names) do
 		outcomes[name] = outcomeOf(run, name)
@@ -2348,16 +2367,19 @@ local function decide(run)
 		startTransfer({kind = "prize", from = SERVER_PARTY, to = winner, amount = prize,
 			giveLabel = "Drag race prize vs " .. loser})
 	end
+	if winner and prize > 0 then dragPrizeEarnedAt[pair] = os.time() end
 	print(string.format("[Mileage] Drag run %s at %s: %s%s", consoleText(run.id), consoleText(run.strip),
 		winner and (consoleText(winner) .. " beat " .. consoleText(loser)) or ("no winner (" .. why .. ")"),
-		(winner and prize > 0) and string.format(", prize $%d", prize) or ""))
-	-- A plain run shows a card only when it paid a prize; a staked run always does.
-	if not staked and not (winner and prize > 0) then return end
+		(winner and prize > 0) and string.format(", prize $%d", prize)
+			or (againIn > 0 and ", prize held back for the wait" or "")))
+	-- A plain run shows a card only when it paid a prize or held one back for the wait; a
+	-- staked run always does.
+	if not staked and not (winner and (prize > 0 or againIn > 0)) then return end
 	for _, name in ipairs(run.names) do
 		local id = Money.playerIdByName(name)
 		if id then
 			sendJson("races", id, "rxMileageDragRace", {race = run.race, run = run.id, phase = "result",
-				winner = winner, why = why, times = times, outcomes = outcomes, prize = prize,
+				winner = winner, why = why, times = times, outcomes = outcomes, prize = prize, prizeAgainIn = againIn,
 				stake = staked and staked.stake or 0, pot = staked and staked.pot or 0,
 				you = name, other = otherName(run, name)})
 		end

@@ -274,6 +274,11 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 			if (pot > 0) parts.push(moDollars(pot) + " stakes");
 			if (prize > 0) parts.push(moDollars(prize) + " prize");
 			if (parts.length > 0) rows.push({label: "You get", value: parts.join(" + ")});
+			// The same pair earned the server prize within the owner's drag wait.
+			var againIn = typeof data.prizeAgainIn === "number" ? data.prizeAgainIn : 0;
+			if (prize === 0 && againIn > 0) {
+				rows.push({label: "Server prize", value: "again in " + Math.ceil(againIn / 60) + " min"});
+			}
 			return {title: pot + prize > 0 ? "You won " + moDollars(pot + prize) : "You won", rows: rows, close: true};
 		}
 		if (stake > 0) rows.push({label: "You lost", value: "your " + moDollars(stake) + " stake"});

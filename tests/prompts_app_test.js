@@ -220,6 +220,24 @@ test("a plain run that paid the prize: the prize to the winner, who won to the l
 	assert.strictEqual(scope.dragRun, null, "closed");
 });
 
+test("a drag win within the pair's wait says when the server prize pays again, to the winner only", () => {
+	const {scope} = load();
+	scope.emit("MileageDragRace", {run: "alderStrip-7", phase: "result", you: "Turbo_Tom", other: "DriftQueen_77",
+		stake: 0, pot: 0, prize: 0, prizeAgainIn: 240, winner: "Turbo_Tom"});
+	assert.strictEqual(scope.dragRun.view.title, "You won");
+	assert.deepStrictEqual(rows(scope.dragRun.view), ["vs: DriftQueen_77", "Server prize: again in 4 min"]);
+	scope.emit("MileageDragRace", {run: "alderStrip-7", phase: "result", you: "DriftQueen_77", other: "Turbo_Tom",
+		stake: 0, pot: 0, prize: 0, prizeAgainIn: 240, winner: "Turbo_Tom"});
+	assert.deepStrictEqual(rows(scope.dragRun.view), ["vs: Turbo_Tom"], "nothing for the loser");
+	scope.emit("MileageDragRace", {race: "r3", phase: "result", you: "Turbo_Tom", other: "DriftQueen_77", stake: 2000,
+		pot: 4000, prize: 0, prizeAgainIn: "soon", winner: "Turbo_Tom", times: {}, outcomes: {}});
+	assert.ok(!rows(scope.drag.view).some((r) => r.startsWith("Server prize")), "a wait that is not a number shows nothing");
+	scope.emit("MileageDragRace", {race: "r3", phase: "result", you: "Turbo_Tom", other: "DriftQueen_77", stake: 2000,
+		pot: 4000, prize: 0, prizeAgainIn: 61, winner: "Turbo_Tom", times: {}, outcomes: {}});
+	assert.strictEqual(scope.drag.view.title, "You won $4,000", "the pot still shown");
+	assert.ok(rows(scope.drag.view).includes("Server prize: again in 2 min"), "rounded up to the next minute");
+});
+
 test("a plain run's result against someone else leaves the held stakes card and its Call off in place", () => {
 	const {scope} = load();
 	scope.emit("MileageDragRace", HELD);
