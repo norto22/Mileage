@@ -1511,6 +1511,34 @@ test("requests still queued for cars the server then marks as traffic are droppe
 	same(#sentToServer("careerDamageRequest", 1), before, "requests sent after the marks")
 end)
 
+test("a copy of another player's traffic gets no damage role, a real car's copy and an unmarked car stay copies", function()
+	local copies = trafficOwner(3, {["0-1"] = true})
+	local carsBySid = {}
+	for _, car in pairs(copies.cars) do carsBySid[car.sid] = car; watchRoles(car) end
+	step(3)
+	same(#roleCommands(carsBySid["0-1"]), 0, "roles of the traffic car's copy")
+	same(table.concat(roleCommands(carsBySid["0-0"]), ","), "copy", "roles of the real car's copy")
+	same(table.concat(roleCommands(carsBySid["0-2"]), ","), "copy", "roles of a car with no mark yet")
+end)
+
+test("a copy that is then marked traffic loses its role, and one marked not traffic again is a copy and asks again", function()
+	local traffic = {}
+	local copies = trafficOwner(1, traffic)
+	local car
+	for _, c in pairs(copies.cars) do car = c end
+	watchRoles(car)
+	step(2)
+	same(table.concat(roleCommands(car), ","), "copy", "roles before the mark")
+	traffic["0-0"] = true
+	step(2)
+	same(table.concat(roleCommands(car), ","), "copy,none", "roles after the mark")
+	local before = requestsFrom1("0-0")
+	traffic["0-0"] = nil
+	step(2)
+	same(table.concat(roleCommands(car), ","), "copy,none,copy", "roles once no longer traffic")
+	same(requestsFrom1("0-0"), before + 1, "full-damage requests once a copy again")
+end)
+
 test("with an enabler that cannot tell traffic, copies are asked for as today", function()
 	trafficOwner(1, {})
 	enabler.isRemoteTraffic = nil

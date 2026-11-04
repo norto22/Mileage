@@ -156,6 +156,14 @@ function M.inRace()
 	return race ~= nil
 end
 
+--- Whether this player is in a spot race or waiting for one: the race until their own part
+--- ends (finished, left the route, gave up), the set-up card, a request sent, the starter's
+--- invites open, or an invite joined and not yet started. An invite not answered is not.
+function M.busy()
+	return (race ~= nil and not race.ended) or setup ~= nil or pending or starting ~= nil
+		or (invite ~= nil and invite.sent == true)
+end
+
 --- The server's last status, for raceSpots: {known, allowed}.
 function M.getStatus()
 	return {known = status.known, allowed = status.allowed}
@@ -781,7 +789,7 @@ function M.join(id)
 	end
 	invite.sent = true
 	send({join = id})
-	inviteCard("Joined. Your car moves to the start grid when the race starts.")
+	inviteCard("Joined: your car moves to the grid when it starts.")
 	return true
 end
 

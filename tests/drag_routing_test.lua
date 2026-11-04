@@ -443,9 +443,9 @@ test("#20: releasing the strip for a mission leaves the mission's race on screen
 	local lobby = newGame({"A"})
 	lobby.setLocalContext(stripData("A"), 1)
 	local tornDown = 0
-	-- The last multiplayer race still counts as over, and the mission's racers are in the
+	-- The last multiplayer race's result is built, and the mission's racers are in the
 	-- drag core's data.
-	multiplayer_gamemodes_drag_drag.isRaceOver = function() return true end
+	multiplayer_gamemodes_drag_drag.isRaceFinalized = function() return true end
 	multiplayer_gamemodes_drag_drag.tearDownRaceUI = function() tornDown = tornDown + 1 end
 	gameplay_drag_core.getData = function() return {racers = {[7] = {}}} end
 	game.mission = true
@@ -515,6 +515,97 @@ test("#24: a better sample replaces the stored one at any age", function()
 	same(sync.getOffsetInfo(5).samples, 2, "samples counted")
 end)
 
+-- A probe to peer 5 at time t that is not answered yet; returns its token.
+local function unanswered(sync, t)
+	game.now = START + t
+	sent = {}
+	sync.probe(5)
+	local token = sent[1] and sent[1].data.token
+	expect(token, "no probe sent at " .. t)
+	return token
+end
+
+test("#25: a check unanswered for 30 s is dropped once the next goes out, and its late answer records nothing", function()
+	local sync = clock()
+	local first = unanswered(sync, 0)
+	unanswered(sync, 40)
+	game.now = START + 40.1
+	sync.onMileageDragMessage("mileageClockPong", 5, {token = first, t1 = START + 70})
+	same(sync.getOffsetInfo(5), nil, "estimate from the dropped check")
+end)
+
+test("#25: a check answered within 30 s still counts after a newer check has gone out", function()
+	local sync = clock()
+	local first = unanswered(sync, 0)
+	unanswered(sync, 20)
+	game.now = START + 20.2
+	sync.onMileageDragMessage("mileageClockPong", 5, {token = first, t1 = START + 10})
+	local info = sync.getOffsetInfo(5)
+	expect(info, "no estimate from the check answered after 20.2 s")
+	expect(math.abs(info.rtt - 20.2) < 1e-6, "stored round trip: " .. tostring(info.rtt))
+end)
+
+test("#25: a check exactly 30 s old is not yet forgotten when the next goes out", function()
+	local sync = clock()
+	local first = unanswered(sync, 0)
+	unanswered(sync, 30)
+	game.now = START + 30.5
+	sync.onMileageDragMessage("mileageClockPong", 5, {token = first, t1 = START + 15})
+	expect(sync.getOffsetInfo(5), "no estimate from the check answered at 30.5 s")
+end)
+
+test("#25: a player never checked is checked at once, even in the game's first 10 s", function()
+	local sync = clock()
+	game.now = 3
+	sync.probe(5)
+	same(#sent, 1, "checks sent 3 s after the game started")
+	game.now = 9
+	sync.probe(5)
+	same(#sent, 1, "checks sent again 6 s later")
+end)
+
+-- The clock loop with the drag mode switched as given and the lobby naming `targets`
+-- (nil: the lobby is not loaded).
+local function clockLoop(enabled, targets)
+	local sync = clock()
+	game.now = START
+	multiplayer_gamemodes_drag_drag = {isEnabled = function() return enabled end}
+	mileage_dragLobby = targets and {clockCheckTargets = function() return targets end} or nil
+	return sync
+end
+
+test("#25: with the lobby not loaded the clock loop checks nobody and raises nothing", function()
+	local sync = clockLoop(true, nil)
+	local ok, err = pcall(sync.onUpdate)
+	expect(ok, "raised: " .. tostring(err))
+	same(#sent, 0, "checks sent")
+end)
+
+test("#25: the clock loop checks the lobby's targets only while multiplayer drag is on", function()
+	local sync = clockLoop(false, {[5] = true, [6] = true})
+	sync.onUpdate()
+	same(#sent, 0, "checks sent with multiplayer drag off")
+	multiplayer_gamemodes_drag_drag.isEnabled = function() return true end
+	sync.onUpdate()
+	local to = {}
+	for _, m in ipairs(sent) do table.insert(to, m.data.token:match("^(%d+)%-")) end
+	table.sort(to)
+	same(table.concat(to, ","), "5,6", "players checked with it on")
+	sync.onUpdate()
+	same(#sent, 2, "checks sent on the next frame")
+end)
+
+test("#25: the leader of one strip checks only the players at that strip, not those at a strip it no longer leads", function()
+	local lobby = newGame({"A", "B"})
+	arrive(lobby, 2, "A")
+	arrive(lobby, 4, "B")
+	game.authority.B = false
+	local ids = {}
+	for id in pairs(lobby.clockCheckTargets()) do table.insert(ids, tostring(id)) end
+	table.sort(ids)
+	same(table.concat(ids, ","), "2", "targets")
+end)
+
 --== edges of the strip routing and the clock age =============================
 
 test("#18: a race id that is not text, or does not start with a known strip and a dash, has no strip", function()
@@ -572,7 +663,7 @@ test("#20: driving away from the strip after a finished race still takes the rac
 	local lobby = newGame({"A"})
 	lobby.setLocalContext(stripData("A"), 1)
 	local tornDown = 0
-	multiplayer_gamemodes_drag_drag.isRaceOver = function() return true end
+	multiplayer_gamemodes_drag_drag.isRaceFinalized = function() return true end
 	multiplayer_gamemodes_drag_drag.tearDownRaceUI = function() tornDown = tornDown + 1 end
 	gameplay_drag_core.getData = function() return {racers = {[7] = {}}} end
 	local far = {getPosition = function() return newVec(500, 0, 0) end}
@@ -800,19 +891,19 @@ test("two players at the strip: a join through the server's relay forms a race f
 	end)
 end)
 
-test("one player at the strip: the leader's own join comes back through the relay and a solo run starts after 45 s", function()
+test("one player at the strip: the leader's own join comes back through the relay and a solo run starts after 10 s", function()
 	finally(function()
 		local _, tick = leaderOnServer()
 		local t = 0.5
-		while t < 45 do
+		while t < 10 do
 			tick(t)
 			t = t + 0.5
 		end
-		same(#sentNamed("dragSessionStarted"), 0, "races started before 45 s")
-		while t <= 47 do
+		same(#sentNamed("dragSessionStarted"), 0, "races started before 10 s")
+		while t <= 12 do
 			tick(t)
 			t = t + 0.5
 		end
-		same(#sentNamed("dragSessionStarted"), 1, "solo runs started by 47 s")
+		same(#sentNamed("dragSessionStarted"), 1, "solo runs started by 12 s")
 	end)
 end)

@@ -83,6 +83,11 @@ local dqAt = nil
 --- get the same entries via handleDragRaceFinishTimeBroadcast. The grace period below is
 --- only a backstop for an opponent who never reports at all (disconnect, crash, DNF).
 local timeslipRequestedAt = nil
+
+--- Players in this race who are out without a finish time (they jumped the start), as the
+--- strip's leader told us; see M.setPlayerOut.
+local outPlayers = {}
+
 --- How many times we will try to restart a racer's tree before giving up on it.
 ---
 --- The repair below had no bound at all, and a false start put racer -2 into a state it
@@ -228,10 +233,19 @@ function M.getLocalPlayerId()
 	return t and t.bridge.getLocalPlayerId() or nil
 end
 
+--- The same answer under the name the game asks since 0.40.4.0 (core.lua:1198 and :1224).
+--- Unanswered, the race start keeps this player's own car as a stand-in for someone on
+--- another machine, which can never stage, so the lights never count down. The old name
+--- stays for anything that still asks it.
+M.getLocalMPPlayerId = M.getLocalPlayerId
+
 function M.getPlayerIdByClientId(clientId)
 	local t = transport()
 	return t and t.bridge.getPlayerIdByClientId(clientId) or clientId
 end
+
+-- The name 0.40.4.0 asks it under.
+M.getMPPlayerIdByMPClientId = M.getPlayerIdByClientId
 
 --- Despite the name, this means "are we in a multiplayer drag session", not "are we the
 --- host". BeamNG's own code makes that clear: times.lua:141 assigns it to a local called
@@ -545,14 +559,26 @@ local function tryFinalizeRace()
 		local finishTimes = race.finishTimes or {}
 		allReported = true
 		for playerId in pairs(race.players) do
-			if finishTimes[playerId] == nil then
+			if finishTimes[playerId] == nil and not outPlayers[playerId] then
 				allReported = false
 				break
 			end
 		end
 	end
 
+	-- Every car in the race on this machine finished or was disqualified: nothing more can
+	-- arrive, so show the result now. A solo false start is the common case; it used to wait
+	-- out the void backstop and then show no result at all.
+	local allOut = next(data.racers) ~= nil
+	for _, racer in pairs(data.racers) do
+		if not (racer.isFinished or racer.isDisqualified or racer.isDesqualified) then
+			allOut = false
+			break
+		end
+	end
+
 	local allDone = allReported
+		or allOut
 		or data.isCompleted
 		or (c.allRacersFinished and c.allRacersFinished(data))
 
@@ -591,16 +617,18 @@ local function tryFinalizeRace()
 		log("I", logTag, "no finish time from every racer after " .. grace ..
 			"s - finalising with what has arrived")
 	end
-	if type(c.finalizeMpPostRace) ~= "function" then
-		log("W", logTag, "gameplay_drag_core.finalizeMpPostRace missing - no result screen")
+	-- 0.40.4.0 spells it finalizeMPPostRace; the older spelling is kept for older games.
+	local finalize = c.finalizeMPPostRace or c.finalizeMpPostRace
+	if type(finalize) ~= "function" then
+		log("W", logTag, "gameplay_drag_core.finalizeMPPostRace missing - no result screen")
 		timeslipPending = false
 		return
 	end
 
 	timeslipPending = false
-	local ok, err = pcall(c.finalizeMpPostRace)
+	local ok, err = pcall(finalize)
 	if not ok then
-		log("W", logTag, "finalizeMpPostRace failed: " .. tostring(err))
+		log("W", logTag, "finalizeMPPostRace failed: " .. tostring(err))
 		return
 	end
 	raceFinalized = true
@@ -610,16 +638,6 @@ end
 
 function M.isRaceFinalized()
 	return raceFinalized
-end
-
---- Is a run still genuinely in progress?
----
---- Distinct from isRaceFinalized: this also covers a run that was disqualified and is
---- going nowhere. A false-started race sits in phase 3 with dragData.isStarted still true,
---- so a purely state-based test keeps reporting "racing" and the lobby's distance checks
---- stay suspended -- which is why driving out of the strip stopped clearing anything.
-function M.isRaceOver()
-	return raceFinalized or dqAt ~= nil
 end
 
 --- os.clockhp() at the moment the result screen was produced, or nil.
@@ -633,6 +651,7 @@ function M.onDragRaceStarted()
 	timeslipRequestedAt = nil
 	dqAt = nil
 	treeRepairs = {}
+	outPlayers = {}
 end
 
 --- Raised by core.sendTimeslipDataToUi as each car comes to a stop.
@@ -640,6 +659,19 @@ function M.onDragMpTimeslipRequested()
 	if not enabled then return end
 	timeslipPending = true
 	timeslipRequestedAt = timeslipRequestedAt or os.clockhp()
+	tryFinalizeRace()
+end
+
+-- The name 0.40.4.0 raises it under (core.lua sendTimeslipDataToUi). Unanswered, no
+-- result was ever built: the timeslip never showed.
+M.onDragMPTimeslipRequested = M.onDragMpTimeslipRequested
+
+--- A racer in this race is out: they jumped the start on their own machine, which the game
+--- never tells anyone else. Told by the strip's leader (mileage/dragLobby); their finish
+--- time will never come, so the result does not wait for it.
+function M.setPlayerOut(playerId)
+	if not enabled or playerId == nil then return end
+	outPlayers[playerId] = true
 	tryFinalizeRace()
 end
 
@@ -727,6 +759,9 @@ function M.tearDownRaceUI()
 	raceFinalized = false
 	finalizedAt = nil
 	treeRepairs = {}
+	outPlayers = {}
+	-- Forget the run too, so a later light or timer message cannot name a run that is gone.
+	M.clearLocalClientActiveRace()
 	log("I", logTag, "race over - drag UI reset")
 end
 

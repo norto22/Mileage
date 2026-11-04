@@ -217,7 +217,7 @@ test("a car that is ready again or reset gets its ghost setting again", function
 	end
 end)
 
-test("a changed ghost setting from the server is sent once to each car", function()
+test("a changed ghost setting is sent once to each car within a second", function()
 	local enabler, objects = startedEnabler()
 	enabler.onUpdate(0.016)
 	local i = 1
@@ -227,10 +227,48 @@ test("a changed ghost setting from the server is sent once to each car", functio
 		if n == "clientConfig" then v.remoteVehicleGhost = true; break end
 		i = i + 1
 	end
-	enabler.onUpdate(0.016)
-	enabler.onUpdate(0.016)
+	for _ = 1, 62 do enabler.onUpdate(1 / 60) end
 	same(ghostCommands(objects[9]), 2, "setGhost commands on car 9")
 	same(objects[9].queued[2], "mileageEnabler.setGhost(true)", "the new setting")
+end)
+
+-- How often the stand-in game is asked for a car while fn runs.
+local function lookups(fn)
+	local realBe = be
+	local n = 0
+	be = setmetatable({getObjectByID = function(self, id) n = n + 1; return realBe.getObjectByID(self, id) end},
+		{__index = realBe})
+	fn()
+	be = realBe
+	return n
+end
+
+test("over a second of frames the ghost check goes over the cars once, not every frame", function()
+	local enabler = startedEnabler()
+	enabler.onUpdate(1 / 60)
+	local n = lookups(function() for _ = 1, 60 do enabler.onUpdate(1 / 60) end end)
+	-- Four cars, once for the ghost check and once for the traffic marks.
+	expect(n <= 8, "cars looked up in a second: " .. n)
+end)
+
+test("a car built between checks gets its ghost setting in the frame it is built", function()
+	local enabler, objects, vehicles = startedEnabler()
+	enabler.onUpdate(1 / 60)
+	enabler.onUpdate(1 / 60)
+	local veh = {id = 11, JBeam = "pickup", active = true, queued = {}, fields = {}}
+	function veh:queueLuaCommand(cmd) table.insert(self.queued, cmd) end
+	function veh:getActive() return self.active end
+	function veh:setActive(on) self.active = on == 1 end
+	function veh:setDynDataFieldbyName() end
+	objects[11] = veh
+	vehicles["1-2"] = {gameVehicleID = 11}
+	local realServerId = MPVehicleGE.getServerVehicleID
+	MPVehicleGE.getServerVehicleID = function(id) if id == 11 then return "1-2" end return realServerId(id) end
+	enabler.onVehicleSpawned(11)
+	same(ghostCommands(veh), 1, "setGhost commands on the new car")
+	same(veh.queued[2], "mileageEnabler.setGhost(false)", "the server's setting")
+	enabler.onUpdate(1 / 60)
+	same(ghostCommands(veh), 1, "setGhost commands after the next frame")
 end)
 
 test("another player's unicycle follows remoteUnicycleGhost even when it is off and cars are ghosted", function()
@@ -270,4 +308,38 @@ test("a destroyed car's ghost setting is forgotten, so a new car under that id g
 	enabler.onUpdate(0.016)
 	same(ghostCommands(objects[9]), 2, "setGhost commands on car 9")
 	same(ghostCommands(objects[10]), 1, "setGhost commands on car 10")
+end)
+
+--== this player's new car and the setting for other players' cars ==========
+
+-- BeamMP registers this player's new car (one they spawn, or their traffic and parked
+-- cars) only when the server confirms its spawn, so in the frame the game builds it
+-- MPVehicleGE.isOwn says false and getServerVehicleID says nil.
+test("this player's new car, built before BeamMP knows it is theirs, is not left with the setting for other players' cars", function()
+	local enabler, objects, vehicles = startedEnabler()
+	local i = 1
+	while true do
+		local n, v = debug.getupvalue(enabler.onUpdate, i)
+		if n == nil then error("clientConfig not found") end
+		if n == "clientConfig" then v.remoteVehicleGhost = true; break end
+		i = i + 1
+	end
+	enabler.onUpdate(1 / 60)
+	local veh = newVehicle(objects, 12, "pickup")
+	local registered = false
+	local realIsOwn, realServerId = MPVehicleGE.isOwn, MPVehicleGE.getServerVehicleID
+	MPVehicleGE.isOwn = function(id) if id == 12 then return registered end return realIsOwn(id) end
+	MPVehicleGE.getServerVehicleID = function(id)
+		if id == 12 then return registered and "0-2" or nil end
+		return realServerId(id)
+	end
+	enabler.onVehicleSpawned(12)
+	enabler.onVehicleReady(12)
+	enabler.onUpdate(1 / 60)
+	-- The server confirms the spawn a few frames later.
+	registered = true
+	vehicles["0-2"] = {gameVehicleID = 12}
+	for _ = 1, 120 do enabler.onUpdate(1 / 60) end
+	same(ghostCommands(veh), 0, "setGhost commands on this player's own car")
+	same(objects[9].queued[1], "mileageEnabler.setGhost(true)", "another player's car follows the setting")
 end)

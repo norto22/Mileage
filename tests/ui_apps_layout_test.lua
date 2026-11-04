@@ -234,3 +234,107 @@ test("the race window goes once at the top right, just below the top bar", funct
 	expect(shipped, "the shipped layout places the race window")
 	expect(shipped:find('"top": "64px"', 1, true) and shipped:find('"right": "0px"', 1, true), "at the same place")
 end)
+
+--== the compact prompts window: 280 x 440, given once to existing layouts =======
+
+local function promptsApp(layout)
+	for _, app in ipairs(layout.apps) do
+		if app.appName == "mileageoffers" then return app end
+	end
+end
+
+-- A layout stamped for this build with the prompts window where the player put it, at the
+-- old 340 x 520 size; compact: the one-time resize already ran.
+local function layoutWithPrompts(compact, placement)
+	local layout = savedCareerLayout(BUILD)
+	table.insert(layout.apps, {appName = "mileageoffers", placement = placement or {position = "absolute",
+		right = "120px", top = "90px", width = "340px", height = "520px", left = "", bottom = ""}})
+	layout.mileageCompact = compact
+	return layout
+end
+
+test("the prompts window defaults to 280 x 440, in the app's own file too", function()
+	local M = loadModule({
+		[USER_DEFAULT .. "career.uilayout.json"] = savedCareerLayout(BUILD),
+		[ORIGINAL_DEFAULT .. "career.uilayout.json"] = {apps = {{appName = "gameApp1"}}},
+	})
+	M.migrateLayouts()
+	local placement = promptsApp(written[USER_DEFAULT .. "career.uilayout.json"]).placement
+	same(placement.width, "280px", "width")
+	same(placement.height, "440px", "height")
+	same(placement.right, "305px", "beside the player list")
+	same(placement.top, "240px", "top")
+	local f = assert(io.open("Resources/Client/Mileage/ui/modules/apps/Mileage-Offers/app.json", "r"))
+	local text = f:read("*a")
+	f:close()
+	expect(text:find('"width": "280px"', 1, true) and text:find('"height": "440px"', 1, true), "app.json matches")
+end)
+
+test("a layout seen for the first time gets the new size once, keeping where the player put it", function()
+	local M = loadModule({
+		[USER_DEFAULT .. "career.uilayout.json"] = layoutWithPrompts(nil),
+		[ORIGINAL_DEFAULT .. "career.uilayout.json"] = {apps = {{appName = "gameApp1"}}},
+	})
+	M.migrateLayouts()
+	local layout = written[USER_DEFAULT .. "career.uilayout.json"]
+	expect(layout, "written")
+	local placement = promptsApp(layout).placement
+	same(placement.width, "280px", "width")
+	same(placement.height, "440px", "height")
+	same(placement.right, "120px", "the player's right kept")
+	same(placement.top, "90px", "the player's top kept")
+	same(layout.mileageCompact, 1, "stamped")
+	same(#names(layout), #names(layoutWithPrompts(nil)) + 1, "only the race window added, as before")
+	same(layout.apps[2].placement.top, "200px", "the other apps untouched")
+
+	files[USER_DEFAULT .. "career.uilayout.json"] = layout
+	written = {}
+	M.migrateLayouts()
+	same(written[USER_DEFAULT .. "career.uilayout.json"], nil, "a second run writes nothing")
+end)
+
+test("a layout already resized once keeps the size the player chose since", function()
+	local M = loadModule({
+		[USER_DEFAULT .. "career.uilayout.json"] = layoutWithPrompts(1, {position = "absolute", right = "0px",
+			top = "0px", width = "400px", height = "600px"}),
+		[ORIGINAL_DEFAULT .. "career.uilayout.json"] = {apps = {{appName = "gameApp1"}}},
+	})
+	M.migrateLayouts()
+	local layout = written[USER_DEFAULT .. "career.uilayout.json"] or files[USER_DEFAULT .. "career.uilayout.json"]
+	local placement = promptsApp(layout).placement
+	same(placement.width, "400px", "the player's width")
+	same(placement.height, "600px", "the player's height")
+end)
+
+test("a layout without the prompts window gets it at the new size, and a rebuilt one is stamped too", function()
+	local M = loadModule({
+		[USER_DEFAULT .. "career.uilayout.json"] = savedCareerLayout(BUILD),
+		[USER_DEFAULT .. "careerPause.uilayout.json"] = savedCareerLayout("0.39.0.0.1"),
+		[ORIGINAL_DEFAULT .. "career.uilayout.json"] = {apps = {{appName = "gameApp1"}}},
+		[ORIGINAL_DEFAULT .. "careerPause.uilayout.json"] = {apps = {{appName = "gameApp1"}}},
+	})
+	M.migrateLayouts()
+	for _, name in ipairs({"career", "careerPause"}) do
+		local layout = written[USER_DEFAULT .. name .. ".uilayout.json"]
+		expect(layout, name .. " written")
+		same(promptsApp(layout).placement.width, "280px", name .. ": the new width")
+		same(layout.mileageCompact, 1, name .. ": stamped")
+	end
+end)
+
+test("a prompts window saved with no placement gets the new size once instead of stopping the layout's update", function()
+	local layout = savedCareerLayout(BUILD)
+	table.insert(layout.apps, {appName = "mileageoffers"})
+	local M = loadModule({
+		[USER_DEFAULT .. "career.uilayout.json"] = layout,
+		[ORIGINAL_DEFAULT .. "career.uilayout.json"] = {apps = {{appName = "gameApp1"}}},
+	})
+	M.migrateLayouts()
+	local out = written[USER_DEFAULT .. "career.uilayout.json"]
+	expect(out, "written")
+	local placement = promptsApp(out).placement
+	expect(placement, "a placement was given")
+	same(placement.width, "280px", "width")
+	same(placement.height, "440px", "height")
+	same(out.mileageCompact, 1, "stamped")
+end)

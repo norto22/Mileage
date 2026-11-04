@@ -107,6 +107,10 @@ function bridge.getLocalPlayerId()
 	return getLocalPlayerId()
 end
 
+-- The name the game's session handler asks since 0.40.4.0 (mpDragHandlers.lua:31) before it
+-- records this player's run; unanswered, the run is never recorded as ours.
+bridge.getLocalMPPlayerId = bridge.getLocalPlayerId
+
 function bridge.getPlayerIdByClientId(clientId)
 	return clientId
 end
@@ -163,6 +167,14 @@ function bridge.sendToClientIds(clientIds, msgName, data)
 	if #list == 0 then return end
 	send(msgName, list, data)
 end
+
+-- The names the game's 0.40.4.0 handlers ask under (mpDragHandlers.lua). Unanswered, the
+-- leader dropped every finish time it was sent and relayed no light or timer update to the
+-- other racers. The older names stay for anything that still asks them.
+bridge.getLocalMPClientId = bridge.getLocalClientId
+bridge.getMPPlayerIdByMPClientId = bridge.getPlayerIdByClientId
+bridge.getTimerRecipientMPClientIds = bridge.getTimerRecipientClientIds
+bridge.sendToMPClientIds = bridge.sendToClientIds
 
 --- mpDragHandlers.lua:35 calls this as
 ---     bridge.setLocalClientActiveRace(raceId, r.poiData, pd.lane or 1, r.treeType)
@@ -339,6 +351,16 @@ local function onDragMessage(payload)
 		envelope.msg, state, bridge, client, from, nil, envelope.data)
 	if not ok then
 		log("E", logTag, string.format("handler for %s failed: %s", tostring(envelope.msg), tostring(err)))
+	end
+
+	-- A run just started here: the lobby checks the game registered our real car.
+	local lobby = mileage_dragLobby
+	if envelope.msg == "dragRaceStarted" and type(envelope.data) == "table"
+		and lobby and lobby.checkRunStart then
+		local checked, checkErr = pcall(lobby.checkRunStart, envelope.data.raceId)
+		if not checked then
+			log("E", logTag, "checking the run start failed: " .. tostring(checkErr))
+		end
 	end
 end
 

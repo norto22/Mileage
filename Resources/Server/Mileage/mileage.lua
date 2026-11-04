@@ -12,8 +12,8 @@
 -- `lineage` field in versions/client.json and versions/server.json.
 local LINEAGE = "norto22/Mileage"
 
-local HARD_CLIENT_VERSION = {major = 0, minor = 6, revision = 2, lineage = LINEAGE}
-local HARD_SERVER_VERSION = {major = 0, minor = 6, revision = 2, lineage = LINEAGE}
+local HARD_CLIENT_VERSION = {major = 0, minor = 7, revision = 0, lineage = LINEAGE}
+local HARD_SERVER_VERSION = {major = 0, minor = 7, revision = 0, lineage = LINEAGE}
 
 local RAW = "https://raw.githubusercontent.com/"
 local GITHUB_REPO = "norto22/Mileage/"
@@ -163,7 +163,7 @@ local ledger = {
 local STATS_SECONDS = 60
 local STATS_FEATURES = {"damage", "carStates", "trafficMarks", "trafficShare", "paint", "prefabs", "drag",
 	"payments", "transfers", "offers", "races", "leaderboard", "events", "aiRaces", "spotRaces", "alive", "trafficLights",
-	"notifications", "config"}
+	"notifications", "config", "perf"}
 
 -- totals[feature] and slots[second % STATS_SECONDS].counts[feature]:
 -- {received, sent, recipients, bytes}.
@@ -708,6 +708,7 @@ function onInit()
 	MP.RegisterEvent("mileageSpotRace","mileageSpotRace")
 	MP.RegisterEvent("mileageDragTime","mileageDragTime")
 	MP.RegisterEvent("mileageLeaderboard","mileageLeaderboard")
+	MP.RegisterEvent("mileagePerfReport","mileagePerfReport")
 
 	MP.RegisterEvent("careerPrefabSync","careerPrefabSync")
 	MP.RegisterEvent("careerSyncRequested","careerSyncRequested")
@@ -4863,6 +4864,108 @@ function onVehicleDeletedHandler(player_id, vehicle_id)
 	Money.spawnedAt[player_id .. "-" .. vehicle_id] = nil
 end
 
+--== Game cost reports ========================================================
+-- Each game sends its own cost every 30 s (mileage/perfMeter.lua): frame time, long
+-- frames, updates sent and received and its cars. The numbers are only printed in
+-- `Mileage Stats`; nothing else reads them, so a game cannot change anything with them.
+-- A report is taken at most once per PERF_EVERY seconds per player and up to
+-- PERF_MAX_BYTES; only known number fields are kept, each clamped to its range.
+
+local perf = {reports = {}, EVERY = 20, MAX_BYTES = 2048, FRESH = 90}
+
+do
+	local COUNT, BIG = 10000000, 100000
+	local SENT_KINDS = {"pos", "elec", "inp", "eng"}
+	local CAR_KINDS = {"own", "ownTraffic", "ownParked", "remote", "remoteTraffic", "hidden"}
+
+	-- A finite number clamped to [0, high] and rounded to a whole number (the Stats line
+	-- prints them with %d, which refuses a fraction), or nil for anything else.
+	local function clamped(value, high)
+		if type(value) ~= "number" or value ~= value or value == math.huge or value == -math.huge then return nil end
+		return math.floor(math.max(0, math.min(high, value)) + 0.5)
+	end
+
+	-- The same to a tenth, for a number printed with one decimal.
+	local function tenths(value, high)
+		local n = type(value) == "number" and clamped(value * 10, high * 10)
+		return n and n / 10 or nil
+	end
+
+	local function pairOf(value, high)
+		if type(value) ~= "table" then return nil end
+		local a, b = clamped(value[1], high), clamped(value[2], high)
+		if not a or not b then return nil end
+		return {a, b}
+	end
+
+	local function tableOf(value) return type(value) == "table" and value or {} end
+
+	-- The report's known fields, each nil when missing or of the wrong type.
+	function perf.clean(raw)
+		local r = {
+			s = clamped(raw.s, 600), frames = clamped(raw.frames, BIG), avgMs = tenths(raw.avgMs, 60000),
+			worstMs = clamped(raw.worstMs, 60000), hitches = clamped(raw.hitches, BIG), built = clamped(raw.built, BIG),
+			near = pairOf(raw.near, 1000), sent = {own = {}, traffic = {}}, recv = {}, cars = {},
+		}
+		local sent, recv, cars = tableOf(raw.sent), tableOf(raw.recv), tableOf(raw.cars)
+		for _, group in ipairs({"own", "traffic"}) do
+			local from = tableOf(sent[group])
+			for _, kind in ipairs(SENT_KINDS) do r.sent[group][kind] = pairOf(from[kind], COUNT) end
+		end
+		for _, kind in ipairs(SENT_KINDS) do r.recv[kind] = clamped(recv[kind], COUNT) end
+		for _, kind in ipairs(CAR_KINDS) do r.cars[kind] = clamped(cars[kind], BIG) end
+		return r
+	end
+
+	local function n(value, pattern)
+		if value == nil then return "-" end
+		return string.format(pattern or "%d", value)
+	end
+
+	local function sentText(group)
+		local parts = {}
+		for _, kind in ipairs(SENT_KINDS) do
+			local p = group[kind]
+			table.insert(parts, kind .. " " .. (p and string.format("%d/%d", p[2], p[1]) or "-"))
+		end
+		return table.concat(parts, " ")
+	end
+
+	-- One line of a player's latest report.
+	function perf.line(player_id, r)
+		local c = r.cars
+		return string.format("  %s: %s s, avg %s ms, worst %s ms, %s over 100 ms | sent (let through/asked) own %s;" ..
+			" traffic %s | received pos %s elec %s inp %s | built %s | players near %s | cars own %s, driving traffic %s," ..
+			" parked %s, others' %s, others' traffic %s, hidden %s",
+			describePlayer(player_id), n(r.s), n(r.avgMs, "%.1f"), n(r.worstMs), n(r.hitches), sentText(r.sent.own),
+			sentText(r.sent.traffic), n(r.recv.pos), n(r.recv.elec), n(r.recv.inp), n(r.built),
+			r.near and string.format("%d-%d", r.near[1], r.near[2]) or "-", n(c.own), n(c.ownTraffic), n(c.ownParked),
+			n(c.remote), n(c.remoteTraffic), n(c.hidden))
+	end
+
+	-- The reports newer than FRESH seconds, by player id in order.
+	function perf.fresh()
+		local now, ids = signalTimer:GetCurrent(), {}
+		for id, entry in pairs(perf.reports) do
+			if now - entry.at <= perf.FRESH then table.insert(ids, id) end
+		end
+		table.sort(ids)
+		return ids
+	end
+end
+
+function mileagePerfReport(player_id, data)
+	received("perf")
+	if type(data) ~= "string" or #data > perf.MAX_BYTES then return end
+	local now = signalTimer:GetCurrent()
+	local last = perf.reports[player_id]
+	if last and now - last.at < perf.EVERY then return end
+	-- A list or any table without this report version is not a report.
+	local raw = decodeTable(data)
+	if not raw or raw.v ~= 1 then return end
+	perf.reports[player_id] = {at = now, report = perf.clean(raw)}
+end
+
 function onPlayerDisconnectHandler(player_id)
 	-- Release their strip presence first: if they held a strip, someone still standing
 	-- there has to inherit it or an in-progress race loses its authority.
@@ -4877,6 +4980,7 @@ function onPlayerDisconnectHandler(player_id)
 		Money.spotRacesPlayerLeft(name)
 	end
 	loadedPrefabs[player_id] = nil
+	perf.reports[player_id] = nil
 	ledger.send[player_id] = nil
 	ledger.receive[player_id] = nil
 	pendingActivation[player_id] = nil
@@ -4981,7 +5085,7 @@ function Help(arguments)
 	print("Mileage GetConfig <section> <key>            - Displays Config, or section, or key")
 	print("Mileage SetConfig <section*> <key*> <value*> - Sets Config section key to value, * = REQUIRED")
 	print("Mileage Update                               - Checks for Mileage update")
-	print("Mileage Stats [reset]                        - Shows what each part of Mileage sends, reset starts it again")
+	print("Mileage Stats [reset]                        - Shows what each part of Mileage sends and each game's frame time, updates and cars, reset starts it again")
 	print("Mileage Transfers                            - Lists money still waiting on a player, and races holding stakes")
 	print("Mileage Leaderboard [reset]                  - Shows the leaderboard, reset clears it")
 	print("Mileage Event <minutes> <prize> <route|random> | cancel | list - Schedules, cancels or lists race events")
@@ -5052,6 +5156,20 @@ local function printStats()
 		if share then line = line .. string.format(", share %d driving %d parked", share.road, share.parked) end
 		print(line)
 	end
+
+	local fresh = perf.fresh()
+	if #fresh == 0 then
+		print(string.format("Game cost: no report in the last %d s", perf.FRESH))
+		return
+	end
+	local split = {own = 0, ownTraffic = 0, ownParked = 0}
+	for _, id in ipairs(fresh) do
+		for key in pairs(split) do split[key] = split[key] + (perf.reports[id].report.cars[key] or 0) end
+	end
+	print(string.format("Cars by kind (games' reports): %d driving traffic, %d parked, %d players' own",
+		split.ownTraffic, split.ownParked, split.own))
+	print(string.format("Game cost (each game's last report, sent let through/asked):"))
+	for _, id in ipairs(fresh) do print(perf.line(id, perf.reports[id].report)) end
 end
 
 function Stats(arguments)

@@ -1705,3 +1705,264 @@ World.test("a traffic car the server could not read for a while is timed between
 		"timed where its path crossed the line: " .. tostring(result.places[1].seconds))
 	same(ann.money, 1000, "nobody paid")
 end)
+
+--== no card while you are in a race, and back when your part is over ==========
+
+-- One frame of p's traffic race module only, dt seconds long.
+local function frame(world, p, dt)
+	world:as(p, function() mileage_aiRace.onUpdate(dt) end)
+end
+
+-- Ann and her traffic car, and Bob, who Ann challenges to a street race with no stake.
+local function annChallengesBob(world)
+	local ann, t = annAndCar(world, 2000)
+	local bob = world:join("Bob", 1000, 1)
+	bob.car.pos = {x = 300, y = 900, z = 0}
+	ann.route = {x = 0, y = 2400, z = 0}
+	world:as(ann, function() expect(mileage_offers.race("Bob", 0), "challenge sent") end)
+	world:pump()
+	return ann, t, bob
+end
+
+World.test("a challenge waiting for an answer leaves the card; the race against a player hides it until you cross the line", function(world)
+	local ann, t, bob = annChallengesBob(world)
+	world:advance(1)
+	same(card(world, ann).phase, "available", "an unanswered challenge does not hide it")
+	local offer
+	for _, o in ipairs(world:ui(bob, "MileageOffer")) do offer = o end
+	world:as(bob, function() mileage_offers.answer(offer.id, true) end)
+	world:pump()
+	world:advance(1)
+	same(card(world, ann).phase, "none", "lining up and counting down")
+	world:advance(3)
+	world:as(ann, function() same(mileage_streetRace.current().phase, "racing", "racing") end)
+	t.car.pos = {x = ann.car.pos.x + 4, y = ann.car.pos.y + 3, z = 0}
+	world:advance(2)
+	same(card(world, ann).phase, "none", "racing beside her own traffic car")
+	world:advance(30)
+	world:drive(ann, 0, 2400)
+	t.car.pos = {x = 4, y = 2403, z = 0}
+	world:advance(1)
+	world:as(ann, function() expect(mileage_streetRace.current().finished, "her finish is reported") end)
+	world:as(bob, function() expect(mileage_streetRace.current() ~= nil, "Bob still races") end)
+	same(card(world, ann).phase, "available", "back within one scan of her finish while Bob races")
+end)
+
+World.test("each race module answering busy hides the card, and it comes back within one scan of not busy", function(world)
+	local ann = annAndCar(world, 2000)
+	local answers = {
+		{"mileage_spotRace", "busy"},
+		{"mileage_raceEvents", "signedUp"},
+		{"mileage_dragLobby", "busy"},
+	}
+	for _, a in ipairs(answers) do
+		local name, fn = a[1], a[2]
+		local ext = ann.extensions[name] or {}
+		ann.extensions[name] = ext
+		local before = ext[fn]
+		local busy = true
+		ext[fn] = function() return busy end
+		world:advance(1)
+		same(card(world, ann).phase, "none", name .. "." .. fn .. " busy")
+		busy = false
+		frame(world, ann, 0.25)
+		same(card(world, ann).phase, "available", name .. "." .. fn .. " no longer busy, after one 0.25 s scan")
+		ext[fn] = before
+	end
+	ann.mission = "aMission"
+	world:advance(1)
+	same(card(world, ann).phase, "none", "in a mission")
+	ann.mission = nil
+	world:advance(1)
+	same(card(world, ann).phase, "available", "mission over")
+end)
+
+World.test("a missing, broken or raising race module reads as not busy", function(world)
+	local ann = annAndCar(world, 2000)
+	local cases = {
+		{"no drag lobby", nil},
+		{"a drag lobby that is not a table", "lobby"},
+		{"a drag lobby with no busy", {}},
+		{"a busy that is not a function", {busy = true}},
+		{"a busy that raises", {busy = function() error("boom") end}},
+	}
+	for _, c in ipairs(cases) do
+		ann.extensions.mileage_dragLobby = c[2]
+		frame(world, ann, 0.25)
+		same(card(world, ann).phase, "available", c[1])
+	end
+	ann.extensions.mileage_dragLobby = nil
+	ann.extensions.mileage_spotRace.busy = function() error("boom") end
+	frame(world, ann, 0.25)
+	same(card(world, ann).phase, "available", "a spot race busy that raises")
+end)
+
+World.test("an invite reaching a busy player shows nothing, and an open invite closes when its player becomes busy", function(world)
+	local ann, _, bob = threeNear(world, 2000)
+	local lobby = {answer = true}
+	function lobby.busy() return lobby.answer end
+	bob.extensions.mileage_dragLobby = lobby
+	press(world, ann)
+	same(#heard(world, bob, "invite"), 1, "the server still sends it")
+	same(card(world, bob, "invite"), nil, "no invite card while at a drag strip")
+	world:as(bob, function() same(mileage_aiRace.press(), false, "nothing to join") end)
+	world:advance(10)
+	world:as(ann, function() mileage_streetRace.giveUp() end)
+	world:pump()
+	untilResult(world, ann, 10)
+	world:advance(30)
+
+	lobby.answer = false
+	press(world, ann)
+	same(card(world, bob, "invite") ~= nil, true, "the next invite shows once Bob is free")
+	local sentBefore = sentToServer(world, bob, "mileageAiRace")
+	lobby.answer = true
+	frame(world, bob, 0.25)
+	same(card(world, bob).phase, "inviteClosed", "the invite closes on the scan Bob becomes busy")
+	same(sentToServer(world, bob, "mileageAiRace"), sentBefore, "nothing sent to the server")
+	world:as(bob, function() same(mileage_aiRace.press(), false, "no invite left to join") end)
+end)
+
+World.test("a race spot's set-up hides the card and closing it brings the card back", function(world)
+	local ann = annAndCar(world, 2000)
+	world:as(ann, function() expect(mileage_spotRace.openSetup("city_race_1"), "set-up opened") end)
+	world:advance(1)
+	same(card(world, ann).phase, "none", "the set-up is open")
+	world:as(ann, function() mileage_spotRace.closeSetup() end)
+	world:advance(1)
+	same(card(world, ann).phase, "available", "set-up closed")
+end)
+
+World.test("signing up to a race event hides the card and the event being cancelled brings it back", function(world)
+	local ann = annAndCar(world, 2000)
+	world:console("Mileage Event 5 100 1")
+	world:advance(1)
+	same(card(world, ann).phase, "available", "an event she has not joined")
+	local announced
+	for _, m in ipairs(world:ui(ann, "MileageEvent")) do announced = m end
+	world:as(ann, function() mileage_raceEvents.join(announced.id) end)
+	world:pump()
+	world:advance(1)
+	same(card(world, ann).phase, "none", "signed up")
+	world:console("Mileage Event cancel")
+	world:advance(1)
+	same(card(world, ann).phase, "available", "the event was cancelled")
+end)
+
+World.test("the card is checked every 0.25 s and sent on change only", function(world)
+	local ann = annAndCar(world, 2000)
+	local sent = #world:ui(ann, "MileageAiRace")
+	for _ = 1, 16 do frame(world, ann, 0.25) end
+	same(#world:ui(ann, "MileageAiRace"), sent, "no new card over 4 s with nothing changed")
+	ann.extensions.mileage_dragLobby = {busy = function() return true end}
+	frame(world, ann, 0.1)
+	same(card(world, ann).phase, "available", "not yet: the next scan is due")
+	frame(world, ann, 0.15)
+	same(card(world, ann).phase, "none", "hidden on the next 0.25 s scan")
+	ann.extensions.mileage_dragLobby = nil
+end)
+
+--== every way a race ends brings the card back ===============================
+
+-- Ann's traffic car t moved 4 m to her right, heading her way.
+local function besideAnn(ann, t)
+	local d = ann.car.dir
+	t.car.dir = {x = d.x, y = d.y, z = d.z}
+	t.car.pos = {x = ann.car.pos.x + d.y * 4, y = ann.car.pos.y - d.x * 4, z = ann.car.pos.z}
+end
+
+local function bobAccepts(world, bob)
+	local offer
+	for _, o in ipairs(world:ui(bob, "MileageOffer")) do offer = o end
+	world:as(bob, function() mileage_offers.answer(offer.id, true) end)
+	world:pump()
+end
+
+World.test("a race against a player called off while lining up brings the card back", function(world)
+	local ann, t, bob = annChallengesBob(world)
+	-- Ann's pose never reaches the server, so the cars cannot line up and the race is called off.
+	world.filter = function(m)
+		if m.name == "mileageRaceReport" and m.from == ann.id then return "drop" end
+	end
+	bobAccepts(world, bob)
+	world:advance(2)
+	besideAnn(ann, t)
+	world:advance(1)
+	same(card(world, ann).phase, "none", "lining up")
+	world:advance(15)
+	expect(lastRace(world, ann, "calledOff"), "the race was called off")
+	world:as(ann, function() same(mileage_streetRace.current(), nil, "no race left here") end)
+	frame(world, ann, 0.25)
+	same(card(world, ann).phase, "available", "back on the next scan after the call-off")
+end)
+
+World.test("giving up a race against a player brings the card back with its result", function(world)
+	local ann, t, bob = annChallengesBob(world)
+	bobAccepts(world, bob)
+	world:advance(5)
+	besideAnn(ann, t)
+	world:advance(1)
+	same(card(world, ann).phase, "none", "racing")
+	world:as(ann, function() expect(mileage_streetRace.giveUp(), "gave up") end)
+	world:pump()
+	expect(lastRace(world, ann, "result"), "the result came back")
+	frame(world, ann, 0.25)
+	same(card(world, ann).phase, "available", "back on the next scan after giving up")
+end)
+
+World.test("an event race hides the card from its countdown, and it comes back once you cross the line while others race",
+		function(world)
+	local ann, t = annAndCar(world, 2000)
+	local bob = world:join("Bob", 1000, 1)
+	world:console("Mileage Event 1 100 service-dragway")
+	for _, p in ipairs({ann, bob}) do
+		local e
+		for _, m in ipairs(world:ui(p, "MileageEvent")) do e = m end
+		world:as(p, function() mileage_raceEvents.join(e.id) end)
+		world:pump()
+	end
+	world:advance(1)
+	same(card(world, ann).phase, "none", "signed up")
+	world:advance(60)
+	same(#ann.teleports, 1, "Ann is on the grid")
+	besideAnn(ann, t)
+	world:advance(1)
+	world:as(ann, function() same(mileage_streetRace.current().phase, "countdown", "counting down") end)
+	same(card(world, ann).phase, "none", "the event's countdown beside her own traffic car")
+	world:advance(10)
+	besideAnn(ann, t)
+	world:advance(1)
+	world:as(ann, function() same(mileage_streetRace.current().phase, "racing", "racing") end)
+	same(card(world, ann).phase, "none", "the event race beside her own traffic car")
+	world:advance(40)
+	world:drive(ann, -203.27, -203.98, 118.82)
+	besideAnn(ann, t)
+	world:advance(1)
+	world:as(ann, function() expect(mileage_streetRace.current().finished, "her finish is reported") end)
+	world:as(bob, function() expect(mileage_streetRace.current() ~= nil, "Bob still races") end)
+	local result
+	for _, m in ipairs(world:ui(ann, "MileageEvent")) do
+		if m.phase == "result" then result = m end
+	end
+	same(result, nil, "no result yet")
+	same(card(world, ann).phase, "available", "back within a second of her finish while Bob races")
+end)
+
+World.test("a joined traffic race invite is not closed when the player becomes busy before its countdown arrives",
+		function(world)
+	local ann, _, bob = threeNear(world, 2000)
+	press(world, ann)
+	local invite = card(world, bob, "invite")
+	expect(invite, "Bob is invited")
+	world:as(bob, function() expect(mileage_aiRace.join(invite.race), "joined") end)
+	-- Before the server's answer reaches Bob, something else makes him busy for a scan.
+	bob.extensions.mileage_dragLobby = {busy = function() return true end}
+	frame(world, bob, 0.25)
+	same(cards(world, bob, "inviteClosed"), 0, "the joined invite is kept")
+	bob.extensions.mileage_dragLobby = nil
+	world:pump()
+	world:advance(1)
+	expect(card(world, bob, "racing"), "Bob races: his join was honoured")
+	world:advance(2)
+	same(card(world, bob).phase, "racing", "no traffic card sent during the race")
+end)

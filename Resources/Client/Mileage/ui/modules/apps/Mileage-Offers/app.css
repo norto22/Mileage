@@ -1,3 +1,5 @@
+/* Compact: every Mileage window uses 6px 8px card padding, 4px between cards, text a step
+   smaller and 4px 8px buttons (the race window and the player list use the same numbers). */
 .mileageOffers {
 	width: 100%;
 	height: 100%;
@@ -10,23 +12,40 @@
 	pointer-events: auto;
 	background: rgba(20, 20, 24, 0.82);
 	border: 1px solid rgba(255, 255, 255, 0.12);
-	border-radius: 6px;
-	padding: 10px 12px;
-	margin-bottom: 8px;
+	border-radius: 5px;
+	padding: 6px 8px;
+	margin-bottom: 4px;
 	text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6);
+}
+/* The title with something on its right (the traffic card's key). */
+.mo-head {
+	display: flex;
+	justify-content: space-between;
+	align-items: center;
+	gap: 6px;
+	margin-bottom: 2px;
 }
 .mo-title {
 	font-weight: bold;
-	font-size: 1.05em;
-	margin-bottom: 6px;
+	font-size: 0.95em;
+	margin-bottom: 2px;
+	word-break: break-word;
+}
+.mo-head .mo-title {
+	margin-bottom: 0;
+}
+/* One line that sums a card up: car · finish · reward. */
+.mo-line {
+	font-size: 0.85em;
+	margin: 1px 0;
 	word-break: break-word;
 }
 .mo-row {
 	display: flex;
 	justify-content: space-between;
-	gap: 8px;
-	font-size: 0.9em;
-	margin: 2px 0;
+	gap: 6px;
+	font-size: 0.85em;
+	margin: 1px 0;
 }
 .mo-label {
 	color: #bbb;
@@ -37,14 +56,14 @@
 }
 .mo-note {
 	color: #ccc;
-	font-size: 0.85em;
-	margin: 6px 0;
+	font-size: 0.8em;
+	margin: 2px 0;
 }
 .mo-bar {
-	height: 4px;
+	height: 3px;
 	background: rgba(255, 255, 255, 0.15);
 	border-radius: 2px;
-	margin-top: 6px;
+	margin-top: 4px;
 	overflow: hidden;
 }
 .mo-bar-fill {
@@ -53,14 +72,15 @@
 }
 .mo-actions {
 	display: flex;
-	gap: 8px;
-	margin-top: 8px;
+	gap: 6px;
+	margin-top: 5px;
 }
 .mo-actions button, .mo-card button {
 	flex: 1;
 	border: none;
 	border-radius: 4px;
-	padding: 7px 10px;
+	padding: 4px 8px;
+	font-size: 0.85em;
 	color: white;
 	cursor: pointer;
 	background: #444;
@@ -79,6 +99,7 @@
 	padding: 0 4px;
 	border: 1px solid rgba(255, 255, 255, 0.4);
 	border-radius: 3px;
+	font-size: 0.85em;
 	text-align: center;
 	color: white;
 }
@@ -86,15 +107,15 @@
 	background: #b71c1c !important;
 }
 .mo-big {
-	font-size: 3em;
+	font-size: 2.2em;
 	font-weight: bold;
 	text-align: center;
-	margin: 4px 0;
+	margin: 2px 0;
 }
 .mo-tabs {
 	display: flex;
-	gap: 6px;
-	margin-bottom: 6px;
+	gap: 4px;
+	margin-bottom: 4px;
 }
 .mo-tabs button.mo-tab-on {
 	background: #f9a825;
@@ -103,10 +124,10 @@
 .mo-table {
 	width: 100%;
 	border-collapse: collapse;
-	font-size: 0.9em;
+	font-size: 0.85em;
 }
 .mo-table td, .mo-table th {
-	padding: 2px 4px;
+	padding: 1px 3px;
 	text-align: left;
 }
 .mo-table th {
@@ -119,19 +140,19 @@
 /* Race spots: the opponents stepper, the invite list and the off-route warning. */
 .mo-sub {
 	color: #bbb;
-	font-size: 0.85em;
-	margin: 8px 0 2px;
+	font-size: 0.8em;
+	margin: 4px 0 1px;
 }
 .mo-stepper {
 	display: flex;
 	align-items: center;
-	gap: 6px;
+	gap: 4px;
 }
 .mo-card .mo-stepper button {
-	flex: 0 0 40px;
-	min-height: 32px;
-	padding: 4px 0;
-	font-size: 1.1em;
+	flex: 0 0 32px;
+	min-height: 24px;
+	padding: 2px 0;
+	font-size: 1em;
 }
 .mo-stepper output {
 	min-width: 1.5em;
@@ -141,9 +162,9 @@
 .mo-pick {
 	display: flex;
 	align-items: center;
-	gap: 8px;
-	font-size: 0.9em;
-	margin: 3px 0;
+	gap: 6px;
+	font-size: 0.85em;
+	margin: 1px 0;
 	cursor: pointer;
 }
 .mo-pick input {
@@ -152,7 +173,7 @@
 .mo-warn {
 	background: rgba(249, 168, 37, 0.18);
 	border-left: 3px solid #f9a825;
-	padding: 6px 8px;
-	font-size: 0.85em;
-	margin: 6px 0;
+	padding: 4px 6px;
+	font-size: 0.8em;
+	margin: 4px 0;
 }

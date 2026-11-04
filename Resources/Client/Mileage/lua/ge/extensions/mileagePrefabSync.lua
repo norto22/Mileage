@@ -177,15 +177,23 @@ local function onMissionStartWithFade(mission, userSettings)
 	iterC = iterC + 1
 end
 
--- One prefab per frame: spawnPrefab plus reloadCollision is expensive, and a
--- mission can carry a dozen of them.
+-- One prefab per frame: spawnPrefab is expensive, and a mission can carry a dozen of
+-- them. The map's collision is rebuilt once, after the last queued prefab is placed,
+-- instead of once per prefab: a joiner receives every other player's mission props at
+-- once.
+local placedSinceRebuild = false
+
 local function onUpdate(dtReal, dtSim, dtRaw)
 	if worldReadyState ~= 2 then return end
 	for name, data in pairs(prefabsTable) do
 		processPrefab(data.path, name, data.outdated)
 		prefabsTable[name] = nil
-		be:reloadCollision()
+		placedSinceRebuild = true
 		break
+	end
+	if placedSinceRebuild and next(prefabsTable) == nil then
+		placedSinceRebuild = false
+		be:reloadCollision()
 	end
 end
 

@@ -222,6 +222,16 @@ test("a long opponent name is cut short with an ellipsis and the clock keeps its
 	assert.strictEqual(scope.live.view.time, "0:05.0");
 });
 
+test("the strip's card uses the compact padding every Mileage window shares, and keeps its size", () => {
+	const css = fs.readFileSync("Resources/Client/Mileage/ui/modules/apps/Mileage-Race/app.css", "utf8");
+	const card = css.match(/\.mr-card\s*\{([^}]*)\}/);
+	assert.ok(card, "a .mr-card rule");
+	assert.ok(/padding:\s*6px 8px;/.test(card[1]), "6px 8px padding: " + card[1].trim());
+	const app = JSON.parse(fs.readFileSync("Resources/Client/Mileage/ui/modules/apps/Mileage-Race/app.json", "utf8"));
+	assert.strictEqual(app.css.width, "280px", "width");
+	assert.strictEqual(app.css.height, "90px", "height");
+});
+
 test("every top-level declaration can be evaluated twice", () => {
 	const source = fs.readFileSync(SOURCE, "utf8");
 	assert.ok(!/^(let|const) /m.test(source), "no top-level let or const");

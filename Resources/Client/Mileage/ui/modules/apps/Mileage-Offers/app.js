@@ -38,8 +38,8 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 			return {
 				title: from + " challenges you to a race",
 				rows: rows,
-				note: "Accepting moves your car next to " + from + "'s." +
-					(stake > 0 ? " Leaving mid-race loses your stake." : ""),
+				note: stake > 0 ? "Your car moves beside theirs · leaving loses your stake" :
+					"Accepting moves your car beside theirs",
 				accept: "Accept",
 			};
 		}
@@ -94,12 +94,12 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 	function rollingView(data) {
 		var other = String(data.other || "");
 		var reward = Number(data.reward) || 0;
-		var rewardText = reward > 0 ? " · race reward " + moDollars(reward) : "";
+		var rewardText = reward > 0 ? " · reward " + moDollars(reward) : "";
 		switch (data.phase) {
 		case "countdown":
-			return {big: String(data.count), note: "Rolling start · keep driving · vs " + other + rewardText};
+			return {title: "vs " + other, big: String(data.count), note: "Rolling start · keep driving" + rewardText};
 		case "go":
-			return {big: "GO", note: "vs " + other + rewardText};
+			return {title: "vs " + other, big: "GO", note: reward > 0 ? "Race reward " + moDollars(reward) : undefined};
 		case "racing":
 			return {
 				title: "Racing " + other,
@@ -139,8 +139,8 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 		case "finished":
 			return {title: "Finished in " + moTime(data.elapsed), note: "Waiting for " + other + "..."};
 		case "calledOff":
-			return {title: "Race called off", note: String(data.why || "") +
-				(stake > 0 ? ". Your " + moDollars(stake) + " stake is back." : "."), close: true};
+			return {title: "Race called off", note: String(data.why || "") + ".", close: true,
+				rows: stake > 0 ? [{label: "Stake", value: moDollars(stake) + " back to you"}] : []};
 		case "result":
 			return resultView(data);
 		}
@@ -167,9 +167,9 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 			rows.push({label: other, value: data.why === "left" ? "left the race" : "gave up"});
 		}
 		if (!data.winner) {
+			if (stake > 0) rows.push({label: "Stake", value: moDollars(stake) + " back to you"});
 			return {title: "No winner", rows: rows, close: true,
-				note: (data.why === "timeout" ? "Nobody reached the finish in time." : "The race ended without a winner.") +
-					(stake > 0 ? " Your " + moDollars(stake) + " stake is back." : "")};
+				note: data.why === "timeout" ? "Nobody reached the finish in time." : "The race ended without a winner."};
 		}
 		if (data.winner === you) {
 			var parts = [];
@@ -210,24 +210,14 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 
 	$scope.traffic = null;
 
-	function rewardRow(data) {
-		var prize = Number(data.prize) || 0;
-		var again = Number(data.prizeAgainIn) || 0;
-		if (prize <= 0) return {label: "Race reward", value: "None on this server; a win counts on the leaderboard"};
-		if (again > 0) {
-			return {label: "Race reward", value: "Again in " + Math.ceil(again / 60) +
-				" min; a win still counts on the leaderboard"};
-		}
-		return {label: "Race reward", value: moDollars(prize) + ", +50% for each player who joins"};
-	}
-
+	// The card beside your own traffic car: the car, the finish range and the reward on one
+	// line, one short note, and the key (or where to set one) beside the title.
 	function availableView(data) {
 		var car = String(data.car || "");
-		var view = {title: "Race this car", rows: [{label: "Car", value: car}], race: true, raceOff: true};
+		var view = {title: "Race this car", line: car, race: true, raceOff: true};
 		if (data.own !== true) {
 			var owner = String(data.owner || "another player");
-			view.note = "This is " + owner + "'s traffic, so only " + owner + "'s game can race it. " +
-				"Pull alongside one of your own traffic cars.";
+			view.note = "Only " + owner + "'s game can race it; find your own traffic";
 			return view;
 		}
 		if (data.allowed !== true) {
@@ -239,31 +229,39 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 			view.note = String(data.note);
 			return view;
 		}
-		view.rows.push({label: "Finish", value: "Random, 1.5 to 4 km"});
-		view.rows.push(rewardRow(data));
-		view.note = "Players within 300 m are invited." +
-			(data.key ? "" : " You can also set a key for this in Options › Controls.");
+		var prize = Number(data.prize) || 0;
+		var again = Number(data.prizeAgainIn) || 0;
+		if (prize <= 0) {
+			view.line = car + " · 1.5–4 km · no reward";
+			view.note = "A win counts on the leaderboard · 300 m invite";
+		} else if (again > 0) {
+			view.line = car + " · 1.5–4 km · reward in " + Math.ceil(again / 60) + " min";
+			view.note = "A win still counts on the leaderboard · 300 m invite";
+		} else {
+			view.line = car + " · 1.5–4 km · " + moDollars(prize);
+			view.note = "+50% per player who joins · 300 m invite";
+		}
 		if (data.key) view.key = String(data.key);
+		else view.keyHint = "Key: Options › Controls";
 		return view;
 	}
 
 	function inviteView(data) {
 		var car = String(data.car || "");
 		var prize = Number(data.prize) || 0;
-		var rows = [{label: "Against", value: car}, {label: "Finish", value: moKm(data.distance) + " from you"}];
-		if (prize > 0) {
-			rows.push({label: "Race reward", value: moDollars(prize) + " if you join, to the first player to beat the " + car});
-		}
 		return {
 			title: String(data.host || "") + " started a race near you",
-			rows: rows,
-			note: data.note ? String(data.note) : "Join to race from where you are, rolling, from the same start.",
+			line: "vs " + car + " · " + moKm(data.distance) + (prize > 0 ? " · " + moDollars(prize) : ""),
+			note: data.note ? String(data.note) :
+				(prize > 0 ? "First player to beat it wins · rolling start" : "Rolling start from where you are"),
 			join: true,
 		};
 	}
 
 	// Why the server withheld a traffic race reward: the car did not race like a racing car.
-	var WITHHELD = {slow: "was too slow to count as racing", jumped: "jumped farther than a car can drive"};
+	var WITHHELD = {slow: "Not paid: the car was too slow to count", jumped: "Not paid: the car jumped too far"};
+	var STILL_COUNTS = "The win counts on the leaderboard.";
+	var BACK_IN_TRAFFIC = "No winner, no reward · the car is back in traffic";
 
 	function trafficResultView(data) {
 		var you = String(data.you || ""), car = String(data.car || "");
@@ -279,45 +277,41 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 		});
 		if (data.out) {
 			return {title: "You left the race", rows: [{label: "Your time", value: "did not finish: you gave up"}],
-				note: "The others race on. No race reward for you this time.", close: true};
+				note: "The others race on; no reward for you this time.", close: true};
 		}
 		var hostEnded = data.why === "hostGaveUp" || data.why === "hostLeft" || data.why === "failed";
 		if (hostEnded) {
 			if (data.host === you) {
 				return {title: "Race over", rows: [{label: "Your time", value: "did not finish: you gave up"}], close: true,
-					note: "Your race ended for everyone, with no winner and no race reward. The " + car + " is back in traffic."};
+					note: BACK_IN_TRAFFIC};
 			}
 			return {title: "Race over", close: true,
-				note: String(data.host || "") + (data.why === "hostLeft" ? " left" : " gave up") +
-					", so the race ended with no winner and no race reward."};
+				note: String(data.host || "") + (data.why === "hostLeft" ? " left" : " gave up") + ": no winner, no reward"};
 		}
 		if (data.why === "aiOut") {
 			return {title: "Race over", rows: [{label: car, value: "out: crashed or stuck for 15 s"}], close: true,
-				note: "The " + car + " dropped out before anyone finished, so the race ended with no winner and no " +
-					"race reward. The car is back in traffic."};
+				note: BACK_IN_TRAFFIC};
 		}
 		if (data.aiWon) {
-			return {title: "The " + car + " won", places: places, close: true,
-				note: "Nobody beat the " + car + ", so no race reward this time."};
+			return {title: "The " + car + " won", places: places, close: true, note: "Nobody beat it, so no reward this time."};
 		}
 		if (!data.winner) {
 			return {title: "Race over", places: places.length > 0 ? places : null, close: true,
 				note: "Nobody reached the finish in time."};
 		}
 		if (data.winner === you) {
+			// The reward paid goes in the title; one not paid says why in a row.
+			if (prize > 0) return {title: "You won · " + moDollars(prize), places: places, rows: [], close: true};
 			var rows = [];
-			if (prize > 0) {
-				rows.push({label: "You get", value: moDollars(prize) + " race reward"});
-			} else if ((Number(data.reward) || 0) > 0 && Object.prototype.hasOwnProperty.call(WITHHELD, data.rewardWithheld)) {
-				rows.push({label: "Race reward", value: "Not paid: the " + car + " " + WITHHELD[data.rewardWithheld] +
-					"; the win counts on the leaderboard"});
+			if ((Number(data.reward) || 0) > 0 && Object.prototype.hasOwnProperty.call(WITHHELD, data.rewardWithheld)) {
+				rows.push({label: "Race reward", value: WITHHELD[data.rewardWithheld]});
 			} else if ((Number(data.reward) || 0) > 0 && (Number(data.prizeAgainIn) || 0) > 0) {
-				rows.push({label: "Race reward", value: "Again in " + Math.ceil(Number(data.prizeAgainIn) / 60) +
-					" min; the win counts on the leaderboard"});
+				rows.push({label: "Race reward", value: "Again in " + Math.ceil(Number(data.prizeAgainIn) / 60) + " min"});
 			} else if ((Number(data.reward) || 0) > 0) {
-				rows.push({label: "Race reward", value: "Not paid for this race; the win counts on the leaderboard"});
+				rows.push({label: "Race reward", value: "Not paid for this race"});
 			}
-			return {title: "You won", places: places, rows: rows, close: true};
+			return {title: "You won", places: places, rows: rows, note: rows.length > 0 ? STILL_COUNTS : undefined,
+				close: true};
 		}
 		return {title: String(data.winner) + " won", places: places, close: true};
 	}
@@ -333,8 +327,11 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 				$scope.traffic = {kind: "available", view: availableView(data)};
 				return;
 			case "none":
-			case "racing":
 				if (kind === "available") $scope.traffic = null;
+				return;
+			case "racing":
+				// A joined invite goes too once its race counts down; a result stays until closed.
+				if (kind === "available" || kind === "invite") $scope.traffic = null;
 				return;
 			case "invite":
 				if (typeof data.race !== "string") return;
@@ -384,9 +381,9 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 		quit: "Left the server", notReady: "Not ready", spawn: "Did not start"};
 	// Why the first place was not paid, when the server has a prize.
 	var SPOT_WITHHELD = {
-		alone: "No prize: nobody else raced. Your time counts for the leaderboard.",
+		alone: "No prize: nobody else raced; your time still counts",
 		"car won": "No prize: only a player who finishes first is paid.",
-		unseen: "Unranked: the server could not follow every car, so no prize, win or leaderboard time.",
+		unseen: "Unranked: not every car was seen; no prize, win or time",
 	};
 
 	function spotRouteText(route) {
@@ -419,15 +416,15 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 		var invited = s.players.filter(function (p) { return p.on; }).length;
 		rows.push(spotPrizeRow(s, 1 + s.opponents + invited));
 		var solo = s.opponents === 0 && invited === 0;
-		var note = s.note ? String(s.note) : (solo ?
-			"No opponents and nobody invited: this run sets a time for the leaderboard but pays no prize." :
+		var note = s.note ? String(s.note) : (solo ? "Solo run: a leaderboard time, no prize" :
 			"Friends who join are moved onto the grid beside you.");
-		if (!s.note && s.untested) {
-			note = "Your car changed since its last performance test, or was never tested, so its rivals may not " +
-				"match it until it is tested again. " + note;
+		var warn = !s.note && s.untested ? "Untested car: rivals may not match it until it is tested" : undefined;
+		if (s.allowed === false) {
+			note = "Race spots are off on this server.";
+			warn = undefined;
 		}
-		if (s.allowed === false) note = "Race spots are off on this server.";
 		return {
+			warn: warn,
 			title: "Race spot: " + String(s.spotName || ""),
 			layouts: s.routes.length > 1 ? s.routes.map(function (r, i) {
 				return {name: String(r.name || ""), on: i === s.routeIndex, index: i};
@@ -475,12 +472,13 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 			}
 		}
 		if (data.best && typeof data.best === "object" && data.best.improved) {
-			notes.push(typeof data.best.old === "number" ? "New personal best. Your best here was " + spotTime(data.best.old) + "." :
+			notes.push(typeof data.best.old === "number" ? "New personal best; your best here was " + spotTime(data.best.old) + "." :
 				"Your first time here is on the leaderboard.");
 		}
 		if (data.why === "starterLeft") notes.push("The starter left, so the race ended with no winner.");
 		else if (data.why === "timeout") notes.push("The time ran out.");
-		return {title: title, places: spotPlaces(data), rows: rows, note: notes.join(" "), close: true};
+		// One line each.
+		return {title: title, places: spotPlaces(data), rows: rows, notes: notes, close: true};
 	}
 
 	function spotView(data, current) {
@@ -528,8 +526,7 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 			}
 			var view = {title: routeName, rows: racingRows, giveUp: true};
 			if (typeof data.offRoute === "number") {
-				view.warn = "You are off the route. Head back to checkpoint " + data.checkpoint + " within " + data.offRoute +
-					" s or your race ends.";
+				view.warn = "Off the route: back to checkpoint " + data.checkpoint + " within " + data.offRoute + " s";
 				if (typeof data.nextMetres === "number") {
 					racingRows.push({label: "Next checkpoint", value: moKm(data.nextMetres) + " away"});
 				}

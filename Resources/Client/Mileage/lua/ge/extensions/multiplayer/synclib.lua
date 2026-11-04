@@ -41,6 +41,7 @@ local offsets = {}
 
 local PROBE_INTERVAL = 10      -- seconds between probes to a given peer
 local MAX_SAMPLE_AGE = 120     -- drop stale estimates entirely
+local PENDING_MAX_AGE = 30     -- forget a probe whose answer has not come in this long
 
 local pendingProbes = {}
 local lastProbeAt = {}
@@ -90,9 +91,16 @@ function M.probe(clientId)
 	local t = transport()
 	if not t then return end
 
-	local last = lastProbeAt[clientId] or 0
-	if (now() - last) < PROBE_INTERVAL then return end
+	-- A peer never probed is due at once, whatever the clock reads.
+	local last = lastProbeAt[clientId]
+	if last and (now() - last) < PROBE_INTERVAL then return end
 	lastProbeAt[clientId] = now()
+
+	-- A probe whose answer never came would otherwise stay until the player left the
+	-- server. Its late answer, if it ever arrives, is then ignored like any unknown token.
+	for pendingToken, pending in pairs(pendingProbes) do
+		if now() - pending.t0 > PENDING_MAX_AGE then pendingProbes[pendingToken] = nil end
+	end
 
 	local token = tostring(clientId) .. "-" .. tostring(math.floor(now() * 1000))
 	pendingProbes[token] = { clientId = clientId, t0 = now() }
@@ -157,19 +165,18 @@ end
 
 --== lifecycle ================================================================
 
---- Keep offsets fresh for everyone in the session, so a race never has to wait for a
---- probe before its first finish time arrives.
+--- Keep offsets fresh for the players at the strips this machine leads, so a finish
+--- time is always mapped through a recent probe. Only a strip's leader maps finish times,
+--- so a machine that leads no strip probes nobody (it still answers probes it receives).
+--- The lobby probes a player the moment they arrive; this keeps it fresh while they stay.
 local function onUpdate()
 	local gm = multiplayer_gamemodes_drag_drag
 	if not gm or not gm.isEnabled() then return end
 
-	local t = transport()
-	if not t then return end
+	local lobby = mileage_dragLobby
+	if not lobby or not lobby.clockCheckTargets then return end
 
-	local own = t.bridge.getLocalPlayerId()
-	for playerId in pairs(t.bridge.getSessionPlayers()) do
-		if playerId ~= own then M.probe(playerId) end
-	end
+	for playerId in pairs(lobby.clockCheckTargets()) do M.probe(playerId) end
 end
 
 function M.reset()

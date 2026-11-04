@@ -177,6 +177,34 @@ local function findCandidate()
 	return best
 end
 
+-- What the named race module answers, read only from a table with that function; a missing
+-- module or function, or one that raises, reads as false.
+local function asks(name, fn)
+	local ext = extensions[name]
+	if type(ext) ~= "table" or type(ext[fn]) ~= "function" then return false end
+	local ok, answer = pcall(ext[fn])
+	return ok and answer == true
+end
+
+-- Whether this player is in a race, or committed to one, so no traffic race is offered:
+-- this module's own race until its result, a race against a player or an event race until
+-- this car crosses the line, a race spot, an event signed up to, a drag strip's line or run,
+-- or a mission. Asked every scan, so the card comes back by itself once all are over.
+local function busy()
+	if race then return true end
+	local sr = streetRace()
+	if sr and type(sr.current) == "function" then
+		local ok, current = pcall(sr.current)
+		if ok and type(current) == "table" and not current.finished then return true end
+	end
+	if asks("mileage_spotRace", "busy") or asks("mileage_raceEvents", "signedUp")
+			or asks("mileage_dragLobby", "busy") then
+		return true
+	end
+	local c = compat()
+	return c ~= nil and c.getForegroundMissionId() and true or false
+end
+
 local function prizeAgainIn()
 	return math.max(0, math.ceil(status.againUntil - clock))
 end
@@ -208,8 +236,15 @@ end
 
 local function scan()
 	local found = nil
-	local c = compat()
-	if status.known and not race and not invite and c and not c.getForegroundMissionId() then
+	local isBusy = busy()
+	-- An invite not yet joined goes once this player is busy; the server's invite times out
+	-- by itself.
+	if isBusy and invite and not invite.sent then
+		local id = invite.id
+		invite = nil
+		ui({phase = "inviteClosed", race = id})
+	end
+	if status.known and not isBusy and not invite and compat() then
 		found = findCandidate()
 	end
 	local before = candidate
@@ -431,7 +466,7 @@ local function rxMileageAiRace(data)
 	elseif phase == "countdown" then
 		onCountdown(message)
 	elseif phase == "invite" and type(message.race) == "string" then
-		if race then return end
+		if busy() then return end
 		invite = {id = message.race, host = message.host, car = message.car, distance = message.distance,
 			prize = message.prize, left = tonumber(message.seconds) or 5}
 		ui(message)

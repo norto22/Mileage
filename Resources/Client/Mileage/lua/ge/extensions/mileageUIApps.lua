@@ -161,17 +161,17 @@ local multiplayerApps = {
 	},
 	-- Mileage's prompts: race challenges, money requests, race set-up and results (the
 	-- race under way shows in the race window below), race events and the leaderboard.
-	-- Beside the player list, which opens most of them.
+	-- Beside the player list, which opens most of them. Compact: 280 x 440.
 	mileageoffers = {
 		appName = "mileageoffers",
 		placement = {
 			bottom = "",
-			height = "520px",
+			height = "440px",
 			left = "",
 			position = "absolute",
 			right = "305px",
 			top = "240px",
-			width = "340px"
+			width = "280px"
 		}
 	},
 	-- Mileage's race window: the race under way (countdown, place, lap, checkpoint, time)
@@ -335,6 +335,23 @@ local function resizeApp(layout, appData)
 	return changed
 end
 
+-- The prompts window became compact (280 x 440). A layout that already had it at the old
+-- size gets the new width and height once, keeping where the player put it; the stamp
+-- (layout.mileageCompact) means any size the player picks later is left alone.
+local COMPACT_STAMP = 1
+
+local function compactOnce(layout, appData)
+	if layout.mileageCompact == COMPACT_STAMP then return false end
+	local _, app = findApp(layout, appData.appName)
+	local wanted = appData.placement or {}
+	if app and wanted.width and wanted.height then
+		app.placement = app.placement or {}
+		app.placement.width, app.placement.height = wanted.width, wanted.height
+	end
+	layout.mileageCompact = COMPACT_STAMP
+	return true
+end
+
 local function replaceApp(layout, oldName, newApp)
 	local i = findApp(layout, oldName)
 	if i then
@@ -424,6 +441,7 @@ local function processLayout(layoutInfo, isDefault)
 	end
 	updated = checkApp(layout, multiplayerApps.mileageplayerlist) or updated
 	updated = checkApp(layout, multiplayerApps.mileageoffers) or updated
+	updated = compactOnce(layout, multiplayerApps.mileageoffers) or updated
 	updated = checkApp(layout, multiplayerApps.mileagerace) or updated
 	updated = resizeApp(layout, multiplayerApps.dragRace) or updated
 

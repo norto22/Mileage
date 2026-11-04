@@ -23,15 +23,17 @@
 }
 .view-button {
     width: 25px;
-    min-height: 27px;
+    min-height: 23px;
 }
+/* Compact, as every Mileage window: rows a step smaller, tighter cells and buttons. */
 .tp-button {
-    width: 64px !important;
-    min-height: 27px;
+    width: 56px !important;
+    min-height: 23px;
     margin: 0;
 }
 #players-table {
     color: white;
+    font-size: 0.9em;
     border: none;
     border-collapse: collapse;
     width: 100%;
@@ -41,7 +43,7 @@
     table-layout:fixed;
 }
 #players-table td {
-    padding: 0 0 0 5px;
+    padding: 0 4px;
     max-width: 100%;
     max-width: 0;
     overflow: hidden;
@@ -64,8 +66,8 @@
     color: #FFFFFF;
 }
 .direction-buttons {
-    height: 25px;
-    width: 31px;
+    height: 21px;
+    width: 26px;
     float: right;
 }
 .player-button {
@@ -89,7 +91,7 @@ table#players-table > tbody > tr:nth-child(even) {
 }
 #playerlist-contextmenu {
     background: #333;
-    padding: 10px;
+    padding: 6px 8px;
     border-radius: 5px;
     max-width: 200px;
 }
@@ -97,12 +99,12 @@ table#players-table > tbody > tr:nth-child(even) {
     background: #444;
     color: white;
     border: none;
-    padding: 8px 12px;
+    padding: 4px 8px;
     width: 100%;
     text-align: left;
     cursor: pointer;
     border-radius: 3px;
-    margin-bottom: 5px;
+    margin-bottom: 3px;
 }
 #playerlist-contextmenu button:hover {
     background: #555;
@@ -162,7 +164,7 @@ table#players-table > tbody > tr:nth-child(even) {
     width: auto;			
 }
 .playerslist-col-3 {
-    width: 64px;
+    width: 56px;
 }
 #plist-container::-webkit-scrollbar {
     width: 0px;  /* Remove scrollbar space */

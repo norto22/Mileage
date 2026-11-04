@@ -140,7 +140,9 @@ local function assignRoles()
 						ownerChecks[gameVehicleID] = (ownerChecks[gameVehicleID] or 0) + 1
 					end
 					if ownerChecks[gameVehicleID] >= OWNER_CHECKS then wanted = "owner" end
-				else
+				elseif not isRemoteTraffic(serverVehicleID) then
+					-- Another player's traffic and parked cars never send damage, so their
+					-- copies carry no checks; a car whose mark has not arrived is a copy.
 					wanted = "copy"
 				end
 			end
