@@ -30,6 +30,7 @@ Mileage was called CareerMP until v0.3.0. A server still running CareerMP needs 
 ## Planned
 - Mission and challenge props everyone sees (in progress, [#30](https://github.com/norto22/Mileage/issues/30))
 - Racing your traffic cars on the road (in progress, [#113](https://github.com/norto22/Mileage/issues/113))
+- Getting paid for beating a player in a drag race: the owner's drag prize on every win, and a stake you both agree with Drag race… in the player list (in progress, [#145](https://github.com/norto22/Mileage/issues/145))
 - Three or more players at once (in progress, [#32](https://github.com/norto22/Mileage/issues/32))
 - Smoother play with five to eight players together and traffic on: traffic and parked cars send fewer updates, a joining player's cars are built one at a time instead of in one freeze, and other players' traffic more than 1 km away is hidden on your game (in progress, [#118](https://github.com/norto22/Mileage/issues/118), [#86](https://github.com/norto22/Mileage/issues/86))
 - Mod vehicles and longer render distance (in progress, [#100](https://github.com/norto22/Mileage/issues/100))
@@ -54,6 +55,8 @@ You need BeamNG.drive 0.40.4.0, the current BeamMP server and the West Coast, US
 1. Download `Mileage-<version>.zip` from the latest [release](https://github.com/norto22/Mileage/releases/latest) and unpack it into your BeamMP server folder.
 2. In `ServerConfig.toml`, set `MaxCars = 100` and `Map = "/levels/west_coast_usa/info.json"`.
 3. Start the server. Type `Mileage Help` in the server console for its commands.
+
+Race prizes are paid by the server and are off until you set them, each in whole dollars from 0 to 1,000,000, with `Mileage SetConfig server <setting> <dollars>`: `racePrize` for a street race between players, `aiRacePrize` for beating a traffic car, `spotRacePrize` for first place at a race spot, and `dragRacePrize` for beating another player on the drag strip (paid on every win, with no wait between prizes). `raceStakeMax` caps the stake players agree for a street race or a drag race (10,000 by default; 0 means no stakes).
 
 `Mileage Stats` shows what the server sent and received for each part of Mileage, and what playing together costs each player's game: its frame time, frames over 100 ms, the updates it sent and received, and its cars split into driving traffic, parked cars and players' own. Each game reports every 30 seconds and writes the same numbers to its own log under `mileage.perf`, so a session can be compared before and after a change.
 

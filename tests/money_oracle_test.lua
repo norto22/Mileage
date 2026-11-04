@@ -93,6 +93,78 @@ World.test("oracle: the same when the loser's game disconnects mid-race and rejo
 	same(winsFor(world, cat, "Ann"), 1, "Ann's win on the leaderboard after the restart")
 end)
 
+--== a staked drag race ========================================================
+
+local STRIP = "alderStrip"
+-- The server's copy of the West Coast strip's lines, lane 1 and lane 2.
+local STAGE = {{x = -189.67, y = -157.72, z = 119.38}, {x = -194.83, y = -150.53, z = 119.38}}
+local END_LINE = {{x = 134.17, y = 77.52, z = 119.38}, {x = 129.19, y = 84.24, z = 119.38}}
+local STAKE, PRIZE = 1000, 2500
+
+local function sendAs(world, p, event, message)
+	world:queue({way = "toServer", from = p.id, name = event, data = World.encode(message)})
+	world:pump()
+end
+
+local function toLine(world, p, lane)
+	world:serverOutput(function()
+		dragMP(p.id, World.encode({msg = "mileageDragJoin", to = "host", data = {stripId = STRIP, lane = lane}}))
+	end)
+	world:drive(p, STAGE[lane].x, STAGE[lane].y, STAGE[lane].z)
+end
+
+-- a challenges b for STAKE, b accepts; at the strip a leads, a run goes green, b jumps the
+-- start and reports the faster time, a finishes cleanly. opts.restart: the server restarts
+-- once the pot is given and before the prize is.
+local function dragOracle(world, opts)
+	local ann, bob, cat = players(world, {"Ann", "Bob", "Cat"})
+	local before = {ann = ann.savedMoney, bob = bob.savedMoney, total = world:savedTotal()}
+	world:as(ann, function() assert(mileage_offers.dragRace("Bob", STAKE), "challenge not sent") end)
+	world:pump()
+	local offer = assert(shownOffer(world, bob), "challenge not shown")
+	world:as(bob, function() mileage_offers.answer(offer.id, true) end)
+	world:pump()
+	toLine(world, ann, 1)
+	toLine(world, bob, 2)
+	local run = STRIP .. "-42"
+	sendAs(world, ann, "mileageDragRun", {phase = "start", strip = STRIP, run = run, dragType = "headsUpRace",
+		racers = {{id = ann.id, lane = 1}, {id = bob.id, lane = 2}}})
+	sendAs(world, ann, "mileageDragStaged", {run = run})
+	sendAs(world, bob, "mileageDragStaged", {run = run})
+	sendAs(world, ann, "mileageDragRun", {phase = "green", run = run})
+	sendAs(world, bob, "mileageDragResult", {run = run, outcome = "jumped"})
+	world:drive(bob, END_LINE[2].x, END_LINE[2].y, END_LINE[2].z)
+	sendAs(world, bob, "mileageDragResult", {run = run, outcome = "finished", winTime = 9.6, dial = 0})
+	if opts.restart then
+		world.filter = function(m)
+			if m.event == "rxMileageGive" and m.data:find("Drag race prize", 1, true) then return "drop" end
+		end
+	end
+	world:drive(ann, END_LINE[1].x, END_LINE[1].y, END_LINE[1].z)
+	sendAs(world, ann, "mileageDragResult", {run = run, outcome = "finished", winTime = 11.9, dial = 0})
+	if opts.restart then
+		same(ann.savedMoney, before.ann + STAKE, "the pot given, the prize not yet")
+		world.filter = nil
+		world:restart()
+	end
+	world:advance(12)
+	same(ann.savedMoney - before.ann, STAKE + PRIZE, "A exactly the stake plus the prize better off")
+	same(bob.savedMoney - before.bob, -STAKE, "B exactly the stake worse off")
+	same(world:savedTotal() - before.total, PRIZE, "the players together exactly the prize better off")
+	same(cat.savedMoney, 10000, "the third player unchanged")
+	same(next(world:dataFile("transfers.json").transfers), nil, "nothing left waiting")
+	same(next(world:dataFile("races.json").races), nil, "no race left holding stakes")
+end
+
+World.test("oracle: B jumps the start with the faster time, A finishes; a restart mid-payout changes nothing",
+		function(world)
+	dragOracle(world, {restart = true})
+end, {server = {dragRacePrize = PRIZE}})
+
+World.test("oracle: the same staked drag race without a restart gives the same three numbers", function(world)
+	dragOracle(world, {})
+end, {server = {dragRacePrize = PRIZE}})
+
 World.test("several races, payments and requests at once between four players do not mix", function(world)
 	local ann, bob, cat, dan = players(world, {"Ann", "Bob", "Cat", "Dan"})
 	local finishAB = race(world, ann, bob, 1000)
