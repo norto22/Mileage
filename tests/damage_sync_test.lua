@@ -475,7 +475,7 @@ test("a wreck of 1000 beams goes out as 400, 400 and 200 over three ticks", func
 	same(table.concat(counts, ","), "400,400,200", "beams per message")
 end)
 
-test("a message of ordinary dents holds at most 500 points", function()
+test("a message of ordinary dents carries no points, so 300 beams go in one", function()
 	local car = ownerCar({beams = 300, nodes = 600, separate = true})
 	tick(car)
 	takeMessages(car)
@@ -483,27 +483,36 @@ test("a message of ordinary dents holds at most 500 points", function()
 	for cid = 0, 299 do car.restLen[cid] = 0.9 end
 	tick(car)
 	local m = takeMessages(car)[1]
-	same(math.floor(#m.n / 4), 500, "points in the message")
-	same(math.floor(#m.b / 4), 250, "beams, cut short by the point limit")
+	same(#m.n, 0, "points in the message")
+	same(math.floor(#m.b / 4), 300, "beams")
 	tick(car)
-	same(math.floor(#takeMessages(car)[1].b / 4), 50, "beams in the next message")
+	same(#takeMessages(car), 0, "nothing left for the next tick")
 end)
 
-test("a dent applied to a copy facing another way lands in the same place on the car", function()
+test("a dent applied to a copy facing another way takes the owner's beam shape and moves no point", function()
 	local owner = ownerCar()
 	dent(owner, 7, 0.8, {0.05, -0.12, 0.03})
 	tick(owner)
 	local m = takeMessages(owner)[1]
 	local copy = copyCar({fwd = {x = 1, y = 0, z = 0}})
-	inVehicle(copy, copy.ext.applyDamage, 0, m.b, m.n)
 	local node = owner.v.data.beams[7].id1
-	local ox, oy, oz = toCarFrame(owner, owner.nodePos[node])
-	local cx, cy, cz = toCarFrame(copy, copy.nodePos[node])
-	expect(math.abs(ox - cx) < 0.002 and math.abs(oy - cy) < 0.002 and math.abs(oz - cz) < 0.002,
-		string.format("point %d: owner (%.3f, %.3f, %.3f), copy (%.3f, %.3f, %.3f)", node, ox, oy, oz, cx, cy, cz))
-	expect(math.abs(copy.nodePos[node].x - owner.nodePos[node].x) > 0.1, "the copy's frame was used")
-	same(copy.restLen[7], 0.8, "rest length")
+	local before = vec3(copy.nodePos[node])
+	inVehicle(copy, copy.ext.applyDamage, 0, m.b, m.n)
+	same(copy.nodePos[node].x .. "," .. copy.nodePos[node].y .. "," .. copy.nodePos[node].z,
+		before.x .. "," .. before.y .. "," .. before.z, "point " .. node .. " left to the copy's physics")
+	same(copy.restLen[7], 0.8, "the owner's rest length, which shapes the dent")
 	same(copy.beamstate.deformedBeams[7], 0.3, "deformation recorded")
+end)
+
+test("a dent from an owner on an older Mileage, with points, is applied with its points left alone", function()
+	local copy = copyCar()
+	local before = vec3(copy.nodePos[4])
+	inVehicle(copy, copy.ext.applyDamage, 0, {7, 0.8, 1, 0.3}, {4, 0.1, 0.2, 0.3, 999, 0, 0, 0})
+	same(copy.restLen[7], 0.8, "beam 7")
+	same(copy.broken[7], true, "broken")
+	same(copy.nodePos[4].x .. "," .. copy.nodePos[4].y, before.x .. "," .. before.y, "point 4 left alone")
+	same(#copy.applyLog, 1, "only the beam was set")
+	same(countLines(logs, "refused part of another player's damage message"), 0, "nothing refused: the points are not read")
 end)
 
 test("a small dent on the owner moves no point of the copy, whose wheel has turned", function()
@@ -531,7 +540,7 @@ test("a small dent on the owner moves no point of the copy, whose wheel has turn
 	same(copy.beamstate.deformedBeams[22], 0.3, "the deformation recorded")
 end)
 
-test("a copy refuses unknown beams and points and values out of range, and applies the rest", function()
+test("a copy refuses unknown beams and values out of range, and applies the rest, its points left alone", function()
 	local copy = copyCar()
 	local before = vec3(copy.nodePos[3])
 	inVehicle(copy, copy.ext.applyDamage, 0,
@@ -542,9 +551,9 @@ test("a copy refuses unknown beams and points and values out of range, and appli
 		 10, 0.9, 2, 0.2,     -- broken flag not 0 or 1
 		 11, 0.9, 0, 50,      -- deformation out of range
 		 12, 0.5, 1, 1},      -- applied, broken
-		{3, 25, 0, 0,         -- offset out of range
-		 999, 0, 0, 0,        -- unknown point
-		 4, 0.1, 0.2, 0.3})   -- applied
+		{3, 25, 0, 0,         -- points of a small update are never placed
+		 999, 0, 0, 0,
+		 4, 0.1, 0.2, 0.3})
 	same(copy.restLen[7], 0.8, "beam 7")
 	same(copy.restLen[8], 1, "beam 8")
 	same(copy.restLen[9], 1, "beam 9")
@@ -553,8 +562,6 @@ test("a copy refuses unknown beams and points and values out of range, and appli
 	same(copy.restLen[12], 0.5, "beam 12")
 	same(copy.broken[12], true, "beam 12 broken")
 	same(copy.nodePos[3].x, before.x, "point 3 left alone")
-	local x, y, z = toCarFrame(copy, copy.nodePos[4])
-	expect(math.abs(x - 0.1) < 1e-6 and math.abs(y - 0.2) < 1e-6 and math.abs(z - 0.3) < 1e-6, "point 4 placed")
 	same(countLines(logs, "refused part of another player's damage message"), 1, "logged once")
 end)
 
@@ -1037,6 +1044,24 @@ local function phantomBreaks(copy, first, n)
 	copy.beamstate.damage = copy.beamstate.damage + 1000
 end
 
+test("a copy put right logs which car and how many beams disagreed", function()
+	local owner, copy = syncedGames()
+	phantomBreaks(copy, 30, 1)
+	step(3)
+	same(countLines(logs, "copy of 0-0 disagreed with its owner on 1 beam - reset and resynced"), 1, "one beam")
+	step(10)
+	phantomBreaks(copy, 30, 3)
+	step(3)
+	same(countLines(logs, "copy of 0-0 disagreed with its owner on 3 beams - reset and resynced"), 1, "three beams")
+end)
+
+test("a reset request without a beam count, from an older vehicle side, still resets and logs", function()
+	local owner, copy, owners, copies = syncedGames()
+	as(copies, function() copies.ge.resetCopy(copy.gid, 1) end)
+	same(copy.veh.resets, 1, "reset in place")
+	same(countLines(logs, "copy of 0-0 disagreed with its owner - reset and resynced"), 1, "logged without a count")
+end)
+
 test("a copy with 25 beams of damage its owner never reported is reset and given the owner's damage", function()
 	local owner, copy, owners, copies = syncedGames()
 	local requestsBefore = #sentToServer("careerDamageRequest", 1)
@@ -1074,7 +1099,7 @@ end)
 local function resetRequests(car)
 	local counts = {resync = 0, cleared = 0}
 	for _, cmd in ipairs(car.game.geQueue) do
-		local id, wantFull = cmd:match("^mileage_damageSync%.resetCopy%((%d+),(%d)%)$")
+		local id, wantFull = cmd:match("^mileage_damageSync%.resetCopy%((%d+),(%d)[,%d]*%)$")
 		if id then
 			same(tonumber(id), car.gid, "car in the reset request")
 			if wantFull == "1" then counts.resync = counts.resync + 1 else counts.cleared = counts.cleared + 1 end
@@ -1335,15 +1360,11 @@ test("a full-damage request for this game's own traffic car is not answered", fu
 	same(countLines(traffic.vehicleQueue, "sendFull"), 0, "full-damage answers queued")
 end)
 
-test("a copy applies a rest length of 100 m and offsets of 20 m, and refuses 0 m and just past 20 m", function()
+test("a copy applies a rest length of 100 m and refuses 0 m", function()
 	local copy = copyCar()
-	inVehicle(copy, copy.ext.applyDamage, 0, {7, 100, 0, 0, 8, 0, 0, 0}, {4, 20, -20, 20, 5, 20.01, 0, 0})
+	inVehicle(copy, copy.ext.applyDamage, 0, {7, 100, 0, 0, 8, 0, 0, 0}, {})
 	same(copy.restLen[7], 100, "beam 7 at 100 m")
 	same(copy.restLen[8], 1, "beam 8 left alone")
-	local x, y, z = toCarFrame(copy, copy.nodePos[4])
-	expect(math.abs(x - 20) < 1e-6 and math.abs(y + 20) < 1e-6 and math.abs(z - 20) < 1e-6, "point 4 placed at the limit")
-	local fx = toCarFrame(copy, copy.nodePos[5])
-	expect(math.abs(fx - 20.01) > 1e-3, "point 5 left alone")
 end)
 
 test("a copy given no beam or point lists changes nothing and does not raise", function()
@@ -1353,19 +1374,15 @@ test("a copy given no beam or point lists changes nothing and does not raise", f
 	same(copy.restLen[7], 1, "beam 7")
 end)
 
-test("an owner whose direction cannot be read keeps its changes and sends them once it can", function()
+test("an owner whose direction cannot be read still sends its dents, which need no frame", function()
 	local car = ownerCar()
 	tick(car)
 	takeMessages(car)
-	local fwd = car.fwd
 	car.fwd = {x = 0, y = 0, z = 0}
 	dent(car, 7, 0.8)
 	tick(car)
-	same(#takeMessages(car), 0, "messages without a frame")
-	car.fwd = fwd
-	tick(car)
 	local m = takeMessages(car)
-	same(#m, 1, "messages once the frame is back")
+	same(#m, 1, "messages without a frame")
 	same(table.concat(beamIds(m[1]), ","), "7", "beams")
 end)
 

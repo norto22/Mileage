@@ -6,15 +6,17 @@
 --
 --   * owner: in the player's own cars (not traffic or parked), every half second while
 --     the game's damage total moves, it sends the beams whose rest length or broken
---     state changed since its last message, with the moved points of those beams in the
---     car's own frame (right, forward, up from its reference node), so they fit a copy
---     that is somewhere else on another screen.
---   * copy: in another player's car, it applies such a message: points moved into place,
---     rest lengths set, broken beams broken, deformation recorded.
+--     state changed since its last message, with no points: a point is only where it is
+--     on the owner's car, and on a copy whose wheels have turned and panels swing
+--     differently a point moved there pops tyres and pulls latches apart.
+--   * copy: in another player's car, it applies such a message: rest lengths set, broken
+--     beams broken, deformation recorded, so the copy reshapes itself from its beams.
+--     Points an older owner still sends with them are left alone.
 --
 -- A full send (a new owner's to everyone, or an answer to a copy built late or resynced,
 -- flagged so the server passes it only to the players who asked) carries the car's whole
--- shape: every changed beam and every point, from one moment, in numbered parts. The
+-- shape: every changed beam and every point, in the car's own frame (right, forward, up
+-- from its reference node), from one moment, in numbered parts. The
 -- copy applies it only once every part is in, the way the game restores a saved damaged
 -- car (beamstate.load): every point, every beam, then one commit, so no beam is stretched
 -- between moved and unmoved points.
@@ -30,11 +32,11 @@ local M = {}
 
 local SEND_EVERY_SECONDS = 0.5
 local MAX_BEAMS = 400            -- per message
-local MAX_NODES = 500            -- per message; keeps one message under the 32 KB cap
+local MAX_NODES = 500            -- per part of a whole shape; keeps it under the 32 KB cap
 local LENGTH_CHANGED = 0.001     -- metres of rest length that count as a change
 local MAX_LENGTH = 100           -- metres; a rest length beyond this is refused
-local MAX_OFFSET = 20            -- metres from the reference node; further is refused
--- A whole shape places every point, a part torn off and flung away included.
+-- Metres from the reference node; further is refused. A whole shape places every point, a
+-- part torn off and flung away included.
 local MAX_SHAPE_OFFSET = 1000
 local MAX_DEFORM = 10            -- deformation ratio; larger is refused
 local MAX_PARTS = 64             -- numbered parts of one whole shape
@@ -220,33 +222,20 @@ local function pointRow(fr, n)
 	return string.format("%d,%.3f,%.3f,%.3f", n, lx, ly, lz)
 end
 
--- One message of ordinary dents from list[first..]: at most MAX_BEAMS beams and
--- MAX_NODES points, the points those beams join. Returns the message and the index of
--- the first beam it left out.
+-- One message of ordinary dents from list[first..]: at most MAX_BEAMS beams and no
+-- points (an empty list, which older copies still expect). Returns the message and the
+-- index of the first beam it left out.
 local function packMessage(list, first)
-	local fr = carFrame()
-	if not fr then return nil, first end
-	local beams, nodes, seen, nodeCount = {}, {}, {}, 0
+	local beams = {}
 	local i = first
 	while i <= #list and #beams < MAX_BEAMS do
 		local cid = list[i]
-		local beam = v.data.beams[cid]
-		local newNodes = {}
-		for _, n in ipairs({beam.id1 or false, beam.id2 or false}) do
-			if n and not seen[n] and v.data.nodes[n] then table.insert(newNodes, n) end
-		end
-		if nodeCount + #newNodes > MAX_NODES then break end
-		for _, n in ipairs(newNodes) do
-			seen[n] = true
-			nodeCount = nodeCount + 1
-			table.insert(nodes, pointRow(fr, n))
-		end
 		local row, len, broken = beamRow(cid)
 		table.insert(beams, row)
 		sent[cid] = {len = len, broken = broken}
 		i = i + 1
 	end
-	return '{"c":0,"b":[' .. table.concat(beams, ",") .. '],"n":[' .. table.concat(nodes, ",") .. ']}', i
+	return '{"c":0,"b":[' .. table.concat(beams, ",") .. '],"n":[]}', i
 end
 
 local function slice(rows, first, last)
@@ -412,11 +401,12 @@ local function refused(what)
 	log("W", "mileage.damage", "refused part of another player's damage message: " .. what)
 end
 
--- Why a point row {id, x, y, z} in the car's own frame cannot be used, or nil.
-local function pointProblem(cid, x, y, z, maxOffset)
+-- Why a point row {id, x, y, z} of a whole shape, in the car's own frame, cannot be
+-- used, or nil.
+local function pointProblem(cid, x, y, z)
 	if not (isId(cid) and v.data.nodes[cid]) then return "unknown point " .. tostring(cid) end
-	if not (isNumber(x) and isNumber(y) and isNumber(z)
-			and abs(x) <= maxOffset and abs(y) <= maxOffset and abs(z) <= maxOffset) then
+	if not (isNumber(x) and isNumber(y) and isNumber(z) and abs(x) <= MAX_SHAPE_OFFSET
+			and abs(y) <= MAX_SHAPE_OFFSET and abs(z) <= MAX_SHAPE_OFFSET) then
 		return "point offset out of range"
 	end
 	return nil
@@ -432,10 +422,10 @@ local function beamProblem(cid, len, broken, deform)
 end
 
 -- nodes is {id, x, y, z, ...} in the car's own frame; a row that cannot be used is skipped.
-local function placePoints(fr, nodes, maxOffset)
+local function placePoints(fr, nodes)
 	for i = 1, #nodes - 3, 4 do
 		local cid, x, y, z = nodes[i], nodes[i + 1], nodes[i + 2], nodes[i + 3]
-		local problem = pointProblem(cid, x, y, z, maxOffset)
+		local problem = pointProblem(cid, x, y, z)
 		if problem then
 			refused(problem)
 		else
@@ -467,7 +457,7 @@ local function setProblem(set)
 	for p = 1, set.total do
 		local beams, nodes = set.parts[p][1], set.parts[p][2]
 		for i = 1, #nodes - 3, 4 do
-			local problem = pointProblem(nodes[i], nodes[i + 1], nodes[i + 2], nodes[i + 3], MAX_SHAPE_OFFSET)
+			local problem = pointProblem(nodes[i], nodes[i + 1], nodes[i + 2], nodes[i + 3])
 			if problem then return problem end
 		end
 		for i = 1, #beams - 3, 4 do
@@ -478,17 +468,10 @@ local function setProblem(set)
 	return nil
 end
 
--- Ordinary dents: their own points moved, their beams set, as they come.
-local function applyDents(beams, nodes)
-	local fr = carFrame()
-	if fr then placePoints(fr, nodes, MAX_OFFSET) end
-	setBeams(beams)
-end
-
 local function applyHeldDents()
 	local held = heldDents
 	heldDents = {}
-	for _, d in ipairs(held) do applyDents(d[1], d[2]) end
+	for _, beams in ipairs(held) do setBeams(beams) end
 end
 
 -- An incomplete set is never applied: the copy is still waiting for the owner's answer
@@ -513,7 +496,7 @@ local function applySet()
 	local set = pendingSet
 	pendingSet = nil
 	reported = {}
-	for p = 1, set.total do placePoints(fr, set.parts[p][2], MAX_SHAPE_OFFSET) end
+	for p = 1, set.total do placePoints(fr, set.parts[p][2]) end
 	for p = 1, set.total do setBeams(set.parts[p][1]) end
 	obj:commitLoad()
 	reportsChanged = true
@@ -542,7 +525,8 @@ end
 
 -- Applies the owner's damage: beams is {id, rest length, broken 0/1, deformation, ...},
 -- nodes {id, x, y, z, ...} in the car's own frame. cleared = 1 when the owner reset or
--- repaired the car. part and parts number a part of the owner's whole shape.
+-- repaired the car. part and parts number a part of the owner's whole shape, the only
+-- message whose points are placed: ordinary dents set their beams as they come.
 local function applyDamage(cleared, beams, nodes, part, parts)
 	if role ~= "copy" then return end
 	heard = true
@@ -564,9 +548,9 @@ local function applyDamage(cleared, beams, nodes, part, parts)
 	if part ~= nil or parts ~= nil then
 		receivePart(beams, nodes, part, parts)
 	elseif pendingSet then
-		table.insert(heldDents, {beams, nodes})
+		table.insert(heldDents, beams)
 	else
-		applyDents(beams, nodes)
+		setBeams(beams)
 	end
 end
 
@@ -587,7 +571,8 @@ local function copyCheck()
 	if checksOver >= RESYNC_CHECKS and sinceResync >= RESYNC_COOLDOWN then
 		checksOver = 0
 		sinceResync = 0
-		obj:queueGameEngineLua(string.format("mileage_damageSync.resetCopy(%d,1)", obj:getID()))
+		-- Counted in full for the log, which says how far the copy had drifted.
+		obj:queueGameEngineLua(string.format("mileage_damageSync.resetCopy(%d,1,%d)", obj:getID(), disagreeingBeams()))
 	end
 end
 

@@ -275,10 +275,11 @@ local function rxCareerDamageRequest(data)
 	if veh then veh:queueLuaCommand("mileageDamage.answerFull()") end
 end
 
--- From a copy's vehicle Lua: it disagrees with its owner (wantFull = 1), or the owner
--- reset it and it still carries damage (wantFull = 0). The copy is reset where it is, as
--- BeamMP applies another player's reset, and asks the owner for full damage if needed.
-local function resetCopy(gameVehicleID, wantFull)
+-- From a copy's vehicle Lua: it disagrees with its owner on `beams` beams (wantFull = 1),
+-- or the owner reset it and it still carries damage (wantFull = 0). The copy is reset
+-- where it is, as BeamMP applies another player's reset, and asks the owner for full
+-- damage if needed.
+local function resetCopy(gameVehicleID, wantFull, beams)
 	if roles[gameVehicleID] ~= "copy" then return end
 	local veh = be:getObjectByID(gameVehicleID)
 	local serverVehicleID = MPVehicleGE.getServerVehicleID(gameVehicleID)
@@ -290,7 +291,11 @@ local function resetCopy(gameVehicleID, wantFull)
 	veh:setPositionRotation(pos.x, pos.y, pos.z, rot.x, rot.y, rot.z, rot.w)
 	veh:resetBrokenFlexMesh()
 	if wantFull == 1 then
-		log("I", logTag, "copy of " .. serverVehicleID .. " disagreed with its owner - reset and resynced")
+		local on = ""
+		if type(beams) == "number" and beams >= 1 then
+			on = string.format(" on %d beam%s", beams, beams == 1 and "" or "s")
+		end
+		log("I", logTag, "copy of " .. serverVehicleID .. " disagreed with its owner" .. on .. " - reset and resynced")
 		requestFull(gameVehicleID, serverVehicleID)
 	end
 end
