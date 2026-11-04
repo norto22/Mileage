@@ -2505,3 +2505,52 @@ test("a car without latch groups, or without the game's controller module, sends
 		same(m[1].l, nil, "no latch list")
 	end
 end)
+
+test("a copy reset in place while its owner's door is open opens that door again, the car not reset twice", function()
+	local owner, copy = twoGames({latches = LATCHES})
+	owner.latch.door_FL = "detached"
+	step(4)
+	same(copy.latch.door_FL, "detached", "the door open on the copy, as on the owner")
+	copy.reset()
+	same(copy.latch.door_FL, "attached", "the game's reset shut it")
+	step(3)
+	same(copy.latch.door_FL, "detached", "opened again to the owner's state")
+	same(copy.latchSets[#copy.latchSets], "door_FL=detached", "through the game's own latch control")
+	same(copy.veh.resets, 0, "the copy is not reset for it")
+end)
+
+test("a car of 64 latch groups shares every one, group 64 included; a car of 65 shares none, with one warning", function()
+	local names = {}
+	for i = 1, 64 do names[i] = string.format("latch%02d", i) end
+	local owner, copy = twoGames({latches = names})
+	step(2.5)
+	owner.latch.latch64 = "detached"
+	step(1.5)
+	same(copy.latch.latch64, "detached", "the 64th group opened on the copy")
+	same(table.concat(copy.latchSets, " "), "latch64=detached", "and nothing else set")
+	same(countLines(logs, "latch"), 0, "no latch warning for 64 groups")
+
+	names[65] = "latch65"
+	local car = ownerCar({latches = names})
+	tick(car, 2)
+	for _, before in ipairs(takeMessages(car)) do same(before.l, nil, "no latch list in the announcement") end
+	dent(car, 7, 0.8)
+	tick(car)
+	local m = takeMessages(car)
+	same(#m, 1, "the dent")
+	same(m[1].l, nil, "no latch list from a car of 65 groups")
+	same(countLines(logs, "this car has 65 latch groups (limit 64); its latches are not shared"), 1, "warned once")
+end)
+
+test("the receiving game refuses a latch list of more pairs than groups, or a negative number, before the copy sees it", function()
+	local owner, copy, owners, copies = twoGames({latches = LATCHES})
+	step(2.5)
+	for i, list in ipairs({"[3,1,0,2,0,3,0,1,1]", "[3,-1,0]", "[-3,1,0]"}) do
+		local len = 0.5 + i / 100
+		deliver(copies, string.format('{"v":"0-0","c":0,"b":[7,%.2f,0,0.3],"n":[],"l":%s}', len, list))
+		same(copy.restLen[7], tonumber(string.format("%.2f", len)), list .. ": the beam applied")
+	end
+	same(#copy.latchSets, 0, "no latch set")
+	same(countLines(logs, "a latch list for 0-0 was not in the expected form"), 1, "the receiving game's warning, once")
+	same(countLines(logs, "refused another player's latch list"), 0, "none reached the copy")
+end)
