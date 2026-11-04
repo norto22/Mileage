@@ -73,11 +73,18 @@ local function requestProblem(name)
 	return nil
 end
 
+-- Why name cannot be challenged to any race by this player, or nil.
+local function rivalProblem(name)
+	if features and not features.allowRacing then return "Racing is switched off on this server." end
+	if name == nickname() then return "You cannot race yourself." end
+	if not findPlayer(name) then return name .. " is not in this session." end
+	return nil
+end
+
 -- {ok, why, distance, start, finish} for a race against name.
 local function raceCheck(name)
-	if features and not features.allowRacing then return {ok = false, why = "Racing is switched off on this server."} end
-	if name == nickname() then return {ok = false, why = "You cannot race yourself."} end
-	if not findPlayer(name) then return {ok = false, why = name .. " is not in this session."} end
+	local rival = rivalProblem(name)
+	if rival then return {ok = false, why = rival} end
 	local race = streetRace()
 	if not race or type(race.checkStart) ~= "function" then
 		return {ok = false, why = "Racing is not available in this game."}
@@ -90,9 +97,8 @@ end
 -- Why this player cannot challenge name to a drag race, or nil: no route is needed, the
 -- race is the pair's next run together at the strip.
 local function dragProblem(name)
-	if features and not features.allowRacing then return "Racing is switched off on this server." end
-	if name == nickname() then return "You cannot race yourself." end
-	if not findPlayer(name) then return name .. " is not in this session." end
+	local rival = rivalProblem(name)
+	if rival then return rival end
 	local race = streetRace()
 	if not race or type(race.eligibility) ~= "function" then return "Racing is not available in this game." end
 	return (race.eligibility())

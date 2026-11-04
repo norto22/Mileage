@@ -1514,6 +1514,11 @@ local function isDrag(race)
 	return race ~= nil and race.kind == "drag"
 end
 
+-- How the race's money is labelled in a player's history.
+local function raceWord(race)
+	return isDrag(race) and "Drag race" or "Race"
+end
+
 -- A drag race's messages go to the games' drag cards, a street race's to the race panel.
 local function sendRace(name, message)
 	local id = playerIdByName(name)
@@ -1535,7 +1540,7 @@ end
 -- {role = {to, amount, label}} for the race's decision.
 local function payoutsFor(race)
 	local payouts = {}
-	local what = isDrag(race) and "Drag race" or "Race"
+	local what = raceWord(race)
 	if race.decision == "refund" then
 		for name, amount in pairs(race.held) do
 			payouts["refund:" .. name] = {to = name, amount = amount,
@@ -1730,7 +1735,7 @@ Money.startRace = function(offer)
 	if race.stake > 0 then
 		for _, name in ipairs({race.a, race.b}) do
 			startTransfer({kind = "stake", from = name, to = SERVER_PARTY, amount = race.stake,
-				takeLabel = (isDrag(race) and "Drag race" or "Race") .. " stake vs " .. otherRacer(race, name),
+				takeLabel = raceWord(race) .. " stake vs " .. otherRacer(race, name),
 				race = race.id, role = "stake:" .. name})
 		end
 	else
@@ -2430,7 +2435,6 @@ end
 
 Money.dragMoneyTick = dragMoneyTick
 Money.dragMoneyPlayerLeft = dragMoneyPlayerLeft
-Money.clearDragRuns = function() dragRuns = {} end
 end
 
 --== Leaderboard =============================================================
