@@ -2190,8 +2190,9 @@ end
 -- did not finish always last. The run is decided once every racer reported or left, or
 -- DECIDE_SECONDS after the green. A racer leaving or the leader ending the run after the
 -- green never decides it early. The owner's prize (dragRacePrize) is paid to the winner of
--- every decided run, with no wait; a pair holding a staked drag race (the Races section,
--- kind "drag") settles it with this run.
+-- a decided run, at most once per drag wait (dragRacePrizeCooldownMinutes) for the same two
+-- racers; a pair holding a staked drag race (the Races section, kind "drag") settles it
+-- with this run.
 --
 -- dragRuns[run] = {id, strip, names = {a, b}, ids = {[name] = playerId}, lanes = {[name] =
 -- lane}, dragType, startedAt, staged = {[name] = true}, green, counts, race, reports =

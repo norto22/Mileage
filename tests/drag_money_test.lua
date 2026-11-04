@@ -1,6 +1,7 @@
 -- Drag money: the server decides a two-player drag run from the strip leader's start and
 -- green and each racer's own reports, by the game's heads-up or bracket rule, and pays the
--- owner's drag prize to the winner of every decided run. Only a run both racers' games
+-- owner's drag prize to the winner of a decided run, at most once per drag wait for the same
+-- two racers. Only a run both racers' games
 -- confirmed, at the server's own copy of the strip, counts. Every case checks the money in
 -- the players' saves.
 
