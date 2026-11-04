@@ -515,6 +515,36 @@ test("#24: a better sample replaces the stored one at any age", function()
 	same(sync.getOffsetInfo(5).samples, 2, "samples counted")
 end)
 
+-- A probe to peer 5 at time t that is not answered yet; returns its token.
+local function unanswered(sync, t)
+	game.now = START + t
+	sent = {}
+	sync.probe(5)
+	local token = sent[1] and sent[1].data.token
+	expect(token, "no probe sent at " .. t)
+	return token
+end
+
+test("#25: a check unanswered for 30 s is dropped once the next goes out, and its late answer records nothing", function()
+	local sync = clock()
+	local first = unanswered(sync, 0)
+	unanswered(sync, 40)
+	game.now = START + 40.1
+	sync.onMileageDragMessage("mileageClockPong", 5, {token = first, t1 = START + 70})
+	same(sync.getOffsetInfo(5), nil, "estimate from the dropped check")
+end)
+
+test("#25: a check answered within 30 s still counts after a newer check has gone out", function()
+	local sync = clock()
+	local first = unanswered(sync, 0)
+	unanswered(sync, 20)
+	game.now = START + 20.2
+	sync.onMileageDragMessage("mileageClockPong", 5, {token = first, t1 = START + 10})
+	local info = sync.getOffsetInfo(5)
+	expect(info, "no estimate from the check answered after 20.2 s")
+	expect(math.abs(info.rtt - 20.2) < 1e-6, "stored round trip: " .. tostring(info.rtt))
+end)
+
 --== edges of the strip routing and the clock age =============================
 
 test("#18: a race id that is not text, or does not start with a known strip and a dash, has no strip", function()

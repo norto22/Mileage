@@ -600,6 +600,11 @@ local function onJoin(playerId, data)
 	if not existing then
 		log("I", logTag, string.format("player %s joined strip '%s' in lane %s",
 			tostring(playerId), data.stripId, tostring(data.lane)))
+		-- Check their clock now: a run can start the moment a second player arrives, and
+		-- this machine maps their finish, so the offset has to be here before staging ends.
+		-- The leader's own heartbeat comes back through the relay; it needs no check.
+		local sync = multiplayer_synclib
+		if playerId ~= localPlayerId() and sync and sync.probe then sync.probe(playerId) end
 	end
 end
 
@@ -763,6 +768,30 @@ local function recipientsFor(stripId)
 end
 
 M.recipientsFor = recipientsFor
+
+-- Reused by clockCheckTargets, so the clock loop builds no table each frame.
+local clockTargets = {}
+
+--- The players this machine checks clocks with: everyone at each strip it leads, and the
+--- racers of a run it is running there (a racer who drove off after finishing is still
+--- in the run), never itself. Only the leader maps finish times, so only it needs the
+--- offsets; a machine that leads no strip gets an empty set and checks nobody.
+function M.clockCheckTargets()
+	for playerId in pairs(clockTargets) do clockTargets[playerId] = nil end
+	for stripId, players in pairs(presence) do
+		if isAuthorityFor(stripId) then
+			for playerId in pairs(players) do clockTargets[playerId] = true end
+		end
+	end
+	for stripId, run in pairs(runs) do
+		if isAuthorityFor(stripId) then
+			for playerId in pairs(run.racers) do clockTargets[playerId] = true end
+		end
+	end
+	local own = localPlayerId()
+	if own ~= nil then clockTargets[own] = nil end
+	return clockTargets
+end
 
 --- The strip a race belongs to, from its id ("<stripId>-<number>", see startRace), or nil.
 ---

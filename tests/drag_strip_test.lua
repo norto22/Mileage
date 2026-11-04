@@ -246,6 +246,10 @@ local function newWorld(opts)
 	jsonEncode = function(t) return t end
 	jsonDecode = function(t) return t end
 
+	-- The clock checks and BeamMP's player list are loaded only by the clock tests.
+	multiplayer_synclib = nil
+	MPVehicleGE = nil
+
 	gameplay_drag_core = newCore()
 	gameplay_drag_phaseHandlers = newPhaseHandlers()
 	gameplay_drag_mpDragHandlers = newHandlers()
@@ -310,6 +314,7 @@ local function runTo(untilSeconds)
 		pump()
 		world.lobby.onUpdate(0.5)
 		world.drag.onUpdate()
+		if world.clocks then multiplayer_synclib.onUpdate() end
 		pump()
 	end
 end
@@ -1331,4 +1336,130 @@ test("an out notice passed on by anyone but the leader, or for another run, does
 	gameplay_drag_core.getRaceState("A-5").finishTimes = {[1] = 11.2}
 	extensions.hook("onDragMPTimeslipRequested")
 	same(world.finalized, 0, "timeslips built while the other car may still finish")
+end)
+
+--== #25: clock checks only between the leader and the players at its strip ======
+
+local SYNCLIB = "Resources/Client/Mileage/lua/ge/extensions/multiplayer/synclib.lua"
+
+-- The strip world with the clock checks loaded and players 1..count in the session.
+local function clockWorld(opts, count)
+	newWorld(opts)
+	local players = {}
+	for id = 1, count or 2 do players[id] = {playerID = id, name = "P" .. id} end
+	MPVehicleGE = {getPlayers = function() return players end}
+	multiplayer_synclib = dofile(SYNCLIB)
+	table.insert(world.loaded, multiplayer_synclib)
+	world.clocks = true
+end
+
+local function pingsTo(playerId)
+	local out = {}
+	for _, m in ipairs(wireNamed("mileageClockPing")) do
+		if recipients(m) == tostring(playerId) then table.insert(out, m) end
+	end
+	return out
+end
+
+local function targetList()
+	local ids = {}
+	for id in pairs(world.lobby.clockCheckTargets()) do table.insert(ids, tostring(id)) end
+	table.sort(ids)
+	return table.concat(ids, ",")
+end
+
+-- The other player answers a clock check with their clock `ahead` seconds ahead of ours,
+-- after `rtt` seconds on the wire.
+local function answer(playerId, ping, rtt, ahead)
+	world.now = world.now + rtt / 2
+	local t1 = world.now + ahead
+	world.now = world.now + rtt / 2
+	fromPlayer(playerId, "mileageClockPong", {token = ping.data.token, t1 = t1})
+end
+
+test("#25: a player arriving at the leader's strip is checked in that frame, and a heartbeat sends no extra check", function()
+	clockWorld(nil, 2)
+	runTo(1)
+	same(#pingsTo(2), 0, "checks before they arrive")
+	otherAt(2, 2)
+	same(#pingsTo(2), 1, "checks the moment they arrive")
+	runTo(6)
+	same(#pingsTo(2), 1, "checks after their heartbeat at 5 s")
+	runTo(11.5)
+	same(#pingsTo(2), 2, "checks once they have been there 10 s")
+	same(#pingsTo(ME), 0, "checks this game sent itself")
+end)
+
+test("#25: the leader's targets are the players at its strip and its run's racers, never itself", function()
+	clockWorld(nil, 3)
+	runTo(1)
+	same(targetList(), "", "targets with only this player at the strip")
+	otherAt(2, 2)
+	same(targetList(), "2", "targets with player 2 at the strip")
+	twoPlayersRunning()
+	gameplay_drag_core.getRaceState(world.lobby.getRun("A").raceId).finishTimes = {[2] = 12.3}
+	otherLeaves(2)
+	runTo(world.now + 1)
+	same(world.lobby.getRun("A").step, "running", "the run goes on")
+	same(targetList(), "2", "targets once a racer still in the run has left the strip")
+end)
+
+test("#25: a game that does not lead the strip has no targets and sends no check, and still answers one", function()
+	clockWorld({leader = 2}, 3)
+	runTo(1)
+	otherAt(3, 2)
+	runTo(30)
+	same(targetList(), "", "targets")
+	same(#wireNamed("mileageClockPing"), 0, "checks sent")
+	fromPlayer(2, "mileageClockPing", {token = "2-1"})
+	local pongs = wireNamed("mileageClockPong")
+	same(#pongs, 1, "answers sent")
+	same(recipients(pongs[1]), "2", "answered to")
+end)
+
+test("#25 oracle: nobody at a strip in an 8-player session: no clock check in 60 s", function()
+	clockWorld(nil, 8)
+	world.pos = {0, -500, 0}
+	runTo(60)
+	same(world.lobby.getLocalStripId(), nil, "this player's strip")
+	same(#wireNamed("mileageClockPing"), 0, "checks sent")
+	clockWorld({leader = 2}, 8)
+	world.pos = {0, -500, 0}
+	runTo(60)
+	same(#wireNamed("mileageClockPing"), 0, "checks sent by a game that leads nothing")
+end)
+
+test("#25: a game taking over the strip checks each player there as they re-announce, and stops when it hands it on", function()
+	clockWorld({leader = 3}, 3)
+	runTo(1)
+	otherAt(2, 2)
+	runTo(4)
+	same(#wireNamed("mileageClockPing"), 0, "checks while another player leads")
+	setLeader(ME)
+	otherAt(2, 2)
+	same(#pingsTo(2), 1, "checks to player 2 on their re-announcement")
+	setLeader(3)
+	same(targetList(), "", "targets once the strip is handed on")
+	runTo(30)
+	same(#pingsTo(2), 1, "checks after handing the strip on")
+end)
+
+test("#25 oracle: two players meet at a strip and the finish maps through a check made after arrival, not the race start", function()
+	clockWorld(nil, 2)
+	runTo(1)
+	local arrivedAt = world.now
+	otherAt(2, 2)
+	local ping = pingsTo(2)[1]
+	expect(ping, "no check sent on arrival")
+	answer(2, ping, 0.1, 500)
+	runTo(world.now + 1)
+	same(#world.sessions, 1, "runs started")
+	local info = multiplayer_synclib.getOffsetInfo(2)
+	expect(info, "no clock estimate for player 2")
+	expect(world.now - info.age >= arrivedAt, "the estimate's sample predates the arrival")
+	-- The race-start anchor would give another answer: prove it is not the one used.
+	world.drag.getRaceEntry = function() return {syncRaceStart = 0, localRaceStart = 0} end
+	local finish = world.now + 500 + 11.5
+	local mapped = multiplayer_synclib.mapOtherClock(2, finish)
+	expect(math.abs(mapped - (world.now + 11.5)) < 1e-6, "mapped finish: " .. tostring(mapped))
 end)
