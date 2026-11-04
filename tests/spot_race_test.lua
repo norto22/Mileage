@@ -664,10 +664,16 @@ end)
 
 --== the starter's opponents ======================================================
 
--- A road node at each checkpoint of the route, named cp1, cp2, ...
+-- A road node at each checkpoint of the route, named cp1, cp2, ..., each joined by road
+-- to the next, and the last to the first on a route of more than one lap.
 local function roadsAt(world, r)
 	world.roadNodes = {}
-	for i, checkpoint in ipairs(r.checkpoints) do world.roadNodes["cp" .. i] = {pos = copy(checkpoint.pos)} end
+	local n = #r.checkpoints
+	for i, checkpoint in ipairs(r.checkpoints) do
+		local links = {}
+		if i < n then links["cp" .. (i + 1)] = {} elseif r.laps > 1 or r.closed then links.cp1 = {} end
+		world.roadNodes["cp" .. i] = {pos = copy(checkpoint.pos), links = links}
+	end
 end
 
 -- The game's class lookup and class grouping on p's game: class B, two cars, push 0.8.
@@ -746,6 +752,14 @@ World.test("the set-up card says the rivals may not match a car changed since it
 	world:as(ann, function() mileage_spotRace.openSetup("city_race_1") end)
 	same(lastCard(world, ann, "setup").untested, false, "not a career car: nothing to say")
 end)
+
+local function driveCommand(car)
+	local drive = nil
+	for _, cmd in ipairs(car.commands) do
+		if cmd:find("ai.driveUsingPath", 1, true) then drive = cmd end
+	end
+	return drive
+end
 
 local function spawned(world, p)
 	local list = {}
@@ -827,6 +841,32 @@ World.test("on a one-lap route the opponents drive on past the finish instead of
 	end
 	expect(drive:find('{"cp1", "cp2", "cp3", "cp4", "cp4+1", "cp4+2"}', 1, true), "the road beyond the finish follows it")
 	expect(drive:find("noOfLaps = 1", 1, true), "one lap")
+end)
+
+-- The highway race's road with checkpoint 2's road point on no road: checkpoint 1's leads
+-- on to checkpoint 3's, as a road point the nearest-road lookup picks can be one no road
+-- joins.
+local function roadWithLonePoint(world)
+	local r = route("highway_race")
+	roadsAt(world, r)
+	world.roadNodes.cp1.links = {cp3 = {}}
+	world.roadNodes.cp2.links = {}
+	return r
+end
+
+World.test("an opponent whose road points include one no road joins still drives off at the green", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	roadWithLonePoint(world)
+	withClass(ann)
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 1, {})
+	local car = spawned(world, ann)[1].car
+	local grid = copy(car.pos)
+	world:advance(6)
+	expect(driveCommand(car), "the opponent was sent racing")
+	world:advance(10)
+	expect(metres(car.pos, grid) > 3, "the opponent left its grid place: " .. tostring(driveCommand(car)))
+	same(car.routeFailed, false, "the game's AI built its route")
 end)
 
 World.test("an opponent that cannot spawn, or never gets a server id, is left out and the race goes on", function(world)
@@ -953,14 +993,6 @@ local function raceRoadMap(world, ann, r, detour)
 			if rt.id == r.id then rt.walls = walls end
 		end
 	end)
-end
-
-local function driveCommand(car)
-	local drive = nil
-	for _, cmd in ipairs(car.commands) do
-		if cmd:find("ai.driveUsingPath", 1, true) then drive = cmd end
-	end
-	return drive
 end
 
 World.test("the racer's line follows the race road round a wall to the next checkpoint, one-way rules off", function(world)
