@@ -316,6 +316,56 @@ test("Race sends the stake, and $0 is a race with no stake", () => {
 	assert.ok(app.lua.includes("mileage_offers.race(" + b64("Bob") + ", 0)"), "race sent");
 });
 
+test("Drag race sends the stake to mileage_offers.dragRace and says where, the limit and the server prize", () => {
+	const app = menuApp();
+	rightClick(app, 2);
+	app.scope.emit("MileagePlayerActions", {name: "Bob", race: {ok: true, stakeMax: 10000},
+		drag: {ok: true, stakeMax: 10000, prize: 500, minutes: 15}, pay: {ok: true}, request: {ok: true}});
+	app.page("pl-context-drag").onclick();
+	assert.strictEqual(app.page("pl-context-form-title").textContent, "Drag race Bob", "title");
+	assert.strictEqual(app.page("pl-context-amount-label").textContent, "Stake (both put in, winner takes all)", "label");
+	assert.strictEqual(app.page("pl-context-amount").value, "0", "stake starts at $0");
+	assert.strictEqual(app.page("pl-context-form-info").textContent,
+		"At the drag strip. Up to $10,000 on this server · server prize $500", "info");
+	app.page("pl-context-amount").value = "2000";
+	app.page("pl-context-send").onclick();
+	assert.ok(app.lua.includes("mileage_offers.dragRace(" + b64("Bob") + ", 2000)"), "drag race sent");
+});
+
+test("Drag race with no server prize says so, and a stake above the limit is not sent", () => {
+	const app = menuApp();
+	rightClick(app, 2);
+	app.scope.emit("MileagePlayerActions", {name: "Bob", drag: {ok: true, stakeMax: 1000, prize: 0},
+		pay: {ok: true}, request: {ok: true}});
+	app.page("pl-context-drag").onclick();
+	assert.strictEqual(app.page("pl-context-form-info").textContent,
+		"At the drag strip. Up to $1,000 on this server · no server prize", "no prize");
+	const before = app.lua.length;
+	typeAndSend(app, "drag", "2000");
+	assert.strictEqual(app.page("pl-context-error").textContent, "Above this server's limit of $1,000.");
+	assert.strictEqual(app.lua.length, before, "nothing sent");
+});
+
+test("Drag race unavailable shows its reason and does not open", () => {
+	const app = menuApp();
+	rightClick(app, 2);
+	app.scope.emit("MileagePlayerActions", {name: "Bob", drag: {ok: false, why: "Racing is switched off on this server."},
+		pay: {ok: true}, request: {ok: true}});
+	assert.strictEqual(app.page("pl-context-drag").disabled, true, "disabled");
+	assert.strictEqual(app.page("pl-context-drag-why").textContent, "Racing is switched off on this server.");
+	app.page("pl-context-drag").onclick();
+	assert.notStrictEqual(app.page("pl-context-form").style.display, "block", "form not opened");
+	assert.ok(/id="pl-context-race"[\s\S]*id="pl-context-drag"[\s\S]*id="pl-context-pay"/.test(TEMPLATE),
+		"Drag race… between Race… and Pay…");
+});
+
+test("disabled menu entries are #bbb in both looks, readable on the menu's background", () => {
+	for (const sheet of ["app.css", "redesign.css"]) {
+		const css = fs.readFileSync("Resources/Client/Mileage/ui/modules/apps/Mileage-PlayerList/" + sheet, "utf8");
+		assert.strictEqual(cssRule(css, "#playerlist-contextmenu button:disabled").color, "#bbb", sheet);
+	}
+});
+
 test("an empty, zero, negative, fractional or non-numeric amount sends nothing and says why", () => {
 	const app = menuApp();
 	rightClick(app, 2);

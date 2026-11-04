@@ -1623,6 +1623,13 @@ local function dragMinutesLeft(live)
 	return math.max(0, math.ceil((live.deadline - signalTimer:GetCurrent()) / 60))
 end
 
+-- The card of a held drag race, with the time left and what is happening at the strip:
+-- note "lined" (their run is out), "ended" (it ended before the green) or nil.
+local function sendToStrip(race, live)
+	sendDrag(race, {phase = "toStrip", minutesLeft = dragMinutesLeft(live), note = live.note,
+		prize = serverNumber("dragRacePrize", 0, 1000000)})
+end
+
 -- The race ends before its countdown: both stakes go back.
 local function callOff(race, why)
 	local live = liveRaces[race.id]
@@ -1682,10 +1689,10 @@ local function beginStart(race)
 	if isDrag(race) then
 		-- Both stakes held: the pair's next run together at the strip decides them.
 		live.phase = "toStrip"
-		live.deadline = signalTimer:GetCurrent() + serverNumber("raceTimeLimitMinutes", 1, 120) * 60
+		live.minutes = serverNumber("raceTimeLimitMinutes", 1, 120)
+		live.deadline = signalTimer:GetCurrent() + live.minutes * 60
 		live.resendAt = signalTimer:GetCurrent() + DRAG_RESEND_SECONDS
-		sendDrag(race, {phase = "toStrip", minutesLeft = dragMinutesLeft(live),
-			prize = serverNumber("dragRacePrize", 0, 1000000)})
+		sendToStrip(race, live)
 		print(string.format("[Mileage] Drag race %s between %s and %s: $%d each held until their next run together",
 			race.id, consoleText(race.a), consoleText(race.b), race.stake))
 		return
@@ -1738,6 +1745,15 @@ local function heldDragRace(a, b)
 		if isDrag(race) and live.phase == "toStrip" and otherRacer(race, a) == b then return race, live end
 	end
 	return nil
+end
+
+-- The Drag money section: a run of a and b started ("lined") or ended before its green
+-- ("ended"). Their held drag race's card says so.
+Money.dragRaceNote = function(a, b, note)
+	local race, live = heldDragRace(a, b)
+	if not race then return end
+	live.note = note
+	sendToStrip(race, live)
 end
 
 -- The Drag money section: a run of a and b went green and counts. Their held drag race,
@@ -2024,12 +2040,11 @@ local function racesTick()
 		if isDrag(race) and liveRaces[id] then
 			if now >= live.deadline then
 				callOff(race, (live.phase == "staking" and "the stakes did not arrive in time")
-					or (live.phase == "toStrip" and "no run together started in time")
+					or (live.phase == "toStrip" and string.format("no run together in %d min", live.minutes))
 					or "the run was not decided")
 			elseif live.phase == "toStrip" and now >= live.resendAt then
 				live.resendAt = now + DRAG_RESEND_SECONDS
-				sendDrag(race, {phase = "toStrip", minutesLeft = dragMinutesLeft(live),
-					prize = serverNumber("dragRacePrize", 0, 1000000)})
+				sendToStrip(race, live)
 			end
 		elseif race and liveRaces[id] then
 			if live.firstReportAt and now - live.firstReportAt >= DECIDE_SECONDS then
@@ -2189,9 +2204,11 @@ local function isTime(n, low, high)
 	return type(n) == "number" and n == n and n >= low and n <= high
 end
 
+-- A run gone before its green. A held drag race of the pair is still held; its card says so.
 local function forget(run, why)
 	dragRuns[run.id] = nil
 	if why then print("[Mileage] Drag run " .. consoleText(run.id) .. " does not count: " .. why) end
+	if Money.dragRaceNote then Money.dragRaceNote(run.names[1], run.names[2], "ended") end
 end
 
 -- The two racers of a start, as {{id, name, lane}...}, or nil when it is not a run of two
@@ -2336,6 +2353,8 @@ function mileageDragRun(player_id, data)
 		dragRuns[run.id] = run
 		-- Finds out now whether the server can read positions, before the green's check.
 		readCars(run.names, DRAG_STRIPS[strip].lanes[1].stage)
+		-- Set by the Races section: a held drag race of this pair is told its run is out.
+		if Money.dragRaceNote then Money.dragRaceNote(run.names[1], run.names[2], "lined") end
 		return
 	end
 	local run = dragRuns[message.run]

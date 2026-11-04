@@ -187,9 +187,12 @@ function M.callOff()
 	return true
 end
 
---- Sends the last drag race card to the prompts app, after a UI reload.
+-- The phases of a drag race still under way; a result or a call off is shown once.
+local UNDER_WAY = {staking = true, toStrip = true, racing = true}
+
+--- Sends the drag race under way to the prompts app, after a UI reload.
 function M.sendState()
-	if lastCard then guihooks.trigger("MileageDragRace", lastCard) end
+	if lastCard and UNDER_WAY[lastCard.phase] then guihooks.trigger("MileageDragRace", lastCard) end
 end
 
 local function rxMileageDragRace(data)

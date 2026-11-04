@@ -43,6 +43,23 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 				accept: "Accept",
 			};
 		}
+		if (offer.kind === "drag") {
+			var dragStake = Number(offer.amount) || 0;
+			var dragRows = [
+				{label: "Where", value: "The drag strip, within " + (Number(offer.minutes) || 15) + " min"},
+				{label: "Stake", value: dragStake > 0 ? moDollars(dragStake) + " each" : "No stake"},
+			];
+			var dragWins = moWinnerGets(dragStake * 2, Number(offer.prize) || 0, " server prize");
+			if (dragWins) dragRows.push({label: "Winner gets", value: dragWins});
+			return {
+				title: from + " challenges you to a drag race",
+				rows: dragRows,
+				note: dragStake > 0 ?
+					"Your next run together decides it · after the green, leaving or jumping the start loses your stake" :
+					"Your next run together decides it",
+				accept: "Accept",
+			};
+		}
 		return {
 			title: from + " asks you for " + moDollars(offer.amount),
 			rows: [],
@@ -200,6 +217,112 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 
 	$scope.closeRace = function () {
 		$scope.race = null;
+	};
+
+	//== a drag race for money ===================================================
+	// mileage/dragMoney.lua sends MileageDragRace: a staked drag race's "staking", "toStrip"
+	// (both stakes held until the pair's next run together; note "lined" once their run is
+	// out, "ended" when it ended before the green), "racing" and "calledOff", and the
+	// "result" of a staked run or of a plain run that paid the server's prize.
+
+	$scope.drag = null;
+
+	function dragTimeText(seconds) {
+		return Number(seconds).toFixed(3) + " s";
+	}
+
+	function upperFirst(text) {
+		text = String(text || "");
+		return text.charAt(0).toUpperCase() + text.slice(1);
+	}
+
+	// The time row of one racer: their time, or why they have none.
+	function dragTimeRow(data, name, label, against) {
+		var times = data.times || {}, outcomes = data.outcomes || {};
+		var mine = times[name];
+		if (typeof mine === "number") {
+			var gap = typeof against === "number" && mine > against ? " (+" + (mine - against).toFixed(3) + " s)" : "";
+			return {label: label, value: dragTimeText(mine) + gap};
+		}
+		var left = data.why === "left" && data.winner && data.winner !== name;
+		var self = name === data.you;
+		if (left) return {label: label, value: self ? "did not finish: you left the race" : "left the race"};
+		if (outcomes[name] === "jumped") return {label: label, value: "jumped the start"};
+		return {label: label, value: "did not finish"};
+	}
+
+	function dragResultView(data) {
+		var you = String(data.you || ""), other = String(data.other || "");
+		var stake = Number(data.stake) || 0, pot = Number(data.pot) || 0, prize = Number(data.prize) || 0;
+		var times = data.times || {};
+		var staked = typeof data.race === "string";
+		var rows = [];
+		if (!data.winner) {
+			if (stake > 0) rows.push({label: "Stake", value: moDollars(stake) + " back to you"});
+			var why = data.why === "tie" ? "A dead heat" : "Neither car crossed the finish line";
+			return {title: "No winner", rows: rows, close: true,
+				note: stake > 0 ? why + " · both stakes go back." : why + "."};
+		}
+		if (staked) {
+			rows.push(dragTimeRow(data, you, "Your time", times[other]));
+			rows.push(dragTimeRow(data, other, other, times[you]));
+		} else {
+			rows.push({label: "vs", value: other});
+		}
+		if (data.winner === you) {
+			var parts = [];
+			if (pot > 0) parts.push(moDollars(pot) + " stakes");
+			if (prize > 0) parts.push(moDollars(prize) + " prize");
+			if (parts.length > 0) rows.push({label: "You get", value: parts.join(" + ")});
+			return {title: pot + prize > 0 ? "You won " + moDollars(pot + prize) : "You won", rows: rows, close: true};
+		}
+		if (stake > 0) rows.push({label: "You lost", value: "your " + moDollars(stake) + " stake"});
+		return {title: String(data.winner) + " won the drag race", rows: rows, close: true};
+	}
+
+	function dragView(data) {
+		var other = String(data.other || "");
+		var stake = Number(data.stake) || 0, prize = Number(data.prize) || 0;
+		var title = "Drag race vs " + other;
+		var held = {label: "Stakes held", value: stake > 0 ? moDollars(stake) + " each" : "No stake"};
+		var left = " · " + (Number(data.minutesLeft) || 0) + " min left";
+		switch (data.phase) {
+		case "staking":
+			return {title: title, note: stake > 0 ? "Taking both stakes..." : "Getting ready..."};
+		case "toStrip":
+			var rows = [held];
+			var wins = moWinnerGets(stake * 2, prize, " prize");
+			if (data.note !== "lined" && data.note !== "ended" && wins) rows.push({label: "Winner gets", value: wins});
+			var note = data.note === "lined" ? "This run decides the stakes" :
+				data.note === "ended" ? "That run ended before the green · stakes still held, line up again" :
+				"Meet at the drag strip and line up together";
+			return {title: title, rows: rows, note: note + left,
+				callOff: stake > 0 ? "Call off (stakes back)" : "Call off"};
+		case "racing":
+			return {title: title, rows: [held], note: "This run decides the stakes"};
+		case "calledOff":
+			return {title: "Drag race called off", note: upperFirst(data.why) + ".", close: true,
+				rows: stake > 0 ? [{label: "Stake", value: moDollars(stake) + " back to you"}] : []};
+		case "result":
+			return dragResultView(data);
+		}
+		return null;
+	}
+
+	$scope.$on('MileageDragRace', function (event, data) {
+		if (!data) return;
+		$scope.$evalAsync(function () {
+			var shown = dragView(data);
+			$scope.drag = shown ? {id: data.race, phase: data.phase, view: shown} : null;
+		});
+	});
+
+	$scope.callOffDrag = function () {
+		bngApi.engineLua('if mileage_dragMoney then mileage_dragMoney.callOff() end');
+	};
+
+	$scope.closeDrag = function () {
+		$scope.drag = null;
 	};
 
 	//== racing the traffic car beside you =========================================
@@ -796,6 +919,7 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 
 	bngApi.engineLua('if mileage_offers then mileage_offers.sendState() end');
 	bngApi.engineLua('if mileage_streetRace then mileage_streetRace.sendState() end');
+	bngApi.engineLua('if mileage_dragMoney then mileage_dragMoney.sendState() end');
 	bngApi.engineLua('if mileage_raceEvents then mileage_raceEvents.sendState() end');
 	bngApi.engineLua('if mileage_aiRace then mileage_aiRace.sendState() end');
 	bngApi.engineLua('if mileage_spotRace then mileage_spotRace.sendState() end');
@@ -828,6 +952,13 @@ function moClock(seconds, decimals) {
 
 function moDollars(n) {
 	return "$" + Number(n || 0).toLocaleString("en-US");
+}
+
+// "$4,000 + $500 server prize": the stakes the winner takes and the prize, or "" for neither.
+function moWinnerGets(pot, prize, prizeWord) {
+	var text = pot > 0 ? moDollars(pot) : "";
+	if (prize > 0) text = (text ? text + " + " : "") + moDollars(prize) + prizeWord;
+	return text;
 }
 
 function moKm(metres) {

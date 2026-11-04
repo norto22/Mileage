@@ -109,7 +109,7 @@ World.test("a counted two-player run pays the owner's prize to the faster racer"
 	expect(world:printedMatching("Ann beat Bob, prize $2500") == 1, "console logs the prize")
 end, withPrize)
 
-World.test("the result card reaches the prompts app, and again after a UI reload", function(world)
+World.test("the result card reaches the prompts app once; a UI reload does not bring it back", function(world)
 	local ann, bob = pair(world)
 	local id = run(world, ann, ann, bob)
 	finish(world, ann, id, 1, 11.2)
@@ -118,9 +118,7 @@ World.test("the result card reaches the prompts app, and again after a UI reload
 	same(#shown, 1, "one card on Bob's screen")
 	same(shown[1].winner, "Ann", "who won")
 	world:as(bob, function() mileage_dragMoney.sendState() end)
-	shown = world:ui(bob, "MileageDragRace")
-	same(#shown, 2, "shown again")
-	same(shown[2].phase, "result", "the same card")
+	same(#world:ui(bob, "MileageDragRace"), 1, "not shown again")
 end, withPrize)
 
 World.test("every win pays the prize again, with no wait", function(world)
@@ -467,7 +465,7 @@ World.test("no run together before the time limit gives both stakes back; the ti
 	world:advance(11)
 	same(ann.savedMoney, 10000, "Ann's stake back")
 	same(bob.savedMoney, 10000, "Bob's stake back")
-	same(cards(world, bob, "calledOff")[1].why, "no run together started in time", "why")
+	same(cards(world, bob, "calledOff")[1].why, "no run together in 15 min", "why")
 end)
 
 World.test("a server restart with a held drag race gives both stakes back once", function(world)
@@ -564,6 +562,24 @@ World.test("a staked run: the jumper's faster time loses, the clean finisher tak
 	same(card.times.Ann, 11.6, "Ann's time")
 	same(races(world), 0, "race record gone once paid")
 end, withPrize)
+
+World.test("the held card says when the pair's run is out, when it ended before the green, and again after a UI reload",
+		function(world)
+	local ann, bob = pair(world)
+	staked(world, ann, bob, 1000)
+	local id = run(world, ann, ann, bob, {green = false})
+	local held = cards(world, bob, "toStrip")
+	same(held[#held].note, "lined", "the run is out")
+	send(world, ann, "mileageDragRun", {phase = "ended", run = id})
+	held = cards(world, bob, "toStrip")
+	same(held[#held].note, "ended", "ended before the green")
+	same(held[#held].minutesLeft, 15, "time left")
+	local before = #world:ui(bob, "MileageDragRace")
+	world:as(bob, function() mileage_dragMoney.sendState() end)
+	local shown = world:ui(bob, "MileageDragRace")
+	same(#shown, before + 1, "shown again after a reload")
+	same(shown[#shown].note, "ended", "the same card")
+end)
 
 World.test("a run ended before its green, a green that does not count, or a run with someone else leaves the stakes held",
 		function(world)
