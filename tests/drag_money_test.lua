@@ -928,3 +928,30 @@ for _, data in ipairs({"not json", "[]", "{}", World.encode({race = 5}), World.e
 		same(world:savedTotal(), 18000, "nothing moved")
 	end)
 end
+
+-- A drag Call off names a race the server holds, but it is a street race still taking its
+-- stakes: only a drag race can be called off this way, so the street race goes on.
+World.test("a drag Call off naming a street race still taking its stakes changes nothing", function(world)
+	local ann, bob = pair(world)
+	world.filter = function(m)
+		if m.event == "rxMileageTake" and m.target == bob.id then return "drop" end
+	end
+	ann.route = {x = 0, y = 2400, z = 0}
+	world:as(ann, function() mileage_offers.race("Bob", 1000) end)
+	world:pump()
+	local offer = assert(shownOffer(world, bob), "no street race challenge shown to Bob")
+	world:as(bob, function() mileage_offers.answer(offer.id, true) end)
+	world:pump()
+	local n, race = races(world)
+	same(n, 1, "the street race is held")
+	same(race.kind, nil, "a street race, not a drag race")
+	send(world, ann, "mileageDragCallOff", {race = race.id})
+	send(world, bob, "mileageDragCallOff", {race = race.id})
+	same(races(world), 1, "the street race is still held")
+	local off = 0
+	for _, m in ipairs(world:received(ann, "rxMileageRace")) do
+		if m.phase == "calledOff" then off = off + 1 end
+	end
+	same(off, 0, "not called off")
+	same(#world:received(ann, "rxMileageDragRace"), 0, "no drag card for a street race")
+end)
