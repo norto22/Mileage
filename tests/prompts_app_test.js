@@ -250,6 +250,19 @@ test("the drag card binds every text as text, and the app asks for the drag race
 	assert.ok(!/\{\{/.test(card) && !/ng-bind-html/.test(card), "no interpolated markup");
 });
 
+test("a held drag race with no stake shows no stake, the prize as what the winner gets, and a plain Call off", () => {
+	const {scope} = load();
+	scope.emit("MileageDragRace", Object.assign({}, HELD, {stake: 0}));
+	assert.deepStrictEqual(rows(scope.drag.view), ["Stakes held: No stake", "Winner gets: $500 prize"]);
+	assert.strictEqual(scope.drag.view.callOff, "Call off", "no stakes to give back");
+	scope.emit("MileageDragRace", Object.assign({}, HELD, {stake: 0, prize: 0}));
+	assert.deepStrictEqual(rows(scope.drag.view), ["Stakes held: No stake"], "nothing to win: no Winner gets row");
+	scope.emit("MileageDragRace", {race: "r3", phase: "calledOff", you: "Turbo_Tom", other: "DriftQueen_77", stake: 0,
+		why: "DriftQueen_77 left"});
+	assert.deepStrictEqual(rows(scope.drag.view), [], "no stake back line");
+	assert.strictEqual(scope.drag.view.note, "DriftQueen_77 left.");
+});
+
 test("the countdown shows big, then GO, then the race panel with Give up", () => {
 	const {scope, lua} = load();
 	scope.emit("MileageRace", {phase: "countdown", race: "r1", other: "Alex_Rivera", stake: 1000, count: 2});

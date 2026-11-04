@@ -756,3 +756,175 @@ World.test("a prize under way when the server restarts is paid once", function(w
 	same(ann.savedMoney, 10000 + PRIZE, "given once after the restart")
 	same(prizeLines(ann), 1, "one history line")
 end, withPrize)
+
+--== more edges of a run and a staked race ====================================
+
+World.test("a held pair racing in swapped lanes, Bob in lane 1, still settles their stakes", function(world)
+	local ann = world:join("Ann", 10000)
+	local bob = world:join("Bob", 10000)
+	atStrip(world, ann, 2)
+	atStrip(world, bob, 1)
+	staked(world, ann, bob, 1000)
+	local id = run(world, ann, bob, ann)
+	finish(world, ann, id, 2, 11.2)
+	finish(world, bob, id, 1, 11.9)
+	same(ann.savedMoney, 10000 + 1000 + PRIZE, "Ann takes both stakes and the prize")
+	same(bob.savedMoney, 9000, "Bob loses his stake")
+	same(prizeLines(ann), 1, "the prize once")
+	same(races(world), 0, "race settled")
+end, withPrize)
+
+World.test("a restart after the green, before the result, gives both stakes back once; a finish after it pays nothing",
+		function(world)
+	local ann, bob = pair(world)
+	staked(world, ann, bob, 1000)
+	local id = run(world, ann, ann, bob)
+	world:restart()
+	world:advance(12)
+	same(ann.savedMoney, 10000, "Ann's stake back")
+	same(bob.savedMoney, 10000, "Bob's stake back")
+	finish(world, ann, id, 1, 11.2, {now = true})
+	finish(world, bob, id, 2, 11.9, {now = true})
+	world:advance(80)
+	same(world:savedTotal(), 20000, "nothing more moved")
+	local backs = 0
+	for _, entry in ipairs(ann.history) do if entry.label == "Drag race stake back vs Bob" then backs = backs + 1 end end
+	same(backs, 1, "Ann's stake back once")
+	same(prizeLines(ann), 0, "no prize")
+end, withPrize)
+
+World.test("a staked race with a $0 stake pays the prize once, through the race record", function(world)
+	local ann, bob = pair(world)
+	staked(world, ann, bob, 0)
+	local id = run(world, ann, ann, bob)
+	finish(world, ann, id, 1, 11.2)
+	finish(world, bob, id, 2, 11.9)
+	world:advance(80)
+	same(ann.savedMoney, 10000 + PRIZE, "the prize, not twice")
+	same(prizeLines(ann), 1, "one prize line")
+	same(bob.savedMoney, 10000, "Bob unchanged")
+	local card = lastCard(world, ann)
+	same(card.phase, "result", "result card")
+	same(type(card.race), "string", "the staked race's card")
+end, withPrize)
+
+World.test("from the green on, a leaver or a jumper against a racer who never finishes gives both stakes back",
+		function(world)
+	local ann, bob = pair(world)
+	staked(world, ann, bob, 1000)
+	run(world, ann, ann, bob)
+	world:leave(bob)
+	world:advance(71)
+	world:rejoin(bob)
+	world:advance(12)
+	same(ann.savedMoney, 10000, "Ann did not finish: her stake back, not Bob's")
+	same(bob.savedMoney, 10000, "Bob left, but Ann never finished: his stake back")
+	again(world, ann, bob)
+	staked(world, ann, bob, 1000)
+	local id = run(world, ann, ann, bob)
+	jumped(world, bob, id)
+	world:advance(71)
+	same(ann.savedMoney, 10000, "Ann did not finish")
+	same(bob.savedMoney, 10000, "Bob jumped, but Ann never finished")
+	same(prizeLines(ann) + prizeLines(bob), 0, "no prize")
+end, withPrize)
+
+World.test("bracket: two racers exactly level on the same side of their dials have no winner", function(world)
+	local ann, bob = pair(world)
+	local id = run(world, ann, ann, bob, {dragType = "bracketRace"})
+	finish(world, ann, id, 1, 12.5, {dial = 12.0})
+	finish(world, bob, id, 2, 11.75, {dial = 11.25})
+	world:advance(80)
+	same(world:savedTotal(), 20000, "nothing paid")
+	expect(world:printedMatching("no winner (tie)") == 1, "a tie")
+end, withPrize)
+
+World.test("the prize paid is the setting when the run is decided, not when it started", function(world)
+	local ann, bob = pair(world)
+	local id = run(world, ann, ann, bob)
+	finish(world, ann, id, 1, 11.2)
+	world:setConfig("server", "dragRacePrize", 4000)
+	finish(world, bob, id, 2, 11.9)
+	same(ann.savedMoney, 10000 + 4000, "the prize at the decision")
+end, withPrize)
+
+World.test("malformed drag messages, a green from the other racer and a negative dial change nothing", function(world)
+	local ann, bob = pair(world)
+	local cara = world:join("Cara", 0)
+	local function raw(p, event, data)
+		world:queue({way = "toServer", from = p.id, name = event, data = data})
+		world:pump()
+	end
+	for _, event in ipairs({"mileageDragRun", "mileageDragStaged", "mileageDragResult"}) do
+		raw(ann, event, "not json")
+		raw(ann, event, "[]")
+		raw(ann, event, "")
+	end
+	local bad = {
+		{phase = "start", strip = STRIP, run = 5},
+		{phase = "start", strip = {}, run = STRIP .. "-x"},
+		{phase = "start", strip = STRIP, run = STRIP .. "-" .. string.rep("9", 100),
+			racers = {{id = ann.id, lane = 1}, {id = bob.id, lane = 2}}, dragType = "headsUpRace"},
+		{phase = "start", strip = STRIP, run = STRIP .. "-y", racers = "two", dragType = "headsUpRace"},
+		{phase = "start", strip = STRIP, run = STRIP .. "-z", racers = {{id = "abc", lane = 1}, {id = bob.id, lane = 2}},
+			dragType = "headsUpRace"},
+		{phase = "start", strip = STRIP, run = STRIP .. "-w", racers = {{id = ann.id, lane = 1.5}, {id = bob.id, lane = 2}},
+			dragType = "headsUpRace"},
+		{phase = "green", run = {}},
+		{phase = "fly", run = STRIP .. "-y"},
+	}
+	for _, message in ipairs(bad) do send(world, ann, "mileageDragRun", message) end
+	send(world, ann, "mileageDragResult", {run = 7, outcome = "finished", winTime = 11})
+	-- A started run the other racer greens: not the leader's green, so it never counts.
+	local id = run(world, ann, ann, bob, {green = false})
+	send(world, bob, "mileageDragRun", {phase = "green", run = id})
+	send(world, cara, "mileageDragStaged", {run = id, dragType = "headsUpRace"})
+	world:advance(12)
+	finish(world, ann, id, 1, 11.2, {now = true})
+	world:advance(121)
+	same(world:savedTotal(), 20000, "nothing paid")
+	-- A valid run after all that: Bob's faster report with a negative dial is refused.
+	again(world, ann, bob)
+	id = run(world, ann, ann, bob)
+	world:advance(12)
+	send(world, bob, "mileageDragResult", {run = id, outcome = "finished", winTime = 11.0, dial = -1})
+	send(world, bob, "mileageDragResult", {run = id, outcome = "won", winTime = 11.0})
+	world:drive(ann, FINISH[1].x, FINISH[1].y, FINISH[1].z)
+	send(world, ann, "mileageDragResult", {run = id, outcome = "finished", winTime = 11.2, dial = 0})
+	world:drive(bob, FINISH[2].x, FINISH[2].y, FINISH[2].z)
+	send(world, bob, "mileageDragResult", {run = id, outcome = "finished", winTime = 11.9, dial = 0})
+	same(ann.savedMoney, 10000 + PRIZE, "Ann's 11.2 beats Bob's one valid report")
+	same(bob.savedMoney, 10000, "Bob unchanged")
+	same(cara.savedMoney, 0, "Cara unchanged")
+end, withPrize)
+
+World.test("stakes that do not arrive in time call the drag race off, with both stakes back", function(world)
+	local ann, bob = pair(world)
+	world.filter = function(m)
+		if m.event == "rxMileageTake" and m.target == bob.id then return "drop" end
+	end
+	staked(world, ann, bob, 1000)
+	world:advance(16)
+	world.filter = nil
+	world:advance(30)
+	local off = cards(world, ann, "calledOff")
+	expect(off[1], "called off")
+	same(off[1].why, "the stakes did not arrive in time", "why")
+	same(ann.savedMoney, 10000, "Ann's stake back")
+	same(bob.savedMoney, 10000, "Bob's stake not kept")
+	same(races(world), 0, "race record gone")
+end, withPrize)
+
+-- A Call off without a race id, or with one that is not text, changes nothing and raises
+-- no error in the server's handler; a held race stays held.
+for _, data in ipairs({"not json", "[]", "{}", World.encode({race = 5}), World.encode({race = true})}) do
+	World.test("a Call off with a malformed body changes nothing: " .. data, function(world)
+		local ann, bob = pair(world)
+		staked(world, ann, bob, 1000)
+		world:queue({way = "toServer", from = ann.id, name = "mileageDragCallOff", data = data})
+		local lines = world:serverOutput(function() world:pump() end)
+		same(countLines(lines, "error"), 0, "no error")
+		same(races(world), 1, "still held")
+		same(world:savedTotal(), 18000, "nothing moved")
+	end)
+end

@@ -1511,7 +1511,7 @@ local function otherRacer(race, name)
 end
 
 local function isDrag(race)
-	return race ~= nil and race.kind == "drag"
+	return type(race) == "table" and race.kind == "drag"
 end
 
 -- How the race's money is labelled in a player's history.

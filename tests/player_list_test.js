@@ -359,6 +359,26 @@ test("Drag race unavailable shows its reason and does not open", () => {
 		"Drag race… between Race… and Pay…");
 });
 
+test("Drag race refuses a stake that is not whole dollars, and sends $0 and a stake exactly at the limit", () => {
+	const app = menuApp();
+	rightClick(app, 2);
+	app.scope.emit("MileagePlayerActions", {name: "Bob", drag: {ok: true, stakeMax: 1000, prize: 0},
+		pay: {ok: true}, request: {ok: true}});
+	const before = app.lua.length;
+	for (const text of ["", "abc", "-5", "1.5"]) {
+		typeAndSend(app, "drag", text);
+		assert.strictEqual(app.page("pl-context-error").textContent, "Enter a stake of $0 or more, in whole dollars.", text);
+	}
+	assert.strictEqual(app.lua.length, before, "nothing sent");
+	typeAndSend(app, "drag", "1000");
+	assert.ok(app.lua.includes("mileage_offers.dragRace(" + b64("Bob") + ", 1000)"), "the limit itself is allowed");
+	rightClick(app, 2);
+	app.scope.emit("MileagePlayerActions", {name: "Bob", drag: {ok: true, stakeMax: 1000, prize: 0},
+		pay: {ok: true}, request: {ok: true}});
+	typeAndSend(app, "drag", "0");
+	assert.ok(app.lua.includes("mileage_offers.dragRace(" + b64("Bob") + ", 0)"), "no stake is allowed");
+});
+
 test("disabled menu entries are #bbb in both looks, readable on the menu's background", () => {
 	for (const sheet of ["app.css", "redesign.css"]) {
 		const css = fs.readFileSync("Resources/Client/Mileage/ui/modules/apps/Mileage-PlayerList/" + sheet, "utf8");
