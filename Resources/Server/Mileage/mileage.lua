@@ -75,6 +75,9 @@ local defaultConfig = {
 		spotRacePrize = 0,
 		spotRacePrizeCooldownMinutes = 10,
 		spotRaceOpponentsMax = 5,
+		-- Money the server adds for the winner of a drag race between two players at the
+		-- strip, 0 to 1000000; 0 is off. Every win pays it, with no wait between prizes.
+		dragRacePrize = 0,
 		-- The shortest race allowed, in metres from start to finish (0 to 20000), and the
 		-- time after which a race nobody finished ends with both stakes back (1 to 120 min).
 		raceMinDistance = 500,
@@ -707,6 +710,9 @@ function onInit()
 	MP.RegisterEvent("mileageAiRace","mileageAiRace")
 	MP.RegisterEvent("mileageSpotRace","mileageSpotRace")
 	MP.RegisterEvent("mileageDragTime","mileageDragTime")
+	MP.RegisterEvent("mileageDragRun","mileageDragRun")
+	MP.RegisterEvent("mileageDragStaged","mileageDragStaged")
+	MP.RegisterEvent("mileageDragResult","mileageDragResult")
 	MP.RegisterEvent("mileageLeaderboard","mileageLeaderboard")
 	MP.RegisterEvent("mileagePerfReport","mileagePerfReport")
 
@@ -1251,6 +1257,7 @@ local function features()
 		aiRacePrizeCooldownMinutes = serverNumber("aiRacePrizeCooldownMinutes", 0, 1440),
 		raceMinDistance = serverNumber("raceMinDistance", 0, 20000),
 		raceTimeLimitMinutes = serverNumber("raceTimeLimitMinutes", 1, 120),
+		dragRacePrize = serverNumber("dragRacePrize", 0, 1000000),
 		sessionSendingMax = tonumber(Config.server.sessionSendingMax) or 0,
 	}
 end
@@ -1817,6 +1824,7 @@ local function readCars(names, point)
 end
 
 Money.finishCounts, Money.metresBetween, Money.readCars = finishCounts, metresBetween, readCars
+Money.carNear = carNear
 -- Where the server sees one car by its server vehicle id ("<player_id>-<vehicle_id>"),
 -- traffic included, {x, y, z}, or nil when it cannot read it: a race against a traffic car
 -- watches that car itself rather than taking the host's game's word for it.
@@ -1982,6 +1990,304 @@ end
 Money.racesTick = racesTick
 Money.racesPlayerLeft = racesPlayerLeft
 Money.loadRaces = loadRaces
+end
+
+--== Drag money ==============================================================
+-- A drag run between two players at the strip, decided by the server so the winner can
+-- be paid. The drag protocol itself stays the games' own (see the drag relay below); what
+-- this section reads are Mileage's own reports about a run:
+--
+--   mileageDragRun     the strip's leader: {phase = "start", strip, run, racers = {{id,
+--                      lane}, {id, lane}}, dragType}, {phase = "green", run}, {phase =
+--                      "ended", run}
+--   mileageDragStaged  each racer, for itself: {run}, once its car is staged in the run
+--   mileageDragResult  each racer, for its own car: {run, outcome = "finished" | "jumped",
+--                      winTime, dial}, winTime being the game's own winning time
+--
+-- Neither the leader's word nor strip presence alone is trusted. A run counts only when
+-- both racers' own games said they are staged in it and, where the server can read
+-- positions, both cars stand within START_CHECK_METRES of their lane's stage line at the
+-- green; a finish counts only from a car the server sees within FINISH_CHECK_METRES of its
+-- lane's end line. The lines are the server's own copy of each strip (DRAG_STRIPS); a run
+-- at a strip it does not know pays nothing.
+--
+-- The winner follows the game's own rule for the strip's race type: the lowest winning
+-- time heads-up, the bracket order for a bracket race, and a car that jumped the start or
+-- did not finish always last. The run is decided once every racer reported or left, or
+-- DECIDE_SECONDS after the green. A racer leaving or the leader ending the run after the
+-- green never decides it early. The owner's prize (dragRacePrize) is paid to the winner of
+-- every decided run, with no wait; a pair holding a staked drag race (the Races section,
+-- kind "drag") settles it with this run.
+--
+-- dragRuns[run] = {id, strip, names = {a, b}, ids = {[name] = playerId}, lanes = {[name] =
+-- lane}, dragType, startedAt, staged = {[name] = true}, green, counts, race, reports =
+-- {[name] = {outcome, winTime, dial, near}}, left = {[name] = true}}; kept in memory only.
+
+do
+local startTransfer, carNear, readCars = Money.startTransfer, Money.carNear, Money.readCars
+local SERVER_PARTY = Money.SERVER
+
+-- Copied from the game's levels/west_coast_usa/dragstrips/alderStrip_main.strip.json, keyed
+-- by the id the drag lobby names the strip by (alderStrip.dragSettings.json), lanes in order.
+local DRAG_STRIPS = {
+	alderStrip = {lanes = {
+		{stage = {x = -189.6705017, y = -157.7243042, z = 119.3841858}, finish = {x = 134.1748047, y = 77.52145386, z = 119.3841858}},
+		{stage = {x = -194.8289642, y = -150.5266724, z = 119.3841858}, finish = {x = 129.1916962, y = 84.24241638, z = 119.3841934}},
+	}},
+}
+local START_CHECK_METRES = 30
+local FINISH_CHECK_METRES = 150
+local DECIDE_SECONDS = 70
+local FORGET_SECONDS = 120
+local WIN_TIME_MIN, WIN_TIME_MAX, DIAL_MAX = 3, 60, 60
+local RUNS_MAX = 32
+local DRAG_TYPES = {headsUpRace = true, bracketRace = true}
+
+local dragRuns = {}
+
+local function runCount()
+	local n = 0
+	for _ in pairs(dragRuns) do n = n + 1 end
+	return n
+end
+
+local function otherName(run, name)
+	if name == run.names[1] then return run.names[2] end
+	if name == run.names[2] then return run.names[1] end
+	return nil
+end
+
+local function laneOf(run, name)
+	return DRAG_STRIPS[run.strip].lanes[run.lanes[name]]
+end
+
+local function isTime(n, low, high)
+	return type(n) == "number" and n == n and n >= low and n <= high
+end
+
+local function forget(run, why)
+	dragRuns[run.id] = nil
+	if why then print("[Mileage] Drag run " .. consoleText(run.id) .. " does not count: " .. why) end
+end
+
+-- The two racers of a start, as {{id, name, lane}...}, or nil when it is not a run of two
+-- different players in two different lanes of the strip, both standing at it.
+local function startRacers(strip, racers)
+	if type(racers) ~= "table" or #racers ~= 2 then return nil end
+	local out, lanes = {}, DRAG_STRIPS[strip].lanes
+	for i = 1, 2 do
+		local r = racers[i]
+		local id = type(r) == "table" and tonumber(r.id) or nil
+		local lane = type(r) == "table" and tonumber(r.lane) or nil
+		if not id or not lane or lane % 1 ~= 0 or not lanes[lane] then return nil end
+		if not MP.IsPlayerConnected(id) or not Money.dragOnStrip(strip, id) then return nil end
+		local name = MP.GetPlayerName(id)
+		if not name then return nil end
+		out[i] = {id = id, name = name, lane = lane}
+	end
+	if out[1].id == out[2].id or out[1].lane == out[2].lane then return nil end
+	return out
+end
+
+-- Whether the green makes the run count: both racers staged by their own games, and both
+-- cars at their stage lines where the server can see them.
+local function greenCounts(run)
+	for _, name in ipairs(run.names) do
+		if not run.staged[name] then return false, consoleText(name) .. "'s game never said it was staged" end
+		if carNear(run.ids[name], laneOf(run, name).stage, START_CHECK_METRES) == false then
+			return false, consoleText(name) .. "'s car is not at the start line"
+		end
+	end
+	return true
+end
+
+-- Each racer's standing: "finished" (with a time), "jumped" or "none".
+local function outcomeOf(run, name)
+	local report = run.reports[name]
+	if not report then return "none" end
+	if report.outcome == "jumped" then return "jumped" end
+	if report.near == false then return "none" end
+	return "finished"
+end
+
+-- The winner's name by the game's rule for this race type, or nil (nobody finished, a tie).
+local function winnerOf(run)
+	local ranked = {}
+	for _, name in ipairs(run.names) do
+		if outcomeOf(run, name) == "finished" then
+			local report = run.reports[name]
+			local entry = {name = name, time = report.winTime}
+			if run.dragType == "bracketRace" then
+				-- A racer with no dial ranks with the disqualified, as the game ranks it.
+				if (report.dial or 0) > 0 then
+					local diff = report.winTime - report.dial
+					entry.group, entry.key = diff >= 0 and 1 or 2, math.abs(diff)
+					table.insert(ranked, entry)
+				end
+			else
+				entry.group, entry.key = 1, report.winTime
+				table.insert(ranked, entry)
+			end
+		end
+	end
+	table.sort(ranked, function(x, y)
+		if x.group ~= y.group then return x.group < y.group end
+		return x.key < y.key
+	end)
+	local first, second = ranked[1], ranked[2]
+	if not first then return nil, "noFinish" end
+	if second and second.group == first.group and second.key == first.key then return nil, "tie" end
+	return first.name
+end
+
+-- Why the loser lost, for the result card: they jumped, left, or did not finish.
+local function whyOf(run, winner)
+	if not winner then return nil end
+	local loser = otherName(run, winner)
+	local outcome = outcomeOf(run, loser)
+	if outcome == "jumped" then return "jumped" end
+	if run.left[loser] then return "left" end
+	if outcome == "none" then return "noFinish" end
+	return "finished"
+end
+
+local function decide(run)
+	dragRuns[run.id] = nil
+	local winner, noWinner = winnerOf(run)
+	local why = winner and whyOf(run, winner) or noWinner
+	local prize = winner and serverNumber("dragRacePrize", 0, 1000000) or 0
+	local times, outcomes = {}, {}
+	for _, name in ipairs(run.names) do
+		outcomes[name] = outcomeOf(run, name)
+		if outcomes[name] == "finished" then times[name] = run.reports[name].winTime end
+	end
+	-- Set by the Races section: a staked drag race this run settles.
+	local staked = run.race and Money.settleDragRace and Money.settleDragRace(run.race, winner, prize) or nil
+	local loser = winner and otherName(run, winner)
+	if not staked and winner and prize > 0 then
+		startTransfer({kind = "prize", from = SERVER_PARTY, to = winner, amount = prize,
+			giveLabel = "Drag race prize vs " .. loser})
+	end
+	print(string.format("[Mileage] Drag run %s at %s: %s%s", consoleText(run.id), consoleText(run.strip),
+		winner and (consoleText(winner) .. " beat " .. consoleText(loser)) or ("no winner (" .. why .. ")"),
+		(winner and prize > 0) and string.format(", prize $%d", prize) or ""))
+	-- A plain run shows a card only when it paid a prize; a staked run always does.
+	if not staked and not (winner and prize > 0) then return end
+	for _, name in ipairs(run.names) do
+		local id = Money.playerIdByName(name)
+		if id then
+			sendJson("races", id, "rxMileageDragRace", {race = run.race, run = run.id, phase = "result",
+				winner = winner, why = why, times = times, outcomes = outcomes, prize = prize,
+				stake = staked and staked.stake or 0, pot = staked and staked.pot or 0,
+				you = name, other = otherName(run, name)})
+		end
+	end
+end
+
+local function allIn(run)
+	for _, name in ipairs(run.names) do
+		if not run.reports[name] and not run.left[name] then return false end
+	end
+	return true
+end
+
+local function decideIfIn(run)
+	if run.green and run.counts and allIn(run) then decide(run) end
+end
+
+function mileageDragRun(player_id, data)
+	received("races")
+	local message = decodeTable(data)
+	if not message or type(message.run) ~= "string" or #message.run > 96 then return end
+	if message.phase == "start" then
+		local strip = message.strip
+		if type(strip) ~= "string" or not DRAG_STRIPS[strip] or dragRuns[message.run] then return end
+		if Money.dragLeader(strip) ~= player_id or message.run:sub(1, #strip + 1) ~= strip .. "-" then return end
+		if not DRAG_TYPES[message.dragType] or runCount() >= RUNS_MAX then return end
+		local racers = startRacers(strip, message.racers)
+		if not racers then return end
+		local run = {id = message.run, strip = strip, names = {racers[1].name, racers[2].name}, ids = {}, lanes = {},
+			dragType = message.dragType, startedAt = signalTimer:GetCurrent(), staged = {}, reports = {}, left = {}}
+		for _, r in ipairs(racers) do run.ids[r.name], run.lanes[r.name] = r.id, r.lane end
+		dragRuns[run.id] = run
+		-- Finds out now whether the server can read positions, before the green's check.
+		readCars(run.names, DRAG_STRIPS[strip].lanes[1].stage)
+		return
+	end
+	local run = dragRuns[message.run]
+	if not run or Money.dragLeader(run.strip) ~= player_id then return end
+	if message.phase == "green" and not run.green then
+		local counts, why = greenCounts(run)
+		if not counts then
+			forget(run, why)
+			return
+		end
+		run.green, run.counts = signalTimer:GetCurrent(), true
+		-- Set by the Races section: the held drag race of exactly this pair, now racing.
+		run.race = Money.dragRaceGreen and Money.dragRaceGreen(run.names[1], run.names[2], run.id) or nil
+		decideIfIn(run)
+	elseif message.phase == "ended" and not run.green then
+		forget(run)
+	end
+end
+
+function mileageDragStaged(player_id, data)
+	received("races")
+	local message = decodeTable(data)
+	local run = message and type(message.run) == "string" and dragRuns[message.run]
+	local name = MP.GetPlayerName(player_id)
+	if not run or run.green or not otherName(run, name) or run.ids[name] ~= player_id then return end
+	run.staged[name] = true
+end
+
+function mileageDragResult(player_id, data)
+	received("races")
+	local message = decodeTable(data)
+	local run = message and type(message.run) == "string" and dragRuns[message.run]
+	local name = MP.GetPlayerName(player_id)
+	if not run or not otherName(run, name) or run.ids[name] ~= player_id or run.reports[name] then return end
+	if message.outcome == "jumped" then
+		run.reports[name] = {outcome = "jumped"}
+	elseif message.outcome == "finished" and run.green and run.counts and isTime(message.winTime, WIN_TIME_MIN, WIN_TIME_MAX) then
+		local dial = message.dial
+		if dial == nil then dial = 0 end
+		if not isTime(dial, 0, DIAL_MAX) then return end
+		run.reports[name] = {outcome = "finished", winTime = message.winTime, dial = dial,
+			near = carNear(player_id, laneOf(run, name).finish, FINISH_CHECK_METRES)}
+	else
+		return
+	end
+	decideIfIn(run)
+end
+
+local function dragMoneyTick()
+	local now = signalTimer:GetCurrent()
+	for _, run in pairs(dragRuns) do
+		if run.green and now - run.green >= DECIDE_SECONDS then
+			decide(run)
+		elseif not run.green and now - run.startedAt >= FORGET_SECONDS then
+			forget(run)
+		end
+	end
+end
+
+-- A racer left the server: before the green the run is gone; after it they did not finish.
+local function dragMoneyPlayerLeft(name)
+	for _, run in pairs(dragRuns) do
+		if otherName(run, name) then
+			if not run.green then
+				forget(run)
+			else
+				run.left[name] = true
+				decideIfIn(run)
+			end
+		end
+	end
+end
+
+Money.dragMoneyTick = dragMoneyTick
+Money.dragMoneyPlayerLeft = dragMoneyPlayerLeft
+Money.clearDragRuns = function() dragRuns = {} end
 end
 
 --== Leaderboard =============================================================
@@ -4192,6 +4498,11 @@ end
 local dragPresence = {}
 local dragAuthority = {}
 local dragArrivalSeq = 0
+-- For the drag money section: who leads a strip, and whether a player is at it.
+Money.dragLeader = function(stripId) return dragAuthority[stripId] end
+Money.dragOnStrip = function(stripId, playerId)
+	return dragPresence[stripId] ~= nil and dragPresence[stripId][playerId] ~= nil
+end
 
 local function electAuthority(stripId)
 	local best, bestSeq = nil, nil
@@ -4818,6 +5129,7 @@ function tick()
 	Money.transfersTick()
 	Money.offersTick()
 	Money.racesTick()
+	Money.dragMoneyTick()
 	Money.eventsTick()
 	Money.aiRacesTick()
 	Money.spotRacesTick()
@@ -4975,6 +5287,7 @@ function onPlayerDisconnectHandler(player_id)
 	local name = entry and entry.name or MP.GetPlayerName(player_id)
 	if name then
 		Money.racesPlayerLeft(name)
+		Money.dragMoneyPlayerLeft(name)
 		Money.eventsPlayerLeft(name)
 		Money.aiRacesPlayerLeft(name)
 		Money.spotRacesPlayerLeft(name)
