@@ -80,9 +80,10 @@ end
 
 local world, logs
 
--- Runs fn inside a car's vehicle Lua: obj, v, beamstate and the extension are its own.
+-- Runs fn inside a car's vehicle Lua: obj, v, beamstate, controller and the extension are
+-- its own.
 local function inVehicle(car, fn, ...)
-	obj, v, beamstate, mileageDamage = car.obj, car.v, car.beamstate, car.ext
+	obj, v, beamstate, mileageDamage, controller = car.obj, car.v, car.beamstate, car.ext, car.controller
 	return fn(...)
 end
 
@@ -255,8 +256,31 @@ local function addCar(game, owner, vid, opts)
 	function veh:resetBrokenFlexMesh() end
 	car.veh = veh
 
-	-- What the game does to the car on a reset: pristine beams, no damage.
+	-- opts.latches: names of the car's latch groups (doors, bonnet, boot), each one of the
+	-- game's advancedCouplerControl controllers, all latched. car.latch[name] is a group's
+	-- state; car.latchSets lists, in order, every state set through the game's own
+	-- setState; a group in car.wontLatch stays open when it is set latched.
+	car.latch, car.latchSets, car.wontLatch = {}, {}, {}
+	local latchControls = {}
+	for _, name in ipairs(opts.latches or {}) do
+		car.latch[name] = "attached"
+		local c = {name = name, typeName = "advancedCouplerControl"}
+		function c.getGroupState() return car.latch[name] end
+		function c.setState(data)
+			local state = data and data[name .. "_groupState"]
+			if not state then return end
+			table.insert(car.latchSets, name .. "=" .. state)
+			if not (state == "attached" and car.wontLatch[name]) then car.latch[name] = state end
+		end
+		table.insert(latchControls, c)
+	end
+	car.controller = {getControllersByType = function(typeName)
+		return typeName == "advancedCouplerControl" and latchControls or {}
+	end}
+
+	-- What the game does to the car on a reset: pristine beams, no damage, every latch shut.
 	function car.reset()
+		for name in pairs(car.latch) do car.latch[name] = "attached" end
 		for cid in pairs(car.restLen) do car.restLen[cid] = 1 end
 		car.broken = {}
 		car.beamstate.damage = 0
@@ -338,7 +362,7 @@ local function twoGames(opts)
 	local owners, copies = addGame(0), addGame(1)
 	local owner = addCar(owners, 0, 0, opts)
 	local copy = addCar(copies, 0, 0, {nodes = opts.nodes, beams = opts.beams, hydros = opts.hydros,
-		settling = opts.settling, fwd = {x = 1, y = 0, z = 0}})
+		settling = opts.settling, latches = opts.latches, fwd = {x = 1, y = 0, z = 0}})
 	owners.playerVehicle = owner.gid
 	return owner, copy, owners, copies
 end
@@ -2321,4 +2345,163 @@ test("a numbered part for this game's own car is dropped and opens no wait", fun
 	step(12)
 	same(owner.restLen[7], 1, "the owner's own beam 7")
 	same(#sentToServer("careerDamageRequest", 0) - before, 0, "requests from the owner's game")
+end)
+
+--== doors, bonnet and boot: latch states ====================================
+
+-- Latch groups given out of name order: they are numbered door_FL 1, hood 2, tailgate 3.
+local LATCHES = {"tailgate", "door_FL", "hood"}
+
+-- The "l" list of each message, as text ("" for a message without one).
+local function latchLists(messages)
+	local lists = {}
+	for _, m in ipairs(messages) do table.insert(lists, m.l and table.concat(m.l, ",") or "") end
+	return table.concat(lists, " | ")
+end
+
+test("an owner sends a door it opens, and every latch after a whole-car send", function()
+	local car = ownerCar({latches = LATCHES})
+	tick(car)
+	same(latchLists(takeMessages(car)), "", "the announcement of an undamaged car")
+	tick(car)
+	same(latchLists(takeMessages(car)), "3,1,1,2,1,3,1", "then every latch group, all latched")
+	tick(car, 2)
+	same(#takeMessages(car), 0, "nothing while no latch changes")
+	car.latch.hood = "detached"
+	tick(car)
+	local m = takeMessages(car)
+	same(latchLists(m), "3,2,0", "the bonnet opened")
+	same(#m[1].b .. "," .. #m[1].n, "0,0", "with empty beam and point lists, as older games expect")
+	car.latch.hood = "attached"
+	tick(car)
+	same(latchLists(takeMessages(car)), "3,2,1", "and shut")
+	car.latch.door_FL = "broken"
+	car.latch.tailgate = "desyncedDetached"
+	tick(car)
+	same(latchLists(takeMessages(car)), "3,1,2,3,0", "a door broken off and the boot open")
+	car.latch.hood = "coupling"
+	tick(car)
+	same(#takeMessages(car), 0, "a latch still closing is neither")
+	inVehicle(car, car.ext.answerFull)
+	tick(car)
+	same(latchLists(takeMessages(car)), "", "the flagged answer")
+	tick(car)
+	same(latchLists(takeMessages(car)), "3,1,2,3,0", "then every group again, the closing one left out")
+	car.latch.hood = "attached"
+	dent(car, 7, 0.8)
+	tick(car)
+	m = takeMessages(car)
+	same(table.concat(beamIds(m[1]), ","), "7", "a dent")
+	same(latchLists(m), "3,2,1", "and the latch that changed, in one message")
+	car.reset()
+	tick(car)
+	same(takeMessages(car)[1].c, 1, "a cleared notice after a reset")
+	tick(car)
+	same(latchLists(takeMessages(car)), "3,1,1,2,1,3,1", "then every latch, all shut again")
+end)
+
+test("a door opened on the owner opens on the copy, a shut one shuts, a broken one breaks", function()
+	local owner, copy = twoGames({latches = LATCHES})
+	step(2.5)
+	same(#copy.latchSets, 0, "nothing set while both cars are latched alike")
+	owner.latch.door_FL = "detached"
+	step(1.5)
+	same(copy.latch.door_FL, "detached", "the door opened on the copy")
+	same(copy.latchSets[1], "door_FL=detached", "through the game's own latch control")
+	owner.latch.door_FL = "attached"
+	step(1.5)
+	same(copy.latch.door_FL, "attached", "and shut again")
+	owner.latch.hood = "broken"
+	step(1.5)
+	same(copy.latch.hood, "broken", "the bonnet broken off")
+	same(table.concat(copy.latchSets, " "), "door_FL=detached door_FL=attached hood=broken", "every set, nothing more")
+	same(copy.latch.tailgate, "attached", "the boot left alone")
+end)
+
+test("a latch list that does not fit the copy is refused whole, and the beams with it still apply", function()
+	local owner, copy, owners, copies = twoGames({latches = LATCHES})
+	step(2.5)
+	local bad = {
+		"[4,1,0]",      -- the owner's car has another number of latch groups
+		"[3,1,3]",      -- no such state
+		"[3,0,1]",      -- no group 0
+		"[3,4,1]",      -- past the last group
+		"[3,1.5,1]",    -- not a whole number
+		'["3",1,0]',    -- text
+		"[3,1]",        -- not in pairs
+		"[65,1,0]",     -- more groups than any car shares
+		"5",            -- not a list
+	}
+	for i, list in ipairs(bad) do
+		local len = 0.5 + i / 100
+		deliver(copies, string.format('{"v":"0-0","c":0,"b":[7,%.2f,0,0.3],"n":[],"l":%s}', len, list))
+		same(copy.restLen[7], tonumber(string.format("%.2f", len)), list .. ": the beam applied")
+	end
+	same(#copy.latchSets, 0, "no latch set")
+	same(countLines(logs, "refused another player's latch list"), 1, "the copy's warning, once")
+	same(countLines(logs, "a latch list for 0-0 was not in the expected form"), 1, "the receiving game's warning, once")
+end)
+
+test("a message with a latch list does not end a copy's wait for its owner's whole shape", function()
+	local copies, cars = silentOwner(1)
+	step(1)
+	same(requestsFor("0-0"), 1, "asked once")
+	deliver(copies, '{"v":"0-0","c":0,"b":[],"n":[],"l":[0]}')
+	step(6)
+	same(requestsFor("0-0"), 2, "asked again: a latch list is no answer")
+	deliver(copies, '{"v":"0-0","c":0,"b":[],"n":[]}')
+	step(12)
+	same(requestsFor("0-0"), 2, "an empty answer ends the wait, as before")
+end)
+
+test("a copy whose door came open on its own is put back", function()
+	local owner, copy = twoGames({latches = LATCHES})
+	step(4)
+	copy.latch.door_FL = "detached"
+	step(1)
+	same(#copy.latchSets, 0, "not after one check")
+	step(1.5)
+	same(copy.latch.door_FL, "attached", "set back to the owner's state after two checks")
+	same(copy.latchSets[1], "door_FL=attached", "through the game's own latch control")
+	same(copy.veh.resets, 0, "the car is not reset")
+	same(countLines(logs, "copy of 0-0: 1 latch unlike its owner's set again"), 1, "logged")
+end)
+
+test("a latch the copy cannot close is tried again only after 10 s, one line a try", function()
+	local owner, copy = twoGames({latches = LATCHES})
+	step(4)
+	copy.wontLatch.hood = true
+	copy.latch.hood = "detached"
+	copy.latch.tailgate = "detached"
+	step(3)
+	same(countLines(logs, "copy of 0-0: 2 latches unlike its owner's set again"), 1, "the first try, both groups")
+	same(copy.latch.tailgate, "attached", "the boot shut")
+	same(copy.latch.hood, "detached", "the bonnet will not")
+	step(8)
+	same(countLines(logs, "unlike its owner's set again"), 1, "no second try within 10 s")
+	step(3)
+	same(countLines(logs, "copy of 0-0: 1 latch unlike its owner's set again"), 1, "the second try, the bonnet alone")
+end)
+
+test("a copy that never heard a latch list from its owner never touches its latches", function()
+	local copy = copyCar({latches = LATCHES})
+	inVehicle(copy, copy.ext.applyDamage, 0, {7, 0.8, 0, 0.3}, {})
+	copy.latch.door_FL = "detached"
+	tick(copy, 5)
+	same(#copy.latchSets, 0, "latches set")
+	same(copy.latch.door_FL, "detached", "the door left as the copy's physics has it")
+end)
+
+test("a car without latch groups, or without the game's controller module, sends no latch list", function()
+	for _, noModule in ipairs({false, true}) do
+		local car = ownerCar()
+		if noModule then car.controller = nil end
+		tick(car)
+		takeMessages(car)
+		dent(car, 7, 0.8)
+		tick(car)
+		local m = takeMessages(car)
+		same(#m, 1, "the dent")
+		same(m[1].l, nil, "no latch list")
+	end
 end)

@@ -13,6 +13,10 @@
 --     beams broken, deformation recorded, so the copy reshapes itself from its beams.
 --     Points an older owner still sends with them are left alone.
 --
+-- Doors, bonnet, boot and other latch groups are not beams: the owner sends each group's
+-- state when it changes (and all of them after every full send), and the copy sets its
+-- own through the game's latch controls (see "latches" below).
+--
 -- A full send (a new owner's to everyone, or an answer to a copy built late or resynced,
 -- flagged so the server passes it only to the players who asked) carries the car's whole
 -- shape: every changed beam and every point, in the car's own frame (right, forward, up
@@ -23,8 +27,9 @@
 --
 -- The owner wins: a copy that disagrees with what its owner reported on any beam (broken,
 -- or more than 5 mm off) for two checks in a row (damage only this game simulated) is
--- reset in place and given the owner's full damage. An owner's reset or repair sends a
--- cleared notice.
+-- reset in place and given the owner's full damage; a latch off the owner's state for two
+-- checks is set again, the car not reset. An owner's reset or repair sends a cleared
+-- notice.
 --
 -- Every value from a message is checked against this car before it is used.
 
@@ -87,6 +92,9 @@ local refusedLogged = false
 local sinceCheck = 0
 local checksOver = 0
 local sinceResync = huge
+-- Latches: checks in a row with a group off the owner's state, and seconds since the
+-- copy last set its latches again (at most once every RESYNC_COOLDOWN seconds).
+local latchChecksOver, sinceLatchSet = 0, huge
 -- The copy is read only when something could have changed: its damage total moved, a
 -- report arrived, or it disagreed last time.
 local checkedDamage, lastCount, reportsChanged = nil, 0, false
@@ -94,6 +102,9 @@ local checkedDamage, lastCount, reportsChanged = nil, 0, false
 -- since its latest part}), and ordinary dents that arrived meanwhile, newer than it.
 local pendingSet = nil
 local heldDents = {}
+-- The owner's last reported latch state code of each group.
+local reportedLatches = {}
+local latchRefusedLogged = false
 
 --== the car's own frame ======================================================
 
@@ -129,7 +140,76 @@ local function fromCarFrame(fr, lx, ly, lz)
 		fr.oz + fr.rz * lx + fr.fz * ly + fr.uz * lz)
 end
 
+--== latches =================================================================
+-- Doors, bonnet, boot and the car's other latch groups are held by the game's latch
+-- controls (controller advancedCouplerControl, one per group), not by beams, so they
+-- travel on their own: numbered by the controls' names, the same on every game for the
+-- same car, and each group's state as a code. The game's passing "coupling" state (a latch
+-- closing) is neither and is not read.
+
+local MAX_LATCHES = 64
+local LATCH_CODES = {attached = 1, desyncedAttached = 1, detached = 0, desyncedDetached = 0, autoCoupling = 0,
+	broken = 2}
+-- What each code sets through the game's own setState (as the game replicates latches).
+local LATCH_STATES = {[0] = "detached", [1] = "attached", [2] = "broken"}
+
+-- This car's latch controls in name order; read when it gets a role.
+local latchGroups = {}
+local latchesTooManyLogged = false
+
+local function readLatchGroups()
+	local list = {}
+	local ok, found = pcall(function() return controller.getControllersByType("advancedCouplerControl") end)
+	for _, c in ipairs(ok and type(found) == "table" and found or {}) do
+		if type(c) == "table" and type(c.name) == "string" and type(c.getGroupState) == "function"
+				and type(c.setState) == "function" then
+			table.insert(list, c)
+		end
+	end
+	table.sort(list, function(a, b) return a.name < b.name end)
+	if #list > MAX_LATCHES then
+		if not latchesTooManyLogged then
+			latchesTooManyLogged = true
+			log("W", "mileage.damage", string.format("this car has %d latch groups (limit %d); its latches are not shared",
+				#list, MAX_LATCHES))
+		end
+		return {}
+	end
+	return list
+end
+
+-- The state code of latch group g, or nil when it is closing or cannot be read.
+local function latchCode(g)
+	local ok, state = pcall(latchGroups[g].getGroupState)
+	return ok and LATCH_CODES[state] or nil
+end
+
 --== owner ===================================================================
+
+-- The latch state code last sent for each group; a group not in it is sent.
+local sentLatches = {}
+
+-- The latch groups whose state differs from what was last sent, as {group, code}.
+local function changedLatches()
+	local changed = {}
+	for g = 1, #latchGroups do
+		local code = latchCode(g)
+		if code and code ~= sentLatches[g] then table.insert(changed, {g, code}) end
+	end
+	return changed
+end
+
+-- The "l" field for the latch groups whose state changed since last sent, marked sent:
+-- the number of groups, then each changed group and its code. nil when none changed.
+local function latchField()
+	local rows = {}
+	for _, change in ipairs(changedLatches()) do
+		table.insert(rows, string.format("%d,%d", change[1], change[2]))
+		sentLatches[change[1]] = change[2]
+	end
+	if #rows == 0 then return nil end
+	return string.format('"l":[%d,%s]', #latchGroups, table.concat(rows, ","))
+end
 
 local function isBroken(cid)
 	return obj:beamIsBroken(cid) and true or false
@@ -223,9 +303,9 @@ local function pointRow(fr, n)
 end
 
 -- One message of ordinary dents from list[first..]: at most MAX_BEAMS beams and no
--- points (an empty list, which older copies still expect). Returns the message and the
--- index of the first beam it left out.
-local function packMessage(list, first)
+-- points (an empty list, which older copies still expect), with latches, an "l" field,
+-- when given. Returns the message and the index of the first beam it left out.
+local function packMessage(list, first, latches)
 	local beams = {}
 	local i = first
 	while i <= #list and #beams < MAX_BEAMS do
@@ -235,7 +315,7 @@ local function packMessage(list, first)
 		sent[cid] = {len = len, broken = broken}
 		i = i + 1
 	end
-	return '{"c":0,"b":[' .. table.concat(beams, ",") .. '],"n":[]}', i
+	return '{"c":0,"b":[' .. table.concat(beams, ",") .. '],"n":[]' .. (latches and "," .. latches or "") .. '}', i
 end
 
 local function slice(rows, first, last)
@@ -284,7 +364,7 @@ local function send(message)
 end
 
 local function forgetSent()
-	sent = {}
+	sent, sentLatches = {}, {}
 	moreToSend = false
 	fullParts = nil
 end
@@ -320,12 +400,14 @@ local function ownerTick()
 			-- An undamaged car still answers, so the copy knows its owner is listening.
 			fullParts = nil
 			send(fullAnswer and '{"f":1,"c":0,"b":[],"n":[]}' or '{"c":0,"b":[],"n":[]}')
+			-- Every latch follows, for everyone, so a copy built late has them too.
+			sentLatches = {}
 			return
 		end
 	end
 	-- An answer reaches only the players who asked, so while one is being sent, changes
 	-- for everyone go out every other tick instead of waiting for it to end.
-	local changesWaiting = damage ~= lastDamage or moreToSend
+	local changesWaiting = damage ~= lastDamage or moreToSend or #changedLatches() > 0
 	if fullParts and not (fullAnswer and changesWaiting and answerChunkLast) then
 		send(fullParts[fullNext])
 		fullNext = fullNext + 1
@@ -334,8 +416,10 @@ local function ownerTick()
 			fullParts = nil
 			answerChunkLast = false
 			-- Beams sent early in the transfer may have changed since, and an answer's
-			-- beams reached only who asked: compare again.
+			-- beams reached only who asked: compare again. Every latch follows, for
+			-- everyone, so a copy built late has them too.
 			moreToSend = true
+			sentLatches = {}
 			if answerAfter then
 				answerAfter = false
 				fullWanted = "answer"
@@ -347,15 +431,16 @@ local function ownerTick()
 	end
 	answerChunkLast = false
 
-	if damage == lastDamage and not moreToSend then return end
+	if damage == lastDamage and not moreToSend and #changedLatches() == 0 then return end
 	lastDamage = damage
 	local list = changedBeams(sentState)
-	if #list == 0 then
+	local latches = latchField()
+	if #list == 0 and not latches then
 		moreToSend = false
 		return
 	end
-	local message, nextIndex = packMessage(list, 1)
-	if message then send(message) end
+	local message, nextIndex = packMessage(list, 1, latches)
+	send(message)
 	moreToSend = nextIndex <= #list
 end
 
@@ -531,8 +616,9 @@ local function applyDamage(cleared, beams, nodes, part, parts)
 	if role ~= "copy" then return end
 	heard = true
 	if cleared == 1 then
-		-- The owner reset or repaired the car: a set or dents still arriving are older.
-		pendingSet, heldDents = nil, {}
+		-- The owner reset or repaired the car: a set or dents still arriving are older, and
+		-- its latches are sent again.
+		pendingSet, heldDents, reportedLatches = nil, {}, {}
 		-- A broken beam cannot be mended in place, so a copy with any damage (judged
 		-- against the car as built) is reset too.
 		reported = {}
@@ -551,6 +637,48 @@ local function applyDamage(cleared, beams, nodes, part, parts)
 		table.insert(heldDents, beams)
 	else
 		setBeams(beams)
+	end
+end
+
+-- Sets latch group g to the state of code through the game's own latch control, as the
+-- game replicates latches itself: latched tries to latch, open opens, broken breaks it.
+local function setLatch(g, code)
+	local c = latchGroups[g]
+	pcall(c.setState, {[c.name .. "_groupState"] = LATCH_STATES[code]})
+end
+
+-- Why the owner's latch list cannot be used on this copy, or nil: groups is how many
+-- latch groups the owner's car has, list {group, state code, ...}.
+local function latchProblem(groups, list)
+	if groups ~= #latchGroups then
+		return string.format("%s latch groups on the owner's car, %d on this one", tostring(groups), #latchGroups)
+	end
+	if type(list) ~= "table" or #list % 2 ~= 0 then return "latch list not in pairs" end
+	for i = 1, #list, 2 do
+		local g, code = list[i], list[i + 1]
+		if not (isId(g) and g >= 1 and g <= groups) then return "latch group " .. tostring(g) end
+		if not (isId(code) and LATCH_STATES[code]) then return "latch state " .. tostring(code) end
+	end
+	return nil
+end
+
+-- The owner's latch states: each group set to match where it differs, and remembered for
+-- the copy's own check. A list that does not fit this car is refused whole.
+local function applyLatches(groups, list)
+	if role ~= "copy" then return end
+	heard = true
+	local problem = latchProblem(groups, list)
+	if problem then
+		if not latchRefusedLogged then
+			latchRefusedLogged = true
+			log("W", "mileage.damage", "refused another player's latch list: " .. problem)
+		end
+		return
+	end
+	for i = 1, #list, 2 do
+		local g, code = list[i], list[i + 1]
+		reportedLatches[g] = code
+		if latchCode(g) ~= code then setLatch(g, code) end
 	end
 end
 
@@ -574,6 +702,19 @@ local function copyCheck()
 		-- Counted in full for the log, which says how far the copy had drifted.
 		obj:queueGameEngineLua(string.format("mileage_damageSync.resetCopy(%d,1,%d)", obj:getID(), disagreeingBeams()))
 	end
+	-- A latch the copy's own knocks opened (or shut) is set back to the owner's state, the
+	-- car not reset: a reset would undo dents still arriving.
+	local off = {}
+	for g, code in pairs(reportedLatches) do
+		local now = latchCode(g)
+		if now ~= nil and now ~= code then table.insert(off, g) end
+	end
+	if #off > 0 then latchChecksOver = latchChecksOver + 1 else latchChecksOver = 0 end
+	if latchChecksOver >= RESYNC_CHECKS and sinceLatchSet >= RESYNC_COOLDOWN then
+		latchChecksOver, sinceLatchSet = 0, 0
+		for _, g in ipairs(off) do setLatch(g, reportedLatches[g]) end
+		obj:queueGameEngineLua(string.format("mileage_damageSync.latchesSetAgain(%d,%d)", obj:getID(), #off))
+	end
 end
 
 --== roles and hooks =========================================================
@@ -586,9 +727,11 @@ local function setRole(newRole)
 	lastDamage, sinceSend, fullWanted, clearedPending = nil, 0, nil, false
 	fullAnswer, answerAfter, answerChunkLast = false, false, false
 	reported, heard, sinceCheck, checksOver, sinceResync = {}, false, 0, 0, huge
-	pendingSet, heldDents = nil, {}
+	latchChecksOver, sinceLatchSet = 0, huge
+	pendingSet, heldDents, reportedLatches = nil, {}, {}
 	checkedDamage, lastCount, reportsChanged = nil, 0, false
 	if role and next(baseline) == nil then captureBaseline() end
+	latchGroups = role and readLatchGroups() or {}
 	if role == "owner" then
 		-- Copies built before this car became an owner asked too early: everyone gets its
 		-- full damage once, an undamaged car an empty message, so they know it reports.
@@ -630,6 +773,7 @@ local function updateGFX(dt)
 			if pendingSet.quiet >= SET_WAIT_SECONDS then dropSet() end
 		end
 		sinceResync = sinceResync + (dt or 0)
+		sinceLatchSet = sinceLatchSet + (dt or 0)
 		sinceCheck = sinceCheck + (dt or 0)
 		if sinceCheck >= CHECK_EVERY_SECONDS then
 			sinceCheck = 0
@@ -657,6 +801,7 @@ M.setRole = setRole
 M.sendFull = sendFull
 M.answerFull = answerFull
 M.applyDamage = applyDamage
+M.applyLatches = applyLatches
 M.updateGFX = updateGFX
 M.onReset = onReset
 M.onExtensionLoaded = onExtensionLoaded
