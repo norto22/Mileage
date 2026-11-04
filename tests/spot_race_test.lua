@@ -869,6 +869,90 @@ World.test("an opponent whose road points include one no road joins still drives
 	same(car.routeFailed, false, "the game's AI built its route")
 end)
 
+-- Every line p's game logs, as "<level> <tag> <text>".
+local function allLogs(p)
+	local lines = {}
+	p.globals.log = function(level, tag, text) lines[#lines + 1] = level .. " " .. tag .. " " .. text end
+	return lines
+end
+
+World.test("the road point no road joins is left out of the opponent's list, and the log says so", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	roadWithLonePoint(world)
+	withClass(ann)
+	local lines = allLogs(ann)
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 1, {})
+	local s = spawned(world, ann)[1]
+	world:advance(6)
+	expect(driveCommand(s.car):find('wpTargetList = {"cp1", "cp3", "cp4", "cp4+1", "cp4+2"}', 1, true),
+		"checkpoint 2's point left out: " .. tostring(driveCommand(s.car)))
+	same(countLines(lines, "W mileage.spotRace highway_race: dropped 1 of 6 road points the game's AI cannot drive for "
+		.. "Ibishu Pessima (car " .. s.sid .. ")"), 1, "one line naming the route, the count and the car")
+end)
+
+World.test("a first road point the opponent cannot reach from its grid place is left out", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	roadsAt(world, route("highway_race"))
+	world.unreachable = {cp1 = true}
+	withClass(ann)
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 1, {})
+	local car = spawned(world, ann)[1].car
+	local grid = copy(car.pos)
+	world:advance(16)
+	expect(driveCommand(car):find('wpTargetList = {"cp2", "cp3"', 1, true), "from checkpoint 2's point: " .. tostring(driveCommand(car)))
+	expect(metres(car.pos, grid) > 3, "and the opponent drives off")
+end)
+
+World.test("on a circuit with a point left out the opponents' list still ends on its first point, so laps repeat", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local r = route("rally_track")
+	roadsAt(world, r)
+	world.roadNodes.cp2.links = {cp4 = {}}
+	world.roadNodes.cp3.links = {}
+	withClass(ann)
+	atStart(ann, "rally_track")
+	request(world, ann, "rally_track", 1, {})
+	world:advance(6)
+	local drive = driveCommand(spawned(world, ann)[1].car)
+	expect(drive:find('wpTargetList = {"cp1", "cp2", "cp4", "cp5"', 1, true), "checkpoint 3's point left out: " .. tostring(drive))
+	expect(drive:find('"cp10", "cp11", "cp1"}', 1, true), "round to the first again")
+	same(spawned(world, ann)[1].car.routeFailed, false, "the game's AI built its route")
+end)
+
+World.test("an opponent's list whose every point the AI can drive goes unchanged, and nothing is logged", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	roadsAt(world, route("highway_race"))
+	withClass(ann)
+	local lines = allLogs(ann)
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 2, {})
+	world:advance(6)
+	for _, s in ipairs(spawned(world, ann)) do
+		expect(driveCommand(s.car):find('{"cp1", "cp2", "cp3", "cp4", "cp4+1", "cp4+2"}', 1, true), "the whole list")
+	end
+	same(countLines(lines, "dropped"), 0, "lines about dropped points")
+end)
+
+World.test("without the game's road graph the opponents' list goes unchecked, and that is logged once", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local r = route("rally_track")
+	roadsAt(world, r)
+	world.roadNodes.cp2.links = {cp4 = {}}
+	world.roadNodes.cp3.links = {}
+	withClass(ann)
+	ann.globals.map.getGraphpath = nil
+	local lines = allLogs(ann)
+	atStart(ann, "rally_track")
+	request(world, ann, "rally_track", 2, {})
+	world:advance(6)
+	local drive = driveCommand(spawned(world, ann)[1].car)
+	expect(drive and drive:find('{"cp1", "cp2", "cp3", "cp4"', 1, true), "the list as it was: " .. tostring(drive))
+	same(countLines(lines, "map.getGraphpath missing - race spot opponents are given their road points unchecked"), 1,
+		"logged once for both opponents")
+end)
+
 World.test("an opponent that cannot spawn, or never gets a server id, is left out and the race goes on", function(world)
 	local ann = world:join("Ann", 1000, 0)
 	withClass(ann)
@@ -923,6 +1007,101 @@ World.test("an opponent standing 15 s is reported stuck, and a vanished one gone
 	outs = sentKey(world, ann, "out")
 	same(outs[2].racer, "car:" .. cars[1].sid, "then the standing car")
 	same(outs[2].why, "stuck", "stuck")
+end)
+
+-- The drive commands an opponent's car was sent.
+local function drives(car)
+	local n = 0
+	for _, cmd in ipairs(car.commands) do
+		if cmd:find("ai.driveUsingPath", 1, true) then n = n + 1 end
+	end
+	return n
+end
+
+World.test("an opponent that does not get going is sent off again at 5 s", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	roadsAt(world, route("highway_race"))
+	withClass(ann)
+	local lines = allLogs(ann)
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 1, {})
+	local s = spawned(world, ann)[1]
+	s.car.refuseDrives = 1
+	local grid = copy(s.car.pos)
+	world:advance(6)
+	world:advance(3)
+	same(drives(s.car), 1, "drive commands in the first seconds after the green")
+	expect(metres(s.car.pos, grid) < 3, "the game's AI ignored the first")
+	world:advance(3)
+	same(drives(s.car), 2, "sent off again")
+	expect(driveCommand(s.car):find('{"cp1", "cp2", "cp3", "cp4", "cp4+1", "cp4+2"}', 1, true),
+		"on the checkpoints' road points: " .. tostring(driveCommand(s.car)))
+	same(s.car.commands[#s.car.commands], "ai.setRacing(true)", "racing")
+	same(countLines(lines, "I mileage.spotRace highway_race: Ibishu Pessima (car " .. s.sid
+		.. ") has not moved 5 s after the green; sent off again"), 1, "logged")
+	world:advance(10)
+	expect(metres(s.car.pos, grid) > 3, "the opponent drives off")
+	same(s.car.deleted, false, "and stays in the race")
+	same(#sentKey(world, ann, "out"), 0, "nobody reported out")
+	same(drives(s.car), 2, "never sent off a third time")
+end)
+
+World.test("an opponent still on the grid at 12 s is taken off it and out of the race", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	local r = route("highway_race")
+	roadsAt(world, r)
+	withClass(ann)
+	local lines = allLogs(ann)
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 2, {})
+	local cars = spawned(world, ann)
+	cars[1].car.refuseDrives = math.huge
+	-- The green comes within these 6 s.
+	world:advance(6)
+	world:advance(9)
+	same(cars[1].car.deleted, false, "still there 10 s after the green")
+	same(#sentKey(world, ann, "out"), 0, "and in the race")
+	expect(drives(cars[1].car) == 2, "it was sent off again on the way")
+	world:advance(3)
+	same(cars[1].car.deleted, true, "deleted by 13 s")
+	local outs = sentKey(world, ann, "out")
+	same(#outs, 1, "reported out once")
+	same(outs[1].racer, "car:" .. cars[1].sid, "the standing car")
+	same(outs[1].why, "stuck", "as stuck")
+	same(countLines(lines, "W mileage.spotRace highway_race: Ibishu Pessima (car " .. cars[1].sid
+		.. ") never left the grid; taken out of the race"), 1, "logged")
+	same(cars[2].car.deleted, false, "the other opponent races on")
+	driveRoute(world, ann, r, 40)
+	world:advance(1)
+	local result = last(world, ann, "result")
+	expect(result, "the race ended")
+	local out, finished = nil, 0
+	for _, place in ipairs(result.places) do
+		if place.car and place.out then out = place.out end
+		if not place.out then finished = finished + 1 end
+	end
+	same(out, "stuck", "the removed car is listed out as stuck")
+	same(finished, 2, "Ann and the other opponent finish")
+end)
+
+World.test("an opponent that drove off and then stands is reported stuck after 15 s and left where it stands", function(world)
+	local ann = world:join("Ann", 1000, 0)
+	roadsAt(world, route("highway_race"))
+	withClass(ann)
+	atStart(ann, "highway_race")
+	request(world, ann, "highway_race", 1, {})
+	local s = spawned(world, ann)[1]
+	s.car.speed = 5
+	world:advance(8)
+	s.car.speed = 0
+	world:advance(14)
+	same(#sentKey(world, ann, "out"), 0, "not out 14 s after it stopped")
+	world:advance(2)
+	local outs = sentKey(world, ann, "out")
+	same(#outs, 1, "out once it stood 15 s")
+	same(outs[1].why, "stuck", "as stuck")
+	same(s.car.deleted, false, "left where it stands")
+	same(drives(s.car), 1, "never sent off again")
 end)
 
 World.test("the result, a call-off and leaving the server delete every opponent", function(world)
