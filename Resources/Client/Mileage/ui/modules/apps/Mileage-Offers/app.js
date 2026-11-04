@@ -309,13 +309,25 @@ mileageOffersApp.controller('MileageOffers', ['$scope', function ($scope) {
 		return null;
 	}
 
+	// A staked race's cards go to $scope.drag; a plain run's result has a card of its own
+	// ($scope.dragRun), so it never hides the held stakes and their Call off.
+	$scope.dragRun = null;
+
 	$scope.$on('MileageDragRace', function (event, data) {
 		if (!data) return;
 		$scope.$evalAsync(function () {
 			var shown = dragView(data);
+			if (typeof data.race !== "string") {
+				$scope.dragRun = shown ? {phase: data.phase, view: shown} : null;
+				return;
+			}
 			$scope.drag = shown ? {id: data.race, phase: data.phase, view: shown} : null;
 		});
 	});
+
+	$scope.closeDragRun = function () {
+		$scope.dragRun = null;
+	};
 
 	$scope.callOffDrag = function () {
 		bngApi.engineLua('if mileage_dragMoney then mileage_dragMoney.callOff() end');

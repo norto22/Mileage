@@ -210,12 +210,24 @@ test("a plain run that paid the prize: the prize to the winner, who won to the l
 	const {scope} = load();
 	scope.emit("MileageDragRace", {run: "alderStrip-5", phase: "result", you: "Turbo_Tom", other: "DriftQueen_77",
 		stake: 0, pot: 0, prize: 500, winner: "Turbo_Tom", times: {Turbo_Tom: 12.4}});
-	assert.strictEqual(scope.drag.view.title, "You won $500");
-	assert.deepStrictEqual(rows(scope.drag.view), ["vs: DriftQueen_77", "You get: $500 prize"]);
+	assert.strictEqual(scope.dragRun.view.title, "You won $500");
+	assert.deepStrictEqual(rows(scope.dragRun.view), ["vs: DriftQueen_77", "You get: $500 prize"]);
 	scope.emit("MileageDragRace", {run: "alderStrip-5", phase: "result", you: "DriftQueen_77", other: "Turbo_Tom",
 		stake: 0, pot: 0, prize: 500, winner: "Turbo_Tom"});
-	assert.strictEqual(scope.drag.view.title, "Turbo_Tom won the drag race");
-	assert.deepStrictEqual(rows(scope.drag.view), ["vs: Turbo_Tom"]);
+	assert.strictEqual(scope.dragRun.view.title, "Turbo_Tom won the drag race");
+	assert.deepStrictEqual(rows(scope.dragRun.view), ["vs: Turbo_Tom"]);
+	scope.closeDragRun();
+	assert.strictEqual(scope.dragRun, null, "closed");
+});
+
+test("a plain run's result against someone else leaves the held stakes card and its Call off in place", () => {
+	const {scope} = load();
+	scope.emit("MileageDragRace", HELD);
+	scope.emit("MileageDragRace", {run: "alderStrip-6", phase: "result", you: "Turbo_Tom", other: "Cat",
+		stake: 0, pot: 0, prize: 500, winner: "Turbo_Tom"});
+	assert.strictEqual(scope.drag.view.callOff, "Call off (stakes back)", "the held card stays");
+	assert.strictEqual(scope.dragRun.view.title, "You won $500", "the plain result beside it");
+	assert.ok(/ng-if="dragRun"[\s\S]*ng-bind="dragRun.view.title"/.test(TEMPLATE), "its own card");
 });
 
 test("a staked run with no winner gives the stake back and says why", () => {

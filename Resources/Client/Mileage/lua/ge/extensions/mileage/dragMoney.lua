@@ -27,10 +27,11 @@ local logTag = "mileage.dragMoney"
 local TORN_DOWN_RADIUS = 20
 local WATCH_SECONDS = 70
 
--- This player's run: {run, strip, lane, staged, greenAt, reported}.
+-- This player's run: {run, strip, lane, staged, greenAt, dial, reported}.
 local current = nil
--- The last card the server sent, for a UI reload, and the staked race it is about.
-local lastCard = nil
+-- The card of this player's staked drag race while it is under way (staking, toStrip,
+-- racing), for Call off and a UI reload. A plain run's result never replaces it.
+local held = nil
 
 local function send(event, message)
 	if type(TriggerServerEvent) == "function" then TriggerServerEvent(event, jsonEncode(message)) end
@@ -144,6 +145,8 @@ local function followRun()
 		local startedAt = gm and gm.getRaceStartTime and gm.getRaceStartTime(current.run)
 		if startedAt then current.greenAt = type(startedAt) == "number" and startedAt or now() end
 	end
+	-- Kept for a finish after the run is taken down: a bracket race ranks by the dial.
+	current.dial = timerValue(racer, "dial") or current.dial
 	if not current.reported and disqualified(racer) then reportJumped() end
 end
 
@@ -160,7 +163,7 @@ local function watchTornDown()
 	if finish:distance(veh:getPosition()) <= TORN_DOWN_RADIUS then
 		log("I", logTag, string.format("finished run %s after it was called off, %.2f s from the green",
 			tostring(current.run), elapsed))
-		report({outcome = "finished", winTime = elapsed, dial = 0})
+		report({outcome = "finished", winTime = elapsed, dial = current.dial or 0})
 		return false
 	end
 	return true
@@ -183,29 +186,35 @@ end
 
 --- Calls off the held drag race (before its run's green, both stakes come back).
 function M.callOff()
-	local race = lastCard and lastCard.race
+	local race = held and held.race
 	if type(race) ~= "string" then return false end
 	send("mileageDragCallOff", {race = race})
 	return true
 end
 
--- The phases of a drag race still under way; a result or a call off is shown once.
+-- The phases of a staked drag race still under way; its result or call off is shown once.
 local UNDER_WAY = {staking = true, toStrip = true, racing = true}
 
---- Sends the drag race under way to the prompts app, after a UI reload.
+--- Sends the staked drag race under way to the prompts app, after a UI reload.
 function M.sendState()
-	if lastCard and UNDER_WAY[lastCard.phase] then guihooks.trigger("MileageDragRace", lastCard) end
+	if held then guihooks.trigger("MileageDragRace", held) end
 end
 
 local function rxMileageDragRace(data)
 	local card = jsonDecode(data)
 	if type(card) ~= "table" then return end
-	lastCard = card
+	if type(card.race) == "string" then
+		if UNDER_WAY[card.phase] then
+			held = card
+		elseif held and held.race == card.race then
+			held = nil
+		end
+	end
 	guihooks.trigger("MileageDragRace", card)
 end
 
 function M.onBeamMPServerLeave()
-	current, lastCard = nil, nil
+	current, held = nil, nil
 end
 
 function M.onExtensionLoaded()

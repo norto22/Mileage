@@ -1617,6 +1617,18 @@ test("a run torn down after its green is still finished at the end line, timed f
 	same(results[1].dial, 0, "no dial")
 end)
 
+test("a bracket run torn down after its green reports the finish with the racer's dial", function()
+	twoPlayersGreen()
+	racerOf(1).timers = {dial = {value = 11.4}}
+	runTo(world.now + 0.5)
+	setLeader(2)
+	world.pos = {1, 395, 0}
+	runTo(world.now + 0.5)
+	local results = serverNamed("mileageDragResult")
+	same(#results, 1, "one finish")
+	same(results[1].dial, 11.4, "the dial the game had before the run came down")
+end)
+
 test("a torn-down run reached after 70 s, or far from the end line, reports nothing", function()
 	twoPlayersGreen()
 	setLeader(2)

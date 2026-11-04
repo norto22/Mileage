@@ -28,6 +28,18 @@
 		</div>
 	</div>
 
+	<div class="mo-card mo-drag" ng-if="dragRun">
+		<div class="mo-title" ng-bind="dragRun.view.title"></div>
+		<div class="mo-row" ng-repeat="row in dragRun.view.rows">
+			<span class="mo-label" ng-bind="row.label"></span>
+			<span class="mo-value" ng-bind="row.value"></span>
+		</div>
+		<div class="mo-note" ng-if="dragRun.view.note" ng-bind="dragRun.view.note"></div>
+		<div class="mo-actions">
+			<button ng-click="closeDragRun()">Close</button>
+		</div>
+	</div>
+
 	<div class="mo-card" ng-if="traffic">
 		<div class="mo-head">
 			<span class="mo-title" ng-bind="traffic.view.title"></span>
