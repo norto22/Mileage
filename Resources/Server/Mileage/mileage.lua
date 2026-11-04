@@ -2144,7 +2144,8 @@ end
 --   mileageDragRun     the strip's leader: {phase = "start", strip, run, racers = {{id,
 --                      lane}, {id, lane}}, dragType}, {phase = "green", run}, {phase =
 --                      "ended", run}
---   mileageDragStaged  each racer, for itself: {run}, once its car is staged in the run
+--   mileageDragStaged  each racer, for itself: {run, dragType}, once its car is staged in the
+--                      run; a race type other than the leader's makes the run count for nothing
 --   mileageDragResult  each racer, for its own car: {run, outcome = "finished" | "jumped",
 --                      winTime, dial}, winTime being the game's own winning time
 --
@@ -2152,7 +2153,7 @@ end
 -- both racers' own games said they are staged in it and, where the server can read
 -- positions, both cars stand within START_CHECK_METRES of their lane's stage line at the
 -- green; a finish counts only from a car the server sees within FINISH_CHECK_METRES of its
--- lane's end line. The lines are the server's own copy of each strip (DRAG_STRIPS); a run
+-- lane's end line, with a time that matches the server's own clock since the green. The lines are the server's own copy of each strip (DRAG_STRIPS); a run
 -- at a strip it does not know pays nothing.
 --
 -- The winner follows the game's own rule for the strip's race type: the lowest winning
@@ -2169,6 +2170,7 @@ end
 
 do
 local startTransfer, carNear, readCars = Money.startTransfer, Money.carNear, Money.readCars
+local plausibleTime, metresBetween = Money.plausibleTime, Money.metresBetween
 local SERVER_PARTY = Money.SERVER
 
 -- Copied from the game's levels/west_coast_usa/dragstrips/alderStrip_main.strip.json, keyed
@@ -2235,10 +2237,13 @@ local function startRacers(strip, racers)
 	return out
 end
 
--- Whether the green makes the run count: both racers staged by their own games, and both
--- cars at their stage lines where the server can see them.
+-- Whether the green makes the run count: both racers staged by their own games in the race
+-- type the leader named, and both cars at their stage lines where the server can see them.
 local function greenCounts(run)
 	for _, name in ipairs(run.names) do
+		if run.staged[name] == "otherType" then
+			return false, consoleText(name) .. "'s game runs another race type than the leader named"
+		end
 		if not run.staged[name] then return false, consoleText(name) .. "'s game never said it was staged" end
 		if carNear(run.ids[name], laneOf(run, name).stage, START_CHECK_METRES) == false then
 			return false, consoleText(name) .. "'s car is not at the start line"
@@ -2385,7 +2390,9 @@ function mileageDragStaged(player_id, data)
 	local run = message and type(message.run) == "string" and dragRuns[message.run]
 	local name = MP.GetPlayerName(player_id)
 	if not run or run.green or not otherName(run, name) or run.ids[name] ~= player_id then return end
-	run.staged[name] = true
+	-- The racer's own game confirms the race type too: the leader, often the other racer,
+	-- cannot switch the winner rule alone.
+	run.staged[name] = message.dragType == run.dragType or "otherType"
 end
 
 function mileageDragResult(player_id, data)
@@ -2400,8 +2407,16 @@ function mileageDragResult(player_id, data)
 		local dial = message.dial
 		if dial == nil then dial = 0 end
 		if not isTime(dial, 0, DIAL_MAX) then return end
+		-- The game reports as its car crosses the end line, so its time has to match the
+		-- server's own clock since the green, as a street race finish does: no quicker time
+		-- than the server saw pass, and no quicker than the strip can be driven.
+		local lane = laneOf(run, name)
+		if not plausibleTime(message.winTime, metresBetween(lane.stage, lane.finish), signalTimer:GetCurrent() - run.green) then
+			print("[Mileage] Drag run " .. consoleText(run.id) .. ": " .. consoleText(name) .. "'s time does not match the server's clock")
+			return
+		end
 		run.reports[name] = {outcome = "finished", winTime = message.winTime, dial = dial,
-			near = carNear(player_id, laneOf(run, name).finish, FINISH_CHECK_METRES)}
+			near = carNear(player_id, lane.finish, FINISH_CHECK_METRES)}
 	else
 		return
 	end

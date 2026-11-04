@@ -129,10 +129,12 @@ local function dragOracle(world, opts)
 	local run = STRIP .. "-42"
 	sendAs(world, ann, "mileageDragRun", {phase = "start", strip = STRIP, run = run, dragType = "headsUpRace",
 		racers = {{id = ann.id, lane = 1}, {id = bob.id, lane = 2}}})
-	sendAs(world, ann, "mileageDragStaged", {run = run})
-	sendAs(world, bob, "mileageDragStaged", {run = run})
+	sendAs(world, ann, "mileageDragStaged", {run = run, dragType = "headsUpRace"})
+	sendAs(world, bob, "mileageDragStaged", {run = run, dragType = "headsUpRace"})
 	sendAs(world, ann, "mileageDragRun", {phase = "green", run = run})
 	sendAs(world, bob, "mileageDragResult", {run = run, outcome = "jumped"})
+	-- Each game reports as its car crosses the line: the server's clock runs on to it.
+	world:advance(10)
 	world:drive(bob, END_LINE[2].x, END_LINE[2].y, END_LINE[2].z)
 	sendAs(world, bob, "mileageDragResult", {run = run, outcome = "finished", winTime = 9.6, dial = 0})
 	if opts.restart then
@@ -140,6 +142,7 @@ local function dragOracle(world, opts)
 			if m.event == "rxMileageGive" and m.data:find("Drag race prize", 1, true) then return "drop" end
 		end
 	end
+	world:advance(2)
 	world:drive(ann, END_LINE[1].x, END_LINE[1].y, END_LINE[1].z)
 	sendAs(world, ann, "mileageDragResult", {run = run, outcome = "finished", winTime = 11.9, dial = 0})
 	if opts.restart then

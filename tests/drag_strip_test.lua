@@ -1554,6 +1554,7 @@ test("this player's game says once that its car is staged, and reports its finis
 	local staged = serverNamed("mileageDragStaged")
 	same(#staged, 1, "one staged")
 	same(staged[1].run, id, "for the run")
+	same(staged[1].dragType, "headsUpRace", "the race type this game runs it as")
 	local racer = racerOf(1)
 	racer.winTime = 11.36
 	racer.timers = {dial = {value = 11.2}}
@@ -1565,6 +1566,17 @@ test("this player's game says once that its car is staged, and reports its finis
 	same(results[1].outcome, "finished", "finished")
 	same(results[1].winTime, 11.36, "the game's win time")
 	same(results[1].dial, 11.2, "the dial")
+end)
+
+test("a bracket run on this game is staged as a bracket race", function()
+	newWorld()
+	runTo(1)
+	otherAt(2, 2)
+	runTo(2)
+	gameplay_drag_core.getData().dragType = "bracketRace"
+	stageAll()
+	runTo(2.5)
+	same(serverNamed("mileageDragStaged")[1].dragType, "bracketRace", "bracket")
 end)
 
 test("another player's car crossing the line, or a run this player is not in, reports nothing", function()

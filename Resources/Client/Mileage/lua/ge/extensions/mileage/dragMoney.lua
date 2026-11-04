@@ -4,7 +4,8 @@
 -- money section of the server plugin). The strip's leader tells it who is racing and when
 -- the tree went green (mileage/dragLobby.lua); this game tells it about its own car only:
 --
---   mileageDragStaged  {run}, once this car is staged in the run
+--   mileageDragStaged  {run, dragType}, once this car is staged in the run, with the race
+--                      type this game runs it as (the server checks it against the leader's)
 --   mileageDragResult  {run, outcome = "finished", winTime, dial} when this car crosses the
 --                      end line, winTime being the game's own winning time (the run's time
 --                      plus the reaction), or {run, outcome = "jumped"} once, when the game
@@ -129,13 +130,14 @@ end
 
 -- The run is on screen: staging, the green and a jump start.
 local function followRun()
-	local racer = ownRacer()
+	local racer, data = ownRacer()
 	if type(racer) ~= "table" then return end
 	local phases = racer.phases
 	if not current.staged and not current.greenAt and type(phases) == "table" and type(phases[1]) == "table"
 			and phases[1].completed then
 		current.staged = true
-		send("mileageDragStaged", {run = current.run})
+		send("mileageDragStaged", {run = current.run,
+			dragType = data.dragType == "bracketRace" and "bracketRace" or "headsUpRace"})
 	end
 	if not current.greenAt then
 		local gm = multiplayer_gamemodes_drag_drag

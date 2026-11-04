@@ -36,6 +36,12 @@ end
 
 local runSeq = 0
 
+-- The strip leader's green for run id, at the server's clock now.
+local function green(world, leader, id)
+	send(world, leader, "mileageDragRun", {phase = "green", run = id})
+	world.greenAt = world.now
+end
+
 -- The leader starts a run of a (lane 1) and b (lane 2). opts.staged = false: nobody stages;
 -- opts.unstaged = p: that racer does not; opts.green = false: no green.
 local function run(world, leader, a, b, opts)
@@ -46,16 +52,24 @@ local function run(world, leader, a, b, opts)
 		racers = opts.racers or {{id = a.id, lane = 1}, {id = b.id, lane = 2}}, dragType = opts.dragType or "headsUpRace"})
 	if opts.staged ~= false then
 		for _, p in ipairs({a, b}) do
-			if p ~= opts.unstaged then send(world, p, "mileageDragStaged", {run = id}) end
+			if p ~= opts.unstaged then
+				send(world, p, "mileageDragStaged", {run = id,
+					dragType = (opts.stagedTypes and opts.stagedTypes[p]) or opts.dragType or "headsUpRace"})
+			end
 		end
 	end
-	if opts.green ~= false then send(world, leader, "mileageDragRun", {phase = "green", run = id}) end
+	world.greenAt = nil
+	if opts.green ~= false then green(world, leader, id) end
 	return id
 end
 
 -- p's own game reports its run: finished in winTime (at its end line unless opts.far), or jumped.
+-- The game reports as its car crosses the line, so the clock first runs to winTime after the
+-- green (opts.now: report at once, whatever the clock says).
 local function finish(world, p, id, lane, winTime, opts)
 	opts = opts or {}
+	local wait = world.greenAt and math.ceil(winTime) - (world.now - world.greenAt) or 0
+	if wait > 0 and not opts.now then world:advance(wait) end
 	if not opts.far then world:drive(p, FINISH[lane].x, FINISH[lane].y, FINISH[lane].z) end
 	send(world, p, "mileageDragResult", {run = id, outcome = "finished", winTime = winTime, dial = opts.dial})
 end
@@ -206,10 +220,10 @@ World.test("a report from someone not in the run, a second report, a finish befo
 	local cara = world:join("Cara", 0)
 	local id = run(world, ann, ann, bob, {green = false})
 	finish(world, bob, id, 2, 10.0, {far = true})
-	send(world, ann, "mileageDragRun", {phase = "green", run = id})
+	green(world, ann, id)
 	finish(world, cara, id, 2, 5.0)
-	finish(world, bob, id, 2, 2.5)
-	finish(world, bob, id, 2, 61)
+	finish(world, bob, id, 2, 2.5, {now = true})
+	finish(world, bob, id, 2, 61, {now = true})
 	send(world, bob, "mileageDragResult", {run = id, outcome = "finished", winTime = "9"})
 	finish(world, bob, id, 2, 11.9)
 	finish(world, bob, id, 2, 9.0)
@@ -218,11 +232,38 @@ World.test("a report from someone not in the run, a second report, a finish befo
 	same(cara.savedMoney, 0, "Cara nothing")
 end, withPrize)
 
+World.test("a time quicker than the server's own clock since the green, or than the strip can be driven, is refused",
+		function(world)
+	world.hidePositions = true
+	local ann, bob = pair(world)
+	local id = run(world, ann, ann, bob)
+	world:advance(3)
+	finish(world, bob, id, 2, 3.5, {now = true, far = true})
+	world:advance(9)
+	finish(world, bob, id, 2, 4.0, {now = true, far = true})
+	finish(world, ann, id, 1, 11.8, {far = true})
+	world:advance(70)
+	same(ann.savedMoney, 10000 + PRIZE, "Ann's real time wins, even where positions cannot be read")
+	same(bob.savedMoney, 10000, "Bob's made-up times paid nothing")
+	expect(world:printedMatching("Bob's time does not match the server's clock") == 2, "both refusals logged")
+end, withPrize)
+
+World.test("a racer whose game runs another race type than the leader named makes the run count for nothing",
+		function(world)
+	local ann, bob = pair(world)
+	local id = run(world, ann, ann, bob, {dragType = "bracketRace", stagedTypes = {[bob] = "headsUpRace"}})
+	finish(world, ann, id, 1, 12.30, {dial = 12.29})
+	finish(world, bob, id, 2, 12.50)
+	world:advance(80)
+	same(world:savedTotal(), 20000, "nothing paid")
+	expect(world:printedMatching("Bob's game runs another race type than the leader named") == 1, "logged why")
+end, withPrize)
+
 World.test("a jump start reported before the green still counts against the jumper", function(world)
 	local ann, bob = pair(world)
 	local id = run(world, ann, ann, bob, {green = false})
 	jumped(world, bob, id)
-	send(world, ann, "mileageDragRun", {phase = "green", run = id})
+	green(world, ann, id)
 	finish(world, ann, id, 1, 12.5)
 	same(ann.savedMoney, 10000 + PRIZE, "Ann wins")
 	same(lastCard(world, ann).why, "jumped", "Bob jumped")
@@ -314,9 +355,9 @@ World.test("the leader's end after the green does not decide: the other racer's 
 	local ann, bob = pair(world)
 	local id = run(world, ann, ann, bob)
 	send(world, ann, "mileageDragRun", {phase = "ended", run = id})
-	world:advance(20)
+	world:advance(5)
 	finish(world, bob, id, 2, 12.4)
-	world:advance(51)
+	world:advance(60)
 	same(bob.savedMoney, 10000 + PRIZE, "Bob wins at the 70 s wait, Ann never finished")
 end, withPrize)
 
