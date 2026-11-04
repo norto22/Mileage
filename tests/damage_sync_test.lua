@@ -506,6 +506,31 @@ test("a dent applied to a copy facing another way lands in the same place on the
 	same(copy.beamstate.deformedBeams[7], 0.3, "deformation recorded")
 end)
 
+test("a small dent on the owner moves no point of the copy, whose wheel has turned", function()
+	local owner = ownerCar()
+	tick(owner)
+	takeMessages(owner)
+	local copy = copyCar({fwd = {x = 1, y = 0, z = 0}})
+	-- Beam 22 is a tyre beam between points 22 and 23. On the copy the wheel has turned
+	-- further, so those points sit 0.3 m from where they are on the owner's car.
+	for _, n in ipairs({22, 23}) do
+		local x, y, z = toCarFrame(copy, copy.nodePos[n])
+		copy.nodePos[n] = fromCarFrame(copy, x, y + 0.3, z - 0.1)
+	end
+	local before = {[22] = vec3(copy.nodePos[22]), [23] = vec3(copy.nodePos[23])}
+	dent(owner, 22, 0.998)
+	tick(owner)
+	local m = takeMessages(owner)[1]
+	inVehicle(copy, copy.ext.applyDamage, 0, m.b, m.n)
+	for _, n in ipairs({22, 23}) do
+		local moved = math.sqrt((copy.nodePos[n].x - before[n].x) ^ 2 + (copy.nodePos[n].y - before[n].y) ^ 2
+			+ (copy.nodePos[n].z - before[n].z) ^ 2)
+		expect(moved < 1e-9, string.format("copy point %d moved %.3f m", n, moved))
+	end
+	same(copy.restLen[22], 0.998, "the owner's rest length on the copy")
+	same(copy.beamstate.deformedBeams[22], 0.3, "the deformation recorded")
+end)
+
 test("a copy refuses unknown beams and points and values out of range, and applies the rest", function()
 	local copy = copyCar()
 	local before = vec3(copy.nodePos[3])
