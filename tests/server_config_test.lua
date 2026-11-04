@@ -306,6 +306,20 @@ test("a file with the drag wait already set keeps a $0 prize and a 10-minute wai
 	end)
 end)
 
+-- Rejects a move that reads a missing prize as 0: a file from before the prize settings
+-- existed gets them as new settings, not as moved ones.
+test("a file from before the prize settings existed gets them at the new defaults with no moved lines", function()
+	run(function()
+		local prepareConfig = loadPlugin()
+		stored = ownersConfig()
+		prepareConfig()
+		for _, key in ipairs(PRIZES) do same(written.server[key], 2000, key) end
+		for _, key in ipairs(WAITS) do same(written.server[key], 5, key) end
+		same(written.server.dragRacePrizeCooldownMinutes, 5, "drag wait")
+		same(countLines(printed, "moved from"), 0, "no moved lines")
+	end)
+end)
+
 test("a file with no server section gets the new defaults and no moved lines", function()
 	run(function()
 		local prepareConfig = loadPlugin()

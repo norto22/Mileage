@@ -504,6 +504,31 @@ World.test("from a settings file before the $2000 prizes, a finisher gets $2000 
 	same(ann.money, 17000, "the prize again after the wait")
 end, {settingsFile = "old"})
 
+-- Rejects a start that only fills missing settings (an owner's file still holding the old $0
+-- prize would pay nothing) and a move that runs again on every start.
+World.test("a settings file still holding the old $0 prize and 10-minute wait moves on start and pays $2000; a $0 set afterwards survives a restart",
+		function(world)
+	same(world:printedMatching("racePrize moved from 0 to 2000"), 1, "the console names the moved prize")
+	same(world:printedMatching("racePrizeCooldownMinutes moved from 10 to 5"), 1, "and the moved wait")
+	local saved = World.decode(world.disk["Resources/Server/Mileage/config/config.json"]).server
+	same(saved.racePrize, 2000, "the prize saved at the new default")
+	same(saved.racePrizeCooldownMinutes, 5, "the wait saved at the new default")
+	local ann, bob = pair(world)
+	startRace(world, ann, bob, 1000)
+	arrive(world, ann)
+	world:advance(6)
+	same(ann.money, 13000, "both stakes and the $2000 prize")
+	world:setConfig("server", "racePrize", 0)
+	world:restart()
+	same(world:printedMatching("racePrize moved from 0 to 2000"), 1, "nothing moves on the second start")
+	ann.car.pos = {x = 0, y = 0, z = 0}
+	bob.car.pos = {x = 300, y = 900, z = 0}
+	startRace(world, ann, bob, 1000)
+	arrive(world, ann)
+	world:advance(6)
+	same(ann.money, 14000, "only the pot: the owner's $0 stayed after the restart")
+end, {settingsFile = "old", server = {racePrize = 0, racePrizeCooldownMinutes = 10}})
+
 -- Rejects a give-up path that always pays the prize: it needs the winner's own finish.
 World.test("a racer who gives up before the other reached the finish earns them no server prize", function(world)
 	local ann, bob = pair(world)
