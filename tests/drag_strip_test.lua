@@ -12,6 +12,7 @@
 local LOBBY = "Resources/Client/Mileage/lua/ge/extensions/mileage/dragLobby.lua"
 local DRAG_MODE = "Resources/Client/Mileage/lua/ge/extensions/multiplayer/gamemodes/drag/drag.lua"
 local TRANSPORT = "Resources/Client/Mileage/lua/ge/extensions/mileage/dragTransport.lua"
+local MONEY = "Resources/Client/Mileage/lua/ge/extensions/mileage/dragMoney.lua"
 
 local CAR = 7
 local ME = 1
@@ -175,6 +176,9 @@ local function newHandlers()
 		elseif msgName == "dragRaceCountdownStart" then
 			local entry = state.dragRaces[data.raceId]
 			if entry then entry.syncCountdownStart = data.startTime end
+		elseif msgName == "dragRaceStart" then
+			local entry = state.dragRaces[data.raceId]
+			if entry then entry.syncRaceStart, entry.localRaceStart = data.startTime, world.now end
 		elseif msgName == "dragRaceReset" then
 			local updates = {}
 			if data.queue then updates.queue = data.queue end
@@ -194,7 +198,7 @@ local function newWorld(opts)
 	world = {
 		now = 0, pos = {0, 0, 0}, renamed = false, cleared = 0, finalized = 0,
 		strips = {stripData("A")}, logs = {}, wire = {}, applied = {}, flashes = {}, apps = {}, sessions = {},
-		queued = {}, handlers = {}, loaded = {},
+		queued = {}, handlers = {}, loaded = {}, server = {},
 	}
 
 	function log(level, tag, msg) table.insert(world.logs, level .. " " .. tag .. ": " .. tostring(msg)) end
@@ -236,7 +240,10 @@ local function newWorld(opts)
 	-- for a list of players reaches them. Only what reaches this player comes back here.
 	function AddEventHandler(name, fn) world.handlers[name] = fn end
 	function TriggerServerEvent(name, data)
-		if name ~= "dragMP" then return end
+		if name ~= "dragMP" then
+			table.insert(world.server, {name = name, data = copy(data)})
+			return
+		end
 		table.insert(world.wire, data)
 		local leader = world.leader
 		if data.to == "host" and leader == ME then
@@ -258,9 +265,13 @@ local function newWorld(opts)
 	mileage_dragTransport = dofile(TRANSPORT)
 	multiplayer_gamemodes_drag_drag = dofile(DRAG_MODE)
 	mileage_dragLobby = dofile(LOBBY)
+	mileage_dragMoney = dofile(MONEY)
+	-- The game's winning time for a racer: the test sets racer.winTime.
+	gameplay_drag_times = {getImportantTimerValueForWin = function(racer) return racer.winTime end}
 	table.insert(world.loaded, mileage_dragTransport)
 	table.insert(world.loaded, multiplayer_gamemodes_drag_drag)
 	table.insert(world.loaded, mileage_dragLobby)
+	table.insert(world.loaded, mileage_dragMoney)
 	mileage_dragTransport.onExtensionLoaded()
 	multiplayer_gamemodes_drag_drag.setEnabled(true)
 
@@ -314,6 +325,7 @@ local function runTo(untilSeconds)
 		pump()
 		world.lobby.onUpdate(0.5)
 		world.drag.onUpdate()
+		mileage_dragMoney.onUpdate()
 		if world.clocks then multiplayer_synclib.onUpdate() end
 		pump()
 	end
@@ -1462,4 +1474,145 @@ test("#25 oracle: two players meet at a strip and the finish maps through a chec
 	local finish = world.now + 500 + 11.5
 	local mapped = multiplayer_synclib.mapOtherClock(2, finish)
 	expect(math.abs(mapped - (world.now + 11.5)) < 1e-6, "mapped finish: " .. tostring(mapped))
+end)
+
+--== the leader tells the server about each two-player run ======================
+
+local function serverNamed(name, phase)
+	local out = {}
+	for _, m in ipairs(world.server) do
+		if m.name == name and (phase == nil or m.data.phase == phase) then table.insert(out, m.data) end
+	end
+	return out
+end
+
+test("a two-player run tells the server its strip, racers, lanes and race type once; a solo run tells it nothing",
+		function()
+	newWorld()
+	runTo(11)
+	same(#world.sessions, 1, "a solo run started")
+	same(#serverNamed("mileageDragRun"), 0, "solo run not reported")
+	newWorld()
+	world.strips[1].dragType = "bracketRace"
+	runTo(1)
+	otherAt(2, 2)
+	runTo(2)
+	local starts = serverNamed("mileageDragRun", "start")
+	same(#starts, 1, "one start")
+	same(starts[1].strip, "A", "strip")
+	same(starts[1].run, lastSession().raceId, "run id")
+	same(starts[1].dragType, "bracketRace", "race type from the strip")
+	local racers = {}
+	for _, r in ipairs(starts[1].racers) do racers[r.id] = r.lane end
+	same(racers[1], 1, "this player in lane 1")
+	same(racers[2], 2, "the other in lane 2")
+end)
+
+test("the leader's green goes to the server once per run; on a player who does not lead, never", function()
+	twoPlayersRunning()
+	local id = lastSession().raceId
+	world.drag.notifyRaceStart(id)
+	world.drag.notifyRaceStart(id)
+	local greens = serverNamed("mileageDragRun", "green")
+	same(#greens, 1, "one green")
+	same(greens[1].run, id, "for the run")
+	same(serverNamed("mileageDragRun", "start")[1].dragType, "headsUpRace", "heads-up by default")
+	newWorld({leader = 2})
+	runFromLeader("A-77", {{1, 1}, {2, 2}})
+	world.lobby.applyLocally("dragRaceStart", {raceId = "A-77", startTime = 0})
+	same(#serverNamed("mileageDragRun"), 0, "nothing from a player who does not lead")
+end)
+
+test("a two-player run that ends before its result, or is reset after it, tells the server once", function()
+	newWorld()
+	runTo(1)
+	otherAt(2, 2)
+	runTo(33)
+	same(#serverNamed("mileageDragRun", "ended"), 1, "not staged in 30 s: one ended")
+	twoPlayersRunning()
+	racerOf(1).isFinished = true
+	world.lobby.getRun("A").out = {[2] = true}
+	runTo(world.now + 14)
+	same(world.lobby.getRun("A"), nil, "the run closed")
+	same(#serverNamed("mileageDragRun", "ended"), 1, "reset: one ended")
+end)
+
+--== each racer's game reports its own car ======================================
+
+-- Two players running, and the tree gone green on this machine (the leader).
+local function twoPlayersGreen()
+	twoPlayersRunning()
+	local id = lastSession().raceId
+	world.drag.notifyRaceStart(id)
+	runTo(world.now + 0.5)
+	return id
+end
+
+test("this player's game says once that its car is staged, and reports its finish with the game's win time and dial",
+		function()
+	local id = twoPlayersGreen()
+	local staged = serverNamed("mileageDragStaged")
+	same(#staged, 1, "one staged")
+	same(staged[1].run, id, "for the run")
+	local racer = racerOf(1)
+	racer.winTime = 11.36
+	racer.timers = {dial = {value = 11.2}}
+	mileage_dragMoney.dragRaceEndLineReached(CAR)
+	mileage_dragMoney.dragRaceEndLineReached(CAR)
+	local results = serverNamed("mileageDragResult")
+	same(#results, 1, "one result")
+	same(results[1].run, id, "run")
+	same(results[1].outcome, "finished", "finished")
+	same(results[1].winTime, 11.36, "the game's win time")
+	same(results[1].dial, 11.2, "the dial")
+end)
+
+test("another player's car crossing the line, or a run this player is not in, reports nothing", function()
+	twoPlayersGreen()
+	mileage_dragMoney.dragRaceEndLineReached(55)
+	same(#serverNamed("mileageDragResult"), 0, "another car")
+	newWorld({leader = 2})
+	runFromLeader("A-31", {{2, 1}, {3, 2}})
+	runTo(world.now + 1)
+	mileage_dragMoney.dragRaceEndLineReached(CAR)
+	same(#serverNamed("mileageDragStaged") + #serverNamed("mileageDragResult"), 0, "not in the run")
+end)
+
+test("a disqualified car reports a jump start once and never a finish", function()
+	twoPlayersGreen()
+	local racer = racerOf(1)
+	racer.isDisqualified = true
+	racer.winTime = 9.1
+	runTo(world.now + 2)
+	mileage_dragMoney.dragRaceEndLineReached(CAR)
+	local results = serverNamed("mileageDragResult")
+	same(#results, 1, "one report")
+	same(results[1].outcome, "jumped", "jumped")
+end)
+
+test("a run torn down after its green is still finished at the end line, timed from this game's green", function()
+	twoPlayersGreen()
+	local greenAt = world.now - 0.5
+	setLeader(2)
+	same(world.transport.getLocalClientActiveRace(), nil, "the run is off the screen")
+	runTo(greenAt + 12)
+	world.pos = {1, 390, 0}
+	runTo(world.now + 0.5)
+	local results = serverNamed("mileageDragResult")
+	same(#results, 1, "one finish")
+	same(results[1].outcome, "finished", "finished")
+	same(results[1].winTime, 12.5, "seconds since this game's green")
+	same(results[1].dial, 0, "no dial")
+end)
+
+test("a torn-down run reached after 70 s, or far from the end line, reports nothing", function()
+	twoPlayersGreen()
+	setLeader(2)
+	world.pos = {30, 400, 0}
+	runTo(world.now + 30)
+	same(#serverNamed("mileageDragResult"), 0, "30 m from the line")
+	runTo(world.now + 41)
+	world.pos = {0, 400, 0}
+	runTo(world.now + 1)
+	same(#serverNamed("mileageDragResult"), 0, "after 70 s")
 end)

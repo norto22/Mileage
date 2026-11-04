@@ -109,6 +109,20 @@ World.test("a counted two-player run pays the owner's prize to the faster racer"
 	expect(world:printedMatching("Ann beat Bob, prize $2500") == 1, "console logs the prize")
 end, withPrize)
 
+World.test("the result card reaches the prompts app, and again after a UI reload", function(world)
+	local ann, bob = pair(world)
+	local id = run(world, ann, ann, bob)
+	finish(world, ann, id, 1, 11.2)
+	finish(world, bob, id, 2, 11.9)
+	local shown = world:ui(bob, "MileageDragRace")
+	same(#shown, 1, "one card on Bob's screen")
+	same(shown[1].winner, "Ann", "who won")
+	world:as(bob, function() mileage_dragMoney.sendState() end)
+	shown = world:ui(bob, "MileageDragRace")
+	same(#shown, 2, "shown again")
+	same(shown[2].phase, "result", "the same card")
+end, withPrize)
+
 World.test("every win pays the prize again, with no wait", function(world)
 	local ann, bob = pair(world)
 	for _ = 1, 2 do
