@@ -634,6 +634,12 @@ end
 -- share only what they must through this table, which keeps the plugin's main chunk
 -- under Lua's limit of 200 local names. Money.start loads their data on a server start.
 local Money = {}
+-- The prize for a race of this many racers: the base prize for two, and half of it again
+-- for each racer past two, rounded down; never less than the base. Race spots, races
+-- against traffic cars and race events share it.
+Money.grownPrize = function(base, racers)
+	return math.floor(base * (1 + 0.5 * math.max(0, racers - 2)))
+end
 -- When each car reached the server (signalTimer seconds), by server vehicle id.
 Money.spawnedAt = {}
 
@@ -2769,11 +2775,13 @@ end
 local function announcement(e, phase)
 	local secondsLeft = math.max(0, e.at - os.time())
 	return {id = e.id, phase = phase, route = eventRouteText(e), random = e.route == "random", prize = e.prize,
-		seconds = secondsLeft, joined = joinedCount(e.joined)}
+		grows = true, seconds = secondsLeft, joined = joinedCount(e.joined)}
 end
 
+-- The typed prize is for two racers; each racer past two who starts adds half of it.
 local function announce(minutes)
-	local text = string.format("Race event in %d minute%s: %s, $%d to the winner. Join from the Mileage prompts.",
+	local text = string.format("Race event in %d minute%s: %s, $%d for two racers, +50%% per extra racer."
+		.. " Join from the Mileage prompts.",
 		minutes, minutes == 1 and "" or "s", eventRouteText(event), event.prize)
 	chatAll(text)
 	local message = announcement(event, "announce")
@@ -2836,6 +2844,9 @@ local function startEventRace()
 		return
 	end
 	live.racers = #names
+	-- The prize for the racers who start, kept for those who give up or leave later; the
+	-- stored event keeps the typed prize.
+	live.prize = Money.grownPrize(live.prize, live.racers)
 	-- The cars are still where the players left them; reading them tells the server whether
 	-- it can see cars before any finish arrives.
 	Money.readCars(names, live.finish)
@@ -3191,8 +3202,9 @@ local REFUSED = {
 	distance = "The finish must be 1.5 to 4 km away. Try again.",
 }
 
+-- The reward with this many joined players: the host and the traffic car are two racers.
 local function rewardFor(joined)
-	return math.floor(serverNumber("aiRacePrize", 0, PRIZE_HIGH) * (1 + 0.5 * joined))
+	return Money.grownPrize(serverNumber("aiRacePrize", 0, PRIZE_HIGH), joined + 2)
 end
 
 -- Seconds until name may earn the race reward again; 0 when they may now.
@@ -4219,10 +4231,9 @@ local function ranked(race)
 	return true
 end
 
--- The prize for a race of this many racers: the owner's prize for two, and half of it
--- again for each racer past two, rounded down.
+-- The prize for a race of this many racers, from the owner's prize for two.
 local function prizeFor(racers)
-	return math.floor(serverNumber("spotRacePrize", 0, PRIZE_HIGH) * (1 + 0.5 * math.max(0, racers - 2)))
+	return Money.grownPrize(serverNumber("spotRacePrize", 0, PRIZE_HIGH), racers)
 end
 
 -- Every racer who started: players and opponents, those out since the green included.

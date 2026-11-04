@@ -482,6 +482,28 @@ World.test("the win of a racer who finished and then left counts on the leaderbo
 	same(wins.Bob, nil, "no win for Bob")
 end)
 
+World.test("from a settings file before the $2000 prizes, a finisher gets $2000 and the pair waits 5 minutes",
+		function(world)
+	local ann, bob = pair(world)
+	startRace(world, ann, bob, 1000)
+	arrive(world, ann)
+	world:advance(6)
+	same(ann.money, 13000, "both stakes and the $2000 default")
+	same(lastRaceMessage(world, ann, "result").prize, 2000, "result says $2000")
+	ann.car.pos = {x = 0, y = 0, z = 0}
+	world:advance(60)
+	startRace(world, ann, bob, 1000)
+	arrive(world, ann)
+	world:advance(6)
+	same(ann.money, 14000, "only the pot within the 5-minute wait")
+	world:advance(300)
+	ann.car.pos = {x = 0, y = 0, z = 0}
+	startRace(world, ann, bob, 1000)
+	arrive(world, ann)
+	world:advance(6)
+	same(ann.money, 17000, "the prize again after the wait")
+end, {settingsFile = "old"})
+
 -- Rejects a give-up path that always pays the prize: it needs the winner's own finish.
 World.test("a racer who gives up before the other reached the finish earns them no server prize", function(world)
 	local ann, bob = pair(world)

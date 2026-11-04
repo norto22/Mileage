@@ -901,6 +901,30 @@ World.test("a joined player who beats the traffic car first gets 150%", function
 	expect(t.entry.roleName == "standard" and t.entry.enableRespawn, "the car is back in traffic")
 end)
 
+--== the $2000 default ======================================================
+
+World.test("from a settings file before the $2000 prizes, beating the car alone pays $2000 and waits 5 minutes",
+	function(world)
+	local ann, t = annAndCar(world)
+	raceAnn(world, ann, t, 40, 40)
+	same(ann.money, 3000, "the default reward")
+	same(card(world, ann, "result").prizeAgainIn, 300, "a 5-minute wait")
+end, {settingsFile = "old"})
+
+World.test("from a settings file before the $2000 prizes, a joined player who wins gets $3000", function(world)
+	local ann, t, bob = threeNear(world)
+	press(world, ann)
+	world:as(bob, function() mileage_aiRace.press() end)
+	world:pump()
+	t.car.speed = 75
+	world:advance(35)
+	world:drive(bob, FINISH.x, FINISH.y, FINISH.z)
+	world:advance(10)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	world:advance(10)
+	same(bob.money, 4000, "Bob gets 150% of the $2,000 default")
+end, {settingsFile = "old"})
+
 World.test("an invited player who gives up drops out and the others race on", function(world)
 	local ann, t, bob = threeNear(world, 2000)
 	press(world, ann)
