@@ -4065,12 +4065,14 @@ end
 
 --== the grid and the countdown ===============================================
 
--- Everyone on the grid, players and cars, and the prize for first place with them all.
+-- Everyone on the grid, players and cars, and the prize for first place with them all; 0
+-- for a racer alone, whom the race never pays.
 local function gridField(race)
 	local names = {}
 	for _, racer in ipairs(race.order) do
 		if race.racers[racer.key] then table.insert(names, {name = racer.name, car = racer.car ~= nil}) end
 	end
+	if #names < 2 then return names, 0 end
 	return names, Money.grownPrize(serverNumber("spotRacePrize", 0, PRIZE_HIGH), #names)
 end
 

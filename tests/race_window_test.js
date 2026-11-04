@@ -130,6 +130,20 @@ test("a race spot's countdown shows the prize for first place with everyone on t
 	assert.strictEqual(lineOf(scope.live.view), "You, Sam", "no prize line when the server prize is off");
 });
 
+test("a race spot countdown shows no prize line for a missing, text, zero or negative prize, and a grid that is not a list", () => {
+	const {scope} = load();
+	const racers = [{name: "Taylor"}, {name: "Sam"}];
+	for (const prize of [undefined, "lots", 0, -2000, null]) {
+		scope.emit("MileageSpotRace", {phase: "countdown", id: "s1", routeName: "City Race 1", count: 3, you: "Taylor",
+			prize, racers});
+		assert.strictEqual(lineOf(scope.live.view), "You, Sam", "no prize line for " + String(prize));
+	}
+	scope.emit("MileageSpotRace", {phase: "countdown", id: "s1", routeName: "City Race 1", count: 3, you: "Taylor",
+		prize: 0, racers: "Taylor"});
+	assert.strictEqual(lineOf(scope.live.view), "", "a grid that is not a list shows no names");
+	assert.strictEqual(scope.live.view.big, "3", "the count still shows");
+});
+
 test("a race event's countdown and GO show the prize for the racers who started", () => {
 	const {scope} = load();
 	scope.emit("MileageRace", {phase: "countdown", race: "e1", other: "the race event", stake: 0, event: true,
