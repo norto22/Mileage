@@ -323,12 +323,18 @@ end
 --- Whether this player is at a strip's line or in a run whose result is not built yet. The
 --- traffic race card (mileage/aiRace.lua) stays away while it is; nothing here changes.
 function M.busy()
-	if localContext then return true end
+	local gm = gamemode()
+	local finalized = gm and gm.isRaceFinalized and gm.isRaceFinalized()
 	local t = transport()
 	local active = t and t.getLocalClientActiveRace and t.getLocalClientActiveRace()
-	if not active then return false end
-	local gm = gamemode()
-	return not (gm and gm.isRaceFinalized and gm.isRaceFinalized())
+	if active and not finalized then return true end
+	if not localContext then return false end
+	-- The strip's leader keeps its hold on the strip wherever its car is, until the run
+	-- closes, so the hold alone does not mean at the line: the car has to be there.
+	local vehicleId = be:getPlayerVehicleID(0)
+	local veh = vehicleId and vehicleId ~= -1 and be:getObjectByID(vehicleId)
+	if not veh or not localContext.stagePos then return true end
+	return localContext.stagePos:distance(veh:getPosition()) <= STAGE_LANE_RADIUS
 end
 
 function M.clearLocalContext(keepRace)

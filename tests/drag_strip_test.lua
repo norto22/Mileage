@@ -1011,6 +1011,49 @@ test("busy while this player's run is live, even once the lobby no longer holds 
 	same(world.lobby.busy(), false, "the result is built")
 end)
 
+test("the leader of a two-player run is not busy once the result is built, 400 m down the strip", function()
+	twoPlayersRunning()
+	local raceId = world.lobby.getRun("A").raceId
+	same(world.lobby.busy(), true, "racing")
+	racerOf(1).isFinished = true
+	world.pos = {0, 400, 0}
+	runTo(10)
+	gameplay_drag_core.getRaceState(raceId).finishTimes = {[1] = 11.2, [2] = 11.9}
+	extensions.hook("onDragMPTimeslipRequested")
+	same(world.drag.isRaceFinalized(), true, "result built")
+	runTo(11)
+	same(world.lobby.getRun("A").step, "result", "the result is still on screen, held by the leader")
+	same(world.lobby.busy(), false, "the result is built and the leader is past the strip")
+end)
+
+test("a lone player, who leads their own strip, is not busy once their solo result is built", function()
+	newWorld()
+	runTo(11)
+	stageAll()
+	runTo(12)
+	same(world.lobby.getRun("A").step, "running", "step")
+	same(world.lobby.busy(), true, "racing")
+	local raceId = world.lobby.getRun("A").raceId
+	racerOf(1).isFinished = true
+	world.pos = {0, 400, 0}
+	gameplay_drag_core.getRaceState(raceId).finishTimes = {[1] = 11.2}
+	extensions.hook("onDragMPTimeslipRequested")
+	runTo(13)
+	same(world.drag.isRaceFinalized(), true, "result built")
+	same(world.lobby.busy(), false, "the solo result is built and the car is past the strip")
+end)
+
+test("a leader still down the strip is busy until the result is built, then back at the line is busy again", function()
+	twoPlayersRunning()
+	racerOf(1).isFinished = true
+	world.pos = {0, 400, 0}
+	runTo(10)
+	same(world.lobby.busy(), true, "the other racer has not finished: no result yet")
+	world.pos = {0, 0, 0}
+	runTo(10.5)
+	same(world.lobby.busy(), true, "back at the line")
+end)
+
 test("not busy after driving away from the line, or with no transport or drag mode loaded", function()
 	newWorld()
 	runTo(1)

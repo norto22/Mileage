@@ -321,3 +321,20 @@ test("a layout without the prompts window gets it at the new size, and a rebuilt
 		same(layout.mileageCompact, 1, name .. ": stamped")
 	end
 end)
+
+test("a prompts window saved with no placement gets the new size once instead of stopping the layout's update", function()
+	local layout = savedCareerLayout(BUILD)
+	table.insert(layout.apps, {appName = "mileageoffers"})
+	local M = loadModule({
+		[USER_DEFAULT .. "career.uilayout.json"] = layout,
+		[ORIGINAL_DEFAULT .. "career.uilayout.json"] = {apps = {{appName = "gameApp1"}}},
+	})
+	M.migrateLayouts()
+	local out = written[USER_DEFAULT .. "career.uilayout.json"]
+	expect(out, "written")
+	local placement = promptsApp(out).placement
+	expect(placement, "a placement was given")
+	same(placement.width, "280px", "width")
+	same(placement.height, "440px", "height")
+	same(out.mileageCompact, 1, "stamped")
+end)
