@@ -110,7 +110,7 @@ table#players-table > tbody > tr:nth-child(even) {
     background: #555;
 }
 #playerlist-contextmenu button:disabled {
-    color: #999;
+    color: #bbb;
     cursor: default;
 }
 .pl-context-name, .pl-context-form-title {

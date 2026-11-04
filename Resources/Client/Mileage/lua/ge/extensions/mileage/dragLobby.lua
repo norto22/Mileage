@@ -842,6 +842,27 @@ local function broadcast(stripId, msgName, payload, run)
 	M.applyLocally(msgName, payload)
 end
 
+--- Tells the server about a two-player run this machine leads, so it can pay the winner
+--- (the Drag money section of the server plugin): "start" with the racers and their lanes,
+--- "green" when the tree goes, "ended" when the run ends before its result or is reset.
+--- Each once per run; a solo run is never reported. The racers' own games report their
+--- staging and their results themselves (mileage/dragMoney.lua).
+local function reportRun(stripId, run, phase, fields)
+	if not run.money or run.money[phase] or type(TriggerServerEvent) ~= "function" then return end
+	run.money[phase] = true
+	local message = fields or {}
+	message.phase, message.run = phase, run.raceId
+	TriggerServerEvent("mileageDragRun", jsonEncode(message))
+end
+
+--- The strip's race type as the game set the run up, heads-up unless it says bracket.
+local function dragTypeOf(stripData)
+	local data = gameplay_drag_core and gameplay_drag_core.getData and gameplay_drag_core.getData()
+	local dragType = (data and data.dragType) or (stripData and stripData.dragType)
+	if dragType == "bracketRace" then return "bracketRace" end
+	return "headsUpRace"
+end
+
 --- Creates the race and tells everyone about it.
 ---
 --- dragSessionStarted carries the full snapshot (the handler uses it to build local race
@@ -902,6 +923,16 @@ local function startRace(stripId, players)
 	})
 	broadcast(stripId, "dragRaceStarted", { raceId = raceId })
 
+	-- A run of exactly two racers can pay its winner.
+	local heat = queue[1] or {}
+	local run = runs[stripId]
+	if #heat == 2 and run and run.raceId == raceId then
+		run.money = {}
+		local listed = {}
+		for _, item in ipairs(heat) do table.insert(listed, {id = item.playerId, lane = item.lane}) end
+		reportRun(stripId, run, "start", {strip = stripId, racers = listed, dragType = dragTypeOf(stripData)})
+	end
+
 	-- Dump what the game built from that snapshot.
 	--
 	-- The 01/08 session formed a correct race -- "2 player(s), 1 heat(s)" -- and then
@@ -961,6 +992,12 @@ function M.applyLocally(msgName, data)
 		log("E", logTag, string.format("local apply of %s failed: %s", msgName, tostring(err)))
 	end
 	if msgName == "dragRaceStarted" and type(data) == "table" then M.checkRunStart(data.raceId) end
+	-- Only the strip's leader applies its own race start locally (drag.notifyRaceStart).
+	if msgName == "dragRaceStart" and type(data) == "table" then
+		for stripId, run in pairs(runs) do
+			if run.raceId == data.raceId and isAuthorityFor(stripId) then reportRun(stripId, run, "green") end
+		end
+	end
 end
 
 --== host side: starting the countdown ========================================
@@ -1132,6 +1169,7 @@ end
 local function endRun(stripId, run, why)
 	log("I", logTag, string.format("run '%s' at '%s' ended: %s", run.raceId, stripId, why))
 	runs[stripId] = nil
+	reportRun(stripId, run, "ended")
 	local t = transport()
 	local ids = runRecipients(stripId, run)
 	if t and #ids > 0 then
@@ -1153,6 +1191,7 @@ local function closeRun(stripId, run)
 	-- alone. Sending an empty queue made dragBridge, which resolves every MP racer name
 	-- through queue[currentPairIndex] (dragBridge.lua:593-603), label the opponent "Bot".
 	broadcast(stripId, "dragRaceReset", {type = "dragRaceReset", raceId = run.raceId}, run)
+	reportRun(stripId, run, "ended")
 
 	-- And a closing notice. Where a result was built it stays up for its own linger; a run
 	-- that ran out of time with no result would otherwise keep its lights on screen.

@@ -119,6 +119,150 @@ test("the app asks the game for open offers when it loads", () => {
 
 const rows = (view) => [...(view.rows || [])].map((r) => r.label + ": " + r.value);
 
+//== a drag race for money ========================================================
+
+const DRAG = {id: "o9", kind: "drag", from: "Turbo_Tom", amount: 2000, prize: 500, minutes: 15, secondsLeft: 60};
+
+test("a drag challenge shows where, the stake, what the winner gets and how the stakes are lost", () => {
+	const {scope} = load();
+	scope.emit("MileageOffer", DRAG);
+	const v = scope.offers[0].view;
+	assert.strictEqual(v.title, "Turbo_Tom challenges you to a drag race");
+	assert.deepStrictEqual(rows(v), ["Where: The drag strip, within 15 min", "Stake: $2,000 each",
+		"Winner gets: $4,000 + $500 server prize"]);
+	assert.strictEqual(v.note, "Your next run together decides it · after the green, leaving or jumping the start loses your stake");
+	assert.strictEqual(v.accept, "Accept");
+	scope.emit("MileageOffer", Object.assign({}, DRAG, {id: "o10", amount: 0}));
+	const free = scope.offers[1].view;
+	assert.deepStrictEqual(rows(free), ["Where: The drag strip, within 15 min", "Stake: No stake",
+		"Winner gets: $500 server prize"]);
+	assert.strictEqual(free.note, "Your next run together decides it");
+});
+
+const HELD = {race: "r3", phase: "toStrip", you: "Turbo_Tom", other: "DriftQueen_77", stake: 2000, prize: 500, minutesLeft: 13};
+
+test("held stakes: the card says what the winner gets, the time left, and Call off sends it to the game", () => {
+	const {scope, lua} = load();
+	scope.emit("MileageDragRace", {race: "r3", phase: "staking", you: "Turbo_Tom", other: "DriftQueen_77", stake: 2000});
+	assert.strictEqual(scope.drag.view.note, "Taking both stakes...");
+	scope.emit("MileageDragRace", HELD);
+	const v = scope.drag.view;
+	assert.strictEqual(v.title, "Drag race vs DriftQueen_77");
+	assert.deepStrictEqual(rows(v), ["Stakes held: $2,000 each", "Winner gets: $4,000 + $500 prize"]);
+	assert.strictEqual(v.note, "Meet at the drag strip and line up together · 13 min left");
+	assert.strictEqual(v.callOff, "Call off (stakes back)");
+	scope.callOffDrag();
+	assert.ok(lua.includes("if mileage_dragMoney then mileage_dragMoney.callOff() end"), "call off sent");
+	scope.emit("MileageDragRace", Object.assign({}, HELD, {note: "lined", minutesLeft: 11}));
+	assert.strictEqual(scope.drag.view.note, "This run decides the stakes · 11 min left");
+	scope.emit("MileageDragRace", Object.assign({}, HELD, {note: "ended", minutesLeft: 9}));
+	assert.strictEqual(scope.drag.view.note, "That run ended before the green · stakes still held, line up again · 9 min left");
+	scope.emit("MileageDragRace", {race: "r3", phase: "racing", you: "Turbo_Tom", other: "DriftQueen_77", stake: 2000});
+	assert.strictEqual(scope.drag.view.callOff, undefined, "no Call off once the run went green");
+});
+
+test("a called-off drag race says why and gives the stake back", () => {
+	const {scope} = load();
+	scope.emit("MileageDragRace", {race: "r3", phase: "calledOff", you: "Turbo_Tom", other: "DriftQueen_77", stake: 2000,
+		why: "DriftQueen_77 called it off"});
+	assert.strictEqual(scope.drag.view.title, "Drag race called off");
+	assert.strictEqual(scope.drag.view.note, "DriftQueen_77 called it off.");
+	assert.deepStrictEqual(rows(scope.drag.view), ["Stake: $2,000 back to you"]);
+	scope.emit("MileageDragRace", {race: "r4", phase: "calledOff", you: "Turbo_Tom", other: "D", stake: 2000,
+		why: "no run together in 15 min"});
+	assert.strictEqual(scope.drag.view.note, "No run together in 15 min.");
+	scope.closeDrag();
+	assert.strictEqual(scope.drag, null, "closed");
+});
+
+test("the winner of a staked run sees one total, both times with the gap, and the stakes and prize split", () => {
+	const {scope} = load();
+	scope.emit("MileageDragRace", {race: "r3", phase: "result", you: "Turbo_Tom", other: "DriftQueen_77", stake: 2000,
+		pot: 4000, prize: 500, winner: "Turbo_Tom", why: "finished",
+		times: {Turbo_Tom: 12.418, DriftQueen_77: 12.901}, outcomes: {Turbo_Tom: "finished", DriftQueen_77: "finished"}});
+	const v = scope.drag.view;
+	assert.strictEqual(v.title, "You won $4,500");
+	assert.deepStrictEqual(rows(v), ["Your time: 12.418 s", "DriftQueen_77: 12.901 s (+0.483 s)",
+		"You get: $4,000 stakes + $500 prize"]);
+	assert.strictEqual(v.close, true);
+});
+
+test("the loser of a staked run sees who won, that they jumped or left, and the stake lost", () => {
+	const {scope} = load();
+	scope.emit("MileageDragRace", {race: "r3", phase: "result", you: "DriftQueen_77", other: "Turbo_Tom", stake: 2000,
+		pot: 4000, prize: 500, winner: "Turbo_Tom", why: "jumped",
+		times: {Turbo_Tom: 12.418}, outcomes: {Turbo_Tom: "finished", DriftQueen_77: "jumped"}});
+	assert.strictEqual(scope.drag.view.title, "Turbo_Tom won the drag race");
+	assert.deepStrictEqual(rows(scope.drag.view), ["Your time: jumped the start", "Turbo_Tom: 12.418 s",
+		"You lost: your $2,000 stake"]);
+	scope.emit("MileageDragRace", {race: "r3", phase: "result", you: "DriftQueen_77", other: "Turbo_Tom", stake: 2000,
+		pot: 4000, prize: 0, winner: "Turbo_Tom", why: "left",
+		times: {Turbo_Tom: 12.418}, outcomes: {Turbo_Tom: "finished", DriftQueen_77: "none"}});
+	assert.strictEqual(rows(scope.drag.view)[0], "Your time: did not finish: you left the race");
+	scope.emit("MileageDragRace", {race: "r3", phase: "result", you: "Turbo_Tom", other: "DriftQueen_77", stake: 2000,
+		pot: 4000, prize: 0, winner: "Turbo_Tom", why: "left",
+		times: {Turbo_Tom: 12.418}, outcomes: {Turbo_Tom: "finished", DriftQueen_77: "none"}});
+	assert.strictEqual(rows(scope.drag.view)[1], "DriftQueen_77: left the race");
+	assert.strictEqual(scope.drag.view.title, "You won $4,000");
+});
+
+test("a plain run that paid the prize: the prize to the winner, who won to the loser, no money line", () => {
+	const {scope} = load();
+	scope.emit("MileageDragRace", {run: "alderStrip-5", phase: "result", you: "Turbo_Tom", other: "DriftQueen_77",
+		stake: 0, pot: 0, prize: 500, winner: "Turbo_Tom", times: {Turbo_Tom: 12.4}});
+	assert.strictEqual(scope.dragRun.view.title, "You won $500");
+	assert.deepStrictEqual(rows(scope.dragRun.view), ["vs: DriftQueen_77", "You get: $500 prize"]);
+	scope.emit("MileageDragRace", {run: "alderStrip-5", phase: "result", you: "DriftQueen_77", other: "Turbo_Tom",
+		stake: 0, pot: 0, prize: 500, winner: "Turbo_Tom"});
+	assert.strictEqual(scope.dragRun.view.title, "Turbo_Tom won the drag race");
+	assert.deepStrictEqual(rows(scope.dragRun.view), ["vs: Turbo_Tom"]);
+	scope.closeDragRun();
+	assert.strictEqual(scope.dragRun, null, "closed");
+});
+
+test("a plain run's result against someone else leaves the held stakes card and its Call off in place", () => {
+	const {scope} = load();
+	scope.emit("MileageDragRace", HELD);
+	scope.emit("MileageDragRace", {run: "alderStrip-6", phase: "result", you: "Turbo_Tom", other: "Cat",
+		stake: 0, pot: 0, prize: 500, winner: "Turbo_Tom"});
+	assert.strictEqual(scope.drag.view.callOff, "Call off (stakes back)", "the held card stays");
+	assert.strictEqual(scope.dragRun.view.title, "You won $500", "the plain result beside it");
+	assert.ok(/ng-if="dragRun"[\s\S]*ng-bind="dragRun.view.title"/.test(TEMPLATE), "its own card");
+});
+
+test("a staked run with no winner gives the stake back and says why", () => {
+	const {scope} = load();
+	scope.emit("MileageDragRace", {race: "r3", phase: "result", you: "Turbo_Tom", other: "DriftQueen_77", stake: 2000,
+		pot: 0, prize: 0, why: "noFinish", times: {}, outcomes: {}});
+	assert.strictEqual(scope.drag.view.title, "No winner");
+	assert.deepStrictEqual(rows(scope.drag.view), ["Stake: $2,000 back to you"]);
+	assert.strictEqual(scope.drag.view.note, "Neither car crossed the finish line · both stakes go back.");
+	scope.emit("MileageDragRace", {race: "r3", phase: "result", you: "Turbo_Tom", other: "DriftQueen_77", stake: 2000,
+		pot: 0, prize: 0, why: "tie", times: {Turbo_Tom: 12, DriftQueen_77: 12}, outcomes: {}});
+	assert.strictEqual(scope.drag.view.note, "A dead heat · both stakes go back.");
+});
+
+test("the drag card binds every text as text, and the app asks for the drag race under way when it loads", () => {
+	const {lua} = load();
+	assert.ok(lua.includes("if mileage_dragMoney then mileage_dragMoney.sendState() end"));
+	const card = TEMPLATE.slice(TEMPLATE.indexOf('ng-if="drag"'), TEMPLATE.indexOf('ng-if="traffic"'));
+	assert.ok(card.includes('ng-bind="drag.view.title"'), "title bound");
+	assert.ok(!/\{\{/.test(card) && !/ng-bind-html/.test(card), "no interpolated markup");
+});
+
+test("a held drag race with no stake shows no stake, the prize as what the winner gets, and a plain Call off", () => {
+	const {scope} = load();
+	scope.emit("MileageDragRace", Object.assign({}, HELD, {stake: 0}));
+	assert.deepStrictEqual(rows(scope.drag.view), ["Stakes held: No stake", "Winner gets: $500 prize"]);
+	assert.strictEqual(scope.drag.view.callOff, "Call off", "no stakes to give back");
+	scope.emit("MileageDragRace", Object.assign({}, HELD, {stake: 0, prize: 0}));
+	assert.deepStrictEqual(rows(scope.drag.view), ["Stakes held: No stake"], "nothing to win: no Winner gets row");
+	scope.emit("MileageDragRace", {race: "r3", phase: "calledOff", you: "Turbo_Tom", other: "DriftQueen_77", stake: 0,
+		why: "DriftQueen_77 left"});
+	assert.deepStrictEqual(rows(scope.drag.view), [], "no stake back line");
+	assert.strictEqual(scope.drag.view.note, "DriftQueen_77 left.");
+});
+
 test("the countdown shows big, then GO, then the race panel with Give up", () => {
 	const {scope, lua} = load();
 	scope.emit("MileageRace", {phase: "countdown", race: "r1", other: "Alex_Rivera", stake: 1000, count: 2});

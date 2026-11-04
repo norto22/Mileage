@@ -54,6 +54,8 @@ loadPersistent('mileage/transfers')
 loadPersistent('mileagePlayerPayments')
 loadPersistent('mileage/offers')
 loadPersistent('mileage/streetRace')
+-- Drag race money: this game's own reports of its drag runs, and the server's drag cards.
+loadPersistent('mileage/dragMoney')
 loadPersistent('mileage/leaderboard')
 loadPersistent('mileage/raceEvents')
 -- Racing your own traffic cars: uses the street race's rolling start and the race

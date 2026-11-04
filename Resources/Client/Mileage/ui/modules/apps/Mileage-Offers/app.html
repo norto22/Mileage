@@ -15,6 +15,31 @@
 		</div>
 	</div>
 
+	<div class="mo-card mo-drag" ng-if="drag">
+		<div class="mo-title" ng-if="drag.view.title" ng-bind="drag.view.title"></div>
+		<div class="mo-row" ng-repeat="row in drag.view.rows">
+			<span class="mo-label" ng-bind="row.label"></span>
+			<span class="mo-value" ng-bind="row.value"></span>
+		</div>
+		<div class="mo-note" ng-if="drag.view.note" ng-bind="drag.view.note"></div>
+		<div class="mo-actions">
+			<button class="mo-danger" ng-if="drag.view.callOff" ng-click="callOffDrag()" ng-bind="drag.view.callOff"></button>
+			<button ng-if="drag.view.close" ng-click="closeDrag()">Close</button>
+		</div>
+	</div>
+
+	<div class="mo-card mo-drag" ng-if="dragRun">
+		<div class="mo-title" ng-bind="dragRun.view.title"></div>
+		<div class="mo-row" ng-repeat="row in dragRun.view.rows">
+			<span class="mo-label" ng-bind="row.label"></span>
+			<span class="mo-value" ng-bind="row.value"></span>
+		</div>
+		<div class="mo-note" ng-if="dragRun.view.note" ng-bind="dragRun.view.note"></div>
+		<div class="mo-actions">
+			<button ng-click="closeDragRun()">Close</button>
+		</div>
+	</div>
+
 	<div class="mo-card" ng-if="traffic">
 		<div class="mo-head">
 			<span class="mo-title" ng-bind="traffic.view.title"></span>

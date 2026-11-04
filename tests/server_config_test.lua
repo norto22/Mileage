@@ -192,7 +192,8 @@ test("a fresh install and an existing config get the racing, request and event s
 	local defaults = {allowRacing = true, allowMoneyRequests = true, allowEvents = true, raceStakeMax = 10000,
 		racePrize = 0, racePrizeCooldownMinutes = 10, raceMinDistance = 500, raceTimeLimitMinutes = 15,
 		allowAiRaces = true, aiRacePrize = 0, aiRacePrizeCooldownMinutes = 10,
-		allowSpotRaces = true, spotRacePrize = 0, spotRacePrizeCooldownMinutes = 10, spotRaceOpponentsMax = 5}
+		allowSpotRaces = true, spotRacePrize = 0, spotRacePrizeCooldownMinutes = 10, spotRaceOpponentsMax = 5,
+		dragRacePrize = 0}
 	for _, existing in ipairs({false, true}) do
 		run(function()
 			local prepareConfig = loadPlugin()

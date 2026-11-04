@@ -417,6 +417,7 @@ World.CLIENT_FILES = {
 	{"mileagePlayerPayments", CLIENT .. "mileagePlayerPayments.lua"},
 	{"mileage_offers", CLIENT .. "mileage/offers.lua"},
 	{"mileage_streetRace", CLIENT .. "mileage/streetRace.lua"},
+	{"mileage_dragMoney", CLIENT .. "mileage/dragMoney.lua"},
 	{"mileage_leaderboard", CLIENT .. "mileage/leaderboard.lua"},
 	{"mileage_raceEvents", CLIENT .. "mileage/raceEvents.lua"},
 	{"mileage_aiRace", CLIENT .. "mileage/aiRace.lua"},

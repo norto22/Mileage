@@ -384,7 +384,7 @@ function luaString(text) {
 	return "require('mime').unb64('" + btoa(binary) + "')";
 }
 
-//== the right-click menu: Race, Pay and Request money ==========================
+//== the right-click menu: Race, Drag race, Pay and Request money ===============
 // The menu asks the game what can be done with the player (mileage_offers.actionsFor),
 // shows why an action is unavailable, and opens a small form for a typed amount. Every
 // text from the game or another player is set as text, never as markup.
@@ -394,6 +394,8 @@ var playerMenu = {name: null, actions: null, mode: null};
 var ACTION_FORMS = {
 	race: {title: "Race ", label: "Stake (both put in, winner takes all)", send: "Send challenge",
 		call: "mileage_offers.race", allowZero: true},
+	drag: {title: "Drag race ", label: "Stake (both put in, winner takes all)", send: "Send challenge",
+		call: "mileage_offers.dragRace", allowZero: true},
 	pay: {title: "Pay ", label: "Amount", send: "Pay", call: "mileagePlayerPayments.payPlayer", allowZero: false},
 	request: {title: "Ask for money from ", label: "Amount", send: "Send request", call: "mileage_offers.request",
 		allowZero: false},
@@ -454,6 +456,10 @@ function actionInfo(kind) {
 		var prize = action.prize > 0 ? " · server prize " + plDollars(action.prize) : "";
 		return "Finish: your map route" + km + ". Up to " + plDollars(action.stakeMax) + " on this server" + prize;
 	}
+	if (kind === "drag") {
+		var dragPrize = action.prize > 0 ? "server prize " + plDollars(action.prize) : "no server prize";
+		return "At the drag strip. Up to " + plDollars(action.stakeMax) + " on this server · " + dragPrize;
+	}
 	if (kind === "pay" && typeof action.money === "number") return "You have " + plDollars(action.money) + ".";
 	return "";
 }
@@ -467,7 +473,7 @@ function openActionForm(kind) {
 	plSetText("pl-context-send", form.send);
 	plSetText("pl-context-error", "");
 	var input = document.getElementById("pl-context-amount");
-	input.value = kind === "race" ? "0" : "";
+	input.value = kind === "race" || kind === "drag" ? "0" : "";
 	// Typing needs the game's keyboard focus on the UI.
 	input.onfocus = function() { bngApi.engineLua('setCEFFocus(true)'); };
 	document.getElementById("pl-context-send").onclick = sendActionForm;
@@ -499,7 +505,7 @@ function sendActionForm() {
 		plSetText("pl-context-error", "More than you have (" + plDollars(action.money) + "). Enter a smaller amount.");
 		return;
 	}
-	if (kind === "race" && action && typeof action.stakeMax === "number" && amount > action.stakeMax) {
+	if ((kind === "race" || kind === "drag") && action && typeof action.stakeMax === "number" && amount > action.stakeMax) {
 		plSetText("pl-context-error", "Above this server's limit of " + plDollars(action.stakeMax) + ".");
 		return;
 	}
