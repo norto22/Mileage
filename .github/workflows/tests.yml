@@ -1,5 +1,6 @@
 # Runs the whole test suite on every push and every pull request: the Lua tests under
-# LuaJIT (the game's Lua) and Lua 5.4, then the two player list page tests under Node.
+# LuaJIT (the game's Lua) and Lua 5.4, the page tests under Node, then the Discord release
+# post tests under Python.
 # Read-only: it uses no secrets and writes nothing back.
 name: Tests
 
@@ -30,6 +31,9 @@ jobs:
           node tests/player_list_test.js
           node tests/prompts_app_test.js
           node tests/race_window_test.js
+
+      - name: Discord release post tests
+        run: python3 tests/discord_post_test.py
 
       # A release branch is named for its version (v0.4.1), and everything that carries
       # the version must say the same; tools/set_version.py writes them all.
