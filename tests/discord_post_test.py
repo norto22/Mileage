@@ -11,6 +11,7 @@ import http.client
 import io
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -354,6 +355,90 @@ class SkipAndFailure(unittest.TestCase):
     def test_an_error_answer_that_names_the_webhook_never_prints_it(self):
         body = json.dumps({"message": f"bad {WEBHOOK}"}).encode()
         self.assert_failed(Run(answers=[http_error(400, body)]), "400")
+
+
+def workflow(name):
+    with open(os.path.join(ROOT, ".github", "workflows", name), encoding="utf-8") as handle:
+        return handle.read()
+
+
+def run_blocks(text):
+    """Returns the text of every `run:` entry in a workflow, including multi-line ones."""
+    blocks = []
+    lines = text.split("\n")
+    for index, line in enumerate(lines):
+        found = re.match(r"( *)(- )?run:(.*)", line)
+        if not found:
+            continue
+        indent = len(found.group(1)) + len(found.group(2) or "")
+        block = [found.group(3)]
+        for following in lines[index + 1 :]:
+            if following.strip() and len(following) - len(following.lstrip()) <= indent:
+                break
+            block.append(following)
+        blocks.append("\n".join(block))
+    return blocks
+
+
+def job(text, name):
+    """Returns one job of a workflow, from its name up to the next job."""
+    found = re.search(rf"^  {name}:\n(.*?)(?=^  \S|\Z)", text, re.MULTILINE | re.DOTALL)
+    return found.group(1) if found else None
+
+
+class Workflows(unittest.TestCase):
+    def test_the_discord_workflow_can_be_called_and_run_by_hand_with_a_version(self):
+        text = workflow("discord.yml")
+        self.assertIn("name: Post release to Discord", text)
+        for trigger in ("workflow_call", "workflow_dispatch"):
+            found = re.search(rf"^  {trigger}:\n(.*?)(?=^  \S|^\S)", text, re.MULTILINE | re.DOTALL)
+            self.assertIsNotNone(found, trigger)
+            self.assertRegex(found.group(1), r"version:\n\s+.*(\n\s+.*)*required: true")
+        self.assertRegex(text, r"secrets:\n\s+DISCORD_WEBHOOK_URL:\n\s+required: false")
+        self.assertRegex(text, r"(?m)^permissions:\n  contents: read$")
+
+    def test_the_discord_workflow_reads_the_release_and_runs_the_script(self):
+        text = workflow("discord.yml")
+        self.assertIn('gh release view "$VERSION"', text)
+        self.assertIn("python3 tools/discord_post.py", text)
+        self.assertIn("DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}", text)
+        self.assertLess(text.index("gh release view"), text.index("python3 tools/discord_post.py"))
+
+    def test_the_webhook_reaches_only_the_step_that_posts(self):
+        text = workflow("discord.yml")
+        steps = re.split(r"(?m)^      - ", text)
+        holding = [step for step in steps if "secrets.DISCORD_WEBHOOK_URL" in step]
+        self.assertEqual(len(holding), 1)
+        self.assertIn("python3 tools/discord_post.py", holding[0])
+
+    def test_no_run_block_holds_an_expression(self):
+        for name in ("discord.yml", "release.yml", "tests.yml"):
+            blocks = run_blocks(workflow(name))
+            self.assertTrue(blocks, name)
+            for block in blocks:
+                self.assertNotIn("${{", block, name)
+
+    def test_the_release_workflow_calls_the_discord_workflow_after_a_published_release(self):
+        discord = job(workflow("release.yml"), "discord")
+        self.assertIsNotNone(discord)
+        self.assertIn("needs: release", discord)
+        self.assertIn("contents: read", discord)
+        self.assertIn("uses: ./.github/workflows/discord.yml", discord)
+        self.assertIn("version: ${{ github.event.pull_request.title }}", discord)
+        self.assertIn("DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}", discord)
+
+    def test_a_discord_problem_cannot_reach_the_release_job(self):
+        text = workflow("release.yml")
+        release = job(text, "release")
+        self.assertNotIn("iscord", release)
+        self.assertNotIn("continue-on-error", text)
+        self.assertLess(text.index("  release:\n"), text.index("  discord:\n"))
+
+    def test_a_manual_run_never_starts_the_check_or_release_jobs(self):
+        self.assertNotIn("workflow_dispatch", workflow("release.yml"))
+
+    def test_the_test_workflow_runs_these_tests(self):
+        self.assertIn("python3 tests/discord_post_test.py", workflow("tests.yml"))
 
 
 if __name__ == "__main__":

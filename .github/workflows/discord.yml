@@ -1,0 +1,60 @@
+# Posts a published release's title and notes to the Discord channel. The release workflow
+# calls this after publishing; to post an existing release, run it by hand from the Actions
+# tab with the version.
+#
+# It reads the published release, so both ways post the same thing. A separate workflow keeps
+# a Discord problem away from the release itself. The version and notes are data, so they
+# reach scripts only through environment variables and a file, and only the step that posts
+# sees the webhook address. Without the DISCORD_WEBHOOK_URL secret the post is skipped with
+# a warning.
+name: Post release to Discord
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: Version to post, for example v0.7.2
+        required: true
+        type: string
+    secrets:
+      DISCORD_WEBHOOK_URL:
+        required: false
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to post, for example v0.7.2
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    steps:
+      # A merged pull request's own ref is not the merged code, so use the merge commit;
+      # a run by hand has no pull request and uses the branch it was started on.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha || github.sha }}
+
+      - name: Read the release
+        env:
+          VERSION: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [[ ! "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "discord post failed: version must be vX.X.X, for example v0.2.0"
+            exit 1
+          fi
+          gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" --json body --jq .body > "$RUNNER_TEMP/notes.md"
+          url="$(gh release view "$VERSION" --repo "$GITHUB_REPOSITORY" --json url --jq .url)"
+          echo "RELEASE_URL=$url" >> "$GITHUB_ENV"
+
+      - name: Post to Discord
+        env:
+          VERSION: ${{ inputs.version }}
+          NOTES_FILE: ${{ runner.temp }}/notes.md
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+        run: python3 tools/discord_post.py
