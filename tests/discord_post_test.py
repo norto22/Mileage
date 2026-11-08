@@ -12,6 +12,7 @@ import io
 import json
 import os
 import re
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -156,6 +157,40 @@ class Messages(unittest.TestCase):
         self.assert_well_formed(messages)
         self.assertIn("- after", "\n".join(messages))
 
+    def test_a_heading_inside_a_code_block_is_not_a_section(self):
+        text = "\n".join(build("## New\n\n```\n## Checks\nan example\n```\n\nAfter the block."))
+        for kept in ("## Checks", "an example", "After the block."):
+            self.assertIn(kept, text)
+        self.assertEqual(text.count("```"), 2)
+
+    def test_a_reviewer_section_holding_a_code_block_is_left_out_whole(self):
+        text = "\n".join(build("## New\n\nKept.\n\n## Checks\n\n```\n## Not a heading\n```\n\nGone."))
+        self.assertIn("Kept.", text)
+        for dropped in ("```", "Not a heading", "Gone."):
+            self.assertNotIn(dropped, text)
+
+    def test_a_long_code_block_is_closed_and_reopened_across_messages(self):
+        code = [f"line {number} " + "x" * 100 for number in range(40)]
+        messages = build("## New\n\n```lua\n" + "\n".join(code) + "\n```\n\nAfter the block.")
+        self.assertGreater(len(messages), 1)
+        self.assert_well_formed(messages)
+        for message in messages:
+            self.assertEqual(sum(line.startswith("```") for line in message.split("\n")) % 2, 0, message)
+        for message in messages[1:-1]:
+            self.assertTrue(message.startswith("```lua\n"))
+            self.assertTrue(message.endswith("\n```"))
+        posted = [line for message in messages for line in message.split("\n") if line.startswith("line ")]
+        self.assertEqual(posted, code)
+        self.assertIn("After the block.", messages[-1])
+
+    def test_a_section_heading_is_never_left_at_the_end_of_a_message(self):
+        small = "## First\n\n" + "\n".join(bullets(5))
+        big = "## Big\n\n" + "\n".join(bullets(12))
+        messages = build(f"{small}\n\n{big}")
+        self.assertGreater(len(messages), 1)
+        for message in messages:
+            self.assertFalse(message.split("\n")[-1].startswith("#"), message)
+
     def test_text_of_exactly_the_limit_stays_one_message(self):
         room = LIMIT - len(f"# {VERSION}\n\n\n\n{LINK}")
         messages = build("y" * room)
@@ -165,6 +200,39 @@ class Messages(unittest.TestCase):
     def test_one_character_over_the_limit_makes_two_messages(self):
         room = LIMIT - len(f"# {VERSION}\n\n\n\n{LINK}") + 1
         self.assertEqual(len(build("y" * room)), 2)
+
+    def test_a_line_of_exactly_the_limit_is_never_split(self):
+        full = "- " + "w " * 998 + "ww"
+        self.assertEqual(len(full), LIMIT)
+        messages = build("## Big\n\n" + "\n".join(bullets(2) + [full] + bullets(2)))
+        self.assert_well_formed(messages)
+        self.assertIn(full, [line for message in messages for line in message.split("\n")])
+
+    def test_only_a_two_hash_heading_starts_or_ends_a_reviewer_section(self):
+        notes = (
+            "## Fixed\n\n### Checks\n\nKept three.\n\n# Checks\n\nKept one.\n\n##Checks\n\nKept none.\n\n"
+            "## Checks\n\n### Detail\n\nGone three.\n\n# Title\n\nGone one.\n\n## New\n\nKept after."
+        )
+        text = "\n".join(build(notes))
+        for kept in ("### Checks", "Kept three.", "# Checks", "Kept one.", "##Checks", "Kept none.", "Kept after."):
+            self.assertIn(kept, text)
+        for dropped in ("### Detail", "Gone three.", "# Title", "Gone one."):
+            self.assertNotIn(dropped, text)
+
+    def test_indented_lines_keep_their_indent_across_a_split(self):
+        lines = [line if number % 2 == 0 else "  " + line for number, line in enumerate(bullets(12))]
+        messages = build("## Big\n\n" + "\n".join(lines))
+        self.assertGreater(len(messages), 1)
+        posted = [line for message in messages for line in message.split("\n")]
+        self.assertEqual([line for line in posted if "bullet" in line], lines)
+
+    def test_the_link_is_still_last_when_the_last_section_fills_a_message(self):
+        section = "## Big\n\n- " + "z" * (LIMIT - len("## Big\n\n- "))
+        self.assertEqual(len(section), LIMIT)
+        messages = build(section)
+        self.assert_well_formed(messages)
+        self.assertTrue(messages[-1].endswith(LINK))
+        self.assertIn("- " + "z" * (LIMIT - len("## Big\n\n- ")), "\n".join(messages))
 
 
 class Response:
@@ -286,6 +354,28 @@ class Posting(unittest.TestCase):
         run = Run(answers=[http_error(429, b"oops")])
         self.assertEqual(run.sleeps, [1])
 
+    def test_a_rate_limit_on_a_later_message_retries_only_that_message(self):
+        notes = "\n".join(bullets(20))
+        wanted = discord_post.build_messages(VERSION, notes, URL)
+        self.assertGreater(len(wanted), 2)
+        run = Run(notes=notes, answers=[Response(), http_error(429, b'{"retry_after": 1}')])
+        self.assertEqual(run.code, 0)
+        sent = [payload["content"] for payload in run.payloads()]
+        self.assertEqual(sent, [wanted[0], wanted[1]] + wanted[1:])
+
+    def test_a_rate_limit_asking_for_an_impossible_wait_stays_within_the_limits(self):
+        for body in (b'{"retry_after": -5}', b'{"retry_after": NaN}', b'{"retry_after": Infinity}', b'{"retry_after": null}'):
+            run = Run(answers=[http_error(429, body)])
+            self.assertEqual(run.code, 0, body)
+            self.assertEqual(len(run.requests), 2, body)
+            self.assertEqual(len(run.sleeps), 1, body)
+            self.assertTrue(0 <= run.sleeps[0] <= 30, body)
+
+    def test_a_webhook_pasted_with_stray_spaces_is_posted_to_clean(self):
+        run = Run(DISCORD_WEBHOOK_URL=f"  {WEBHOOK}\n")
+        self.assertEqual(run.code, 0)
+        self.assertEqual(run.requests[0].full_url, WEBHOOK + "?wait=true")
+
 
 class SkipAndFailure(unittest.TestCase):
     def assert_failed(self, run, *words):
@@ -344,6 +434,26 @@ class SkipAndFailure(unittest.TestCase):
         self.assert_failed(run, f"posted 1 of {total}", "500")
         self.assertEqual(len(run.requests), 2)
 
+    def test_an_error_answer_whose_body_cannot_be_read_is_a_named_failure(self):
+        error = http_error(500)
+        error.read = mock.Mock(side_effect=http.client.IncompleteRead(b""))
+        run = Run(answers=[error])
+        self.assert_failed(run, "posted 0 of 1", "500")
+        self.assertEqual(len(run.requests), 1)
+
+    def test_a_rate_limit_whose_body_cannot_be_read_still_waits_and_retries(self):
+        error = http_error(429)
+        error.read = mock.Mock(side_effect=TimeoutError("timed out"))
+        run = Run(answers=[error])
+        self.assertEqual(run.code, 0)
+        self.assertEqual(run.sleeps, [1])
+
+    def test_a_rate_limit_asking_for_a_huge_wait_is_not_a_crash(self):
+        huge = b'{"retry_after": 1' + b"0" * 400 + b"}"
+        run = Run(answers=[http_error(429, huge)])
+        self.assertEqual(run.code, 0)
+        self.assertEqual(run.sleeps, [1])
+
     def test_a_network_error_never_prints_the_webhook(self):
         run = Run(answers=[urllib.error.URLError(f"could not reach {WEBHOOK}?wait=true")])
         self.assert_failed(run, "posted 0 of 1")
@@ -355,6 +465,42 @@ class SkipAndFailure(unittest.TestCase):
     def test_an_error_answer_that_names_the_webhook_never_prints_it(self):
         body = json.dumps({"message": f"bad {WEBHOOK}"}).encode()
         self.assert_failed(Run(answers=[http_error(400, body)]), "400")
+
+    def test_a_bad_version_fails_even_with_no_webhook(self):
+        run = Run(VERSION="0.7.3", DISCORD_WEBHOOK_URL=None)
+        self.assert_failed(run, "version")
+        self.assertNotIn("skipped", run.output)
+
+    def test_an_empty_release_link_fails_and_sends_nothing(self):
+        run = Run(RELEASE_URL="")
+        self.assert_failed(run, "release link")
+        self.assertEqual(run.requests, [])
+
+    def test_notes_that_are_not_text_fail_and_send_nothing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "notes.md")
+            with open(path, "wb") as handle:
+                handle.write(b"## Fixed\n\n\xff\xfe\n")
+            run = Run(NOTES_FILE=path)
+        self.assert_failed(run, "notes")
+        self.assertEqual(run.requests, [])
+
+    def test_only_a_rate_limit_is_ever_retried(self):
+        for answer in (http_error(403), http_error(500), urllib.error.URLError("down")):
+            run = Run(answers=[answer])
+            self.assert_failed(run, "posted 0 of 1")
+            self.assertEqual(len(run.requests), 1)
+            self.assertEqual(run.sleeps, [])
+
+    def test_a_failure_after_a_rate_limit_stops_there(self):
+        run = Run(answers=[http_error(429, b'{"retry_after": 1}'), http_error(500)])
+        self.assert_failed(run, "posted 0 of 1", "500")
+        self.assertEqual(len(run.requests), 2)
+
+    def test_an_error_answer_that_is_not_a_json_object_still_names_the_status(self):
+        for body in (b"[]", b"oops", b"\xff\xfe", b""):
+            run = Run(answers=[http_error(500, body)])
+            self.assert_failed(run, "posted 0 of 1", "Discord answered 500")
 
 
 def workflow(name):
@@ -439,6 +585,75 @@ class Workflows(unittest.TestCase):
 
     def test_the_test_workflow_runs_these_tests(self):
         self.assertIn("python3 tests/discord_post_test.py", workflow("tests.yml"))
+
+    def test_the_discord_job_keeps_the_default_rule_that_a_failed_release_stops_it(self):
+        self.assertNotRegex(job(workflow("release.yml"), "discord"), r"(?m)^\s+if:")
+
+
+class ReadStep(unittest.TestCase):
+    """Runs the Discord workflow's "Read the release" step with a stand-in for `gh`."""
+
+    def read_step(self, version, gh_exit=0):
+        text = workflow("discord.yml")
+        step = next(part for part in re.split(r"(?m)^      - ", text) if part.startswith("name: Read the release"))
+        script = "\n".join(line.strip() for line in run_blocks(step)[0].split("\n")[1:])
+        with tempfile.TemporaryDirectory() as folder:
+            calls = os.path.join(folder, "gh-calls")
+            stand_in = os.path.join(folder, "gh")
+            with open(stand_in, "w", encoding="utf-8") as handle:
+                handle.write(
+                    "#!/bin/bash\n"
+                    f'echo "$*" >> "{calls}"\n'
+                    f"[ {gh_exit} -eq 0 ] || {{ echo 'release not found' >&2; exit {gh_exit}; }}\n"
+                    f'case "$*" in *"--json body"*) printf "## Fixed\\n\\n- One.\\n";; *) echo "{URL}";; esac\n'
+                )
+            os.chmod(stand_in, 0o755)
+            github_env = os.path.join(folder, "github-env")
+            open(github_env, "w", encoding="utf-8").close()
+            result = subprocess.run(
+                ["bash", "-e", "-c", script],
+                env={
+                    "PATH": folder + os.pathsep + os.environ["PATH"],
+                    "VERSION": version,
+                    "GITHUB_REPOSITORY": "norto22/Mileage",
+                    "GITHUB_ENV": github_env,
+                    "RUNNER_TEMP": folder,
+                },
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+            )
+            notes = os.path.join(folder, "notes.md")
+            with open(github_env, encoding="utf-8") as handle:
+                exported = handle.read()
+            called = os.path.exists(calls)
+            body = None
+            if os.path.exists(notes):
+                with open(notes, encoding="utf-8") as handle:
+                    body = handle.read()
+        return result, exported, called, body
+
+    def test_a_published_release_hands_its_notes_and_link_to_the_next_step(self):
+        result, exported, called, body = self.read_step(VERSION)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue(called)
+        self.assertEqual(body, "## Fixed\n\n- One.\n")
+        self.assertEqual(exported, f"RELEASE_URL={URL}\n")
+
+    def test_a_version_that_is_not_a_release_number_fails_before_github_is_asked(self):
+        for version in ("", "0.7.2", "v0.7", "v0.7.2-rc1", "v0.7.2; touch pwned", "v0.7.2\nv0.7.3"):
+            result, exported, called, _ = self.read_step(version)
+            self.assertNotEqual(result.returncode, 0, version)
+            self.assertIn("discord post failed: version must be vX.X.X", result.stdout, version)
+            self.assertFalse(called, version)
+            self.assertEqual(exported, "", version)
+
+    def test_an_unknown_version_fails_the_step_and_hands_nothing_on(self):
+        result, exported, called, _ = self.read_step("v9.9.9", gh_exit=1)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertTrue(called)
+        self.assertIn("release not found", result.stderr)
+        self.assertEqual(exported, "")
 
 
 if __name__ == "__main__":
