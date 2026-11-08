@@ -34,7 +34,9 @@ from release_check import TITLE_PATTERN  # noqa: E402
 MESSAGE_LIMIT = 2000
 REVIEWER_SECTIONS = {"before merging", "checks"}
 SECTION_HEADING = re.compile(r"## +(.*)")
-FENCE = re.compile(r" {0,3}(`{3,}|~{3,})")
+# A fence of backticks cannot have more backticks after it: ```this``` is inline code.
+FENCE = re.compile(r" {0,3}(`{3,}(?=[^`]*$)|~{3,})")
+FENCE_CLOSE = re.compile(r" {0,3}(`{3,}|~{3,}) *")
 USERNAME = "Mileage"
 SUPPRESS_LINK_PREVIEWS = 4
 # Discord turns away requests carrying Python's default User-Agent.
@@ -49,12 +51,18 @@ def walk_fences(lines):
     opener = None
     for line in lines:
         before = opener
-        marker = FENCE.match(line)
-        if marker and opener is None:
-            opener = line.strip()
-        elif marker and line.strip() == fence_marker(opener):
+        if opener is None:
+            opener = line.strip() if FENCE.match(line) else None
+        elif closes_fence(line, opener):
             opener = None
         yield line, before, opener
+
+
+def closes_fence(line, opener):
+    """Says whether a line ends the open fence: only its own character, at least as many."""
+    closing = FENCE_CLOSE.fullmatch(line)
+    marker = fence_marker(opener)
+    return bool(closing) and closing.group(1)[0] == marker[0] and len(closing.group(1)) >= len(marker)
 
 
 def fence_marker(opener):
@@ -85,13 +93,13 @@ def sections_of(text):
     return ["\n".join(block).strip() for block in blocks if "".join(block).strip()]
 
 
-def split_long_line(line):
-    """Splits a line longer than a message at word breaks; cuts it where it has none."""
+def split_long_line(line, limit):
+    """Splits a line longer than the limit at word breaks; cuts it where it has none."""
     pieces = []
-    while len(line) > MESSAGE_LIMIT:
-        cut = line.rfind(" ", 1, MESSAGE_LIMIT + 1)
+    while len(line) > limit:
+        cut = line.rfind(" ", 1, limit + 1)
         if cut <= 0:
-            cut = MESSAGE_LIMIT
+            cut = limit
         pieces.append(line[:cut].rstrip())
         line = line[cut:].lstrip()
     pieces.append(line)
@@ -112,23 +120,29 @@ class MessagePacker:
             self.messages.append(self.current.rstrip() + closing)
         self.current = ""
 
-    def add_long_line(self, line, open_fence):
-        self.flush(open_fence)
-        *whole, self.current = split_long_line(line)
-        self.messages.extend(whole)
+    def place(self, line, before, after):
+        """Adds a line that fits a message, moving to a new message when this one is full."""
+        if not (self.current or line):
+            return
+        room_for_closing = len(fence_marker(after)) + 1 if after else 0
+        candidate = f"{self.current}\n{line}" if self.current else line
+        if len(candidate) + room_for_closing > MESSAGE_LIMIT:
+            self.flush(before)
+            candidate = f"{before}\n{line}" if before else line
+        self.current = candidate
 
     def add_line(self, line, before, after):
-        """Adds one line, moving to a new message when it no longer fits."""
+        """Adds one line, splitting it only when no message could hold it whole."""
         line = line if line.strip() else ""
-        room_for_closing = len(fence_marker(after)) + 1 if after else 0
-        if len(line) + room_for_closing > MESSAGE_LIMIT:
-            self.add_long_line(line, before)
-        elif self.current or line:
-            candidate = f"{self.current}\n{line}" if self.current else line
-            if len(candidate) + room_for_closing > MESSAGE_LIMIT:
-                self.flush(before)
-                candidate = f"{before}\n{line}" if before else line
-            self.current = candidate
+        fence = before or after
+        limit = MESSAGE_LIMIT - (len(fence) + len(fence_marker(fence)) + 2 if fence else 0)
+        if len(line) <= limit:
+            self.place(line, before, after)
+            return
+        self.flush(before)
+        self.current = before or ""
+        for piece in split_long_line(line, limit):
+            self.place(piece, before, after)
 
     def add_block(self, block):
         """Adds a section whole when it fits, otherwise line by line."""

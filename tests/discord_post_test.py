@@ -183,6 +183,42 @@ class Messages(unittest.TestCase):
         self.assertEqual(posted, code)
         self.assertIn("After the block.", messages[-1])
 
+    def assert_fences_balance(self, messages):
+        self.assert_well_formed(messages)
+        for message in messages:
+            self.assertEqual(sum(line.startswith("```") for line in message.split("\n")) % 2, 0, message)
+
+    def test_a_code_line_nearly_as_long_as_a_message_still_fits_with_its_fence(self):
+        for length in (1990, 1995, 2000):
+            notes = "## New\n\n```lua\nfirst\n" + "x" * length + "\nlast\n```"
+            messages = build(notes)
+            self.assert_fences_balance(messages)
+            self.assertIn("first", messages[0])
+
+    def test_a_code_line_longer_than_a_message_stays_inside_its_code_block(self):
+        solid = "x" * 5000
+        messages = build(f"## New\n\n```\nfirst\n{solid}\nlast\n```\n\nAfter the block.")
+        self.assert_fences_balance(messages)
+        posted = [line for message in messages for line in message.split("\n")]
+        self.assertEqual("".join(line for line in posted if line.startswith("x")), solid)
+        self.assertLess(posted.index("first"), posted.index("last"))
+        self.assertIn("After the block.", messages[-1])
+
+    def test_inline_code_with_three_backticks_does_not_hide_a_reviewer_section(self):
+        text = "\n".join(build("## New\n\n```foo``` is inline.\n\n## Checks\n\nGone."))
+        self.assertIn("is inline.", text)
+        self.assertNotIn("Gone.", text)
+
+    def test_a_longer_closing_fence_ends_the_code_block(self):
+        text = "\n".join(build("## New\n\n```\ncode\n`````\n\n## Checks\n\nGone."))
+        self.assertIn("code", text)
+        self.assertNotIn("Gone.", text)
+
+    def test_a_line_that_only_starts_like_a_fence_does_not_end_the_code_block(self):
+        text = "\n".join(build("## New\n\n```\n``` not the end\n## Checks\nstays\n```\n\n## Checks\n\nGone."))
+        self.assertIn("stays", text)
+        self.assertNotIn("Gone.", text)
+
     def test_a_section_heading_is_never_left_at_the_end_of_a_message(self):
         small = "## First\n\n" + "\n".join(bullets(5))
         big = "## Big\n\n" + "\n".join(bullets(12))
@@ -190,6 +226,69 @@ class Messages(unittest.TestCase):
         self.assertGreater(len(messages), 1)
         for message in messages:
             self.assertFalse(message.split("\n")[-1].startswith("#"), message)
+
+    def test_a_heading_inside_a_tilde_code_block_is_not_a_section(self):
+        text = "\n".join(build("## New\n\n~~~\n## Checks\nkept\n~~~\n\n## Checks\n\nGone."))
+        self.assertIn("kept", text)
+        self.assertNotIn("Gone.", text)
+
+    def test_a_fence_of_the_other_kind_does_not_close_a_code_block(self):
+        text = "\n".join(build("## New\n\n```\n~~~\n## Checks\nkept\n```"))
+        self.assertIn("kept", text)
+
+    def test_a_fence_line_with_words_after_it_does_not_close_a_code_block(self):
+        text = "\n".join(build("## New\n\n```\n```lua\n## Checks\nkept\n```"))
+        self.assertIn("kept", text)
+
+    def test_a_shorter_fence_does_not_close_a_longer_one(self):
+        text = "\n".join(build("## New\n\n````\n```\n## Checks\nkept\n```\n````\n\n## Checks\n\nGone."))
+        self.assertIn("kept", text)
+        self.assertNotIn("Gone.", text)
+
+    def test_a_heading_straight_after_a_code_block_is_a_section_again(self):
+        text = "\n".join(build("## New\n\n```\ncode\n```\n## Checks\n\nGone."))
+        self.assertIn("code", text)
+        self.assertNotIn("Gone.", text)
+
+    def test_a_fence_indented_four_spaces_is_not_a_code_block(self):
+        text = "\n".join(build("## New\n\n    ```\n\n## Checks\n\nGone."))
+        self.assertNotIn("Gone.", text)
+
+    def test_a_long_code_block_is_closed_and_reopened_with_its_own_fence(self):
+        code = [f"line {number} " + "x" * 100 for number in range(40)]
+        for opener, closer in (("~~~sh", "~~~"), ("````lua", "````")):
+            messages = build(f"## New\n\n{opener}\n" + "\n".join(code) + f"\n{closer}")
+            self.assertGreater(len(messages), 1)
+            self.assert_well_formed(messages)
+            for message in messages[1:-1]:
+                self.assertTrue(message.startswith(f"{opener}\n"), message[:20])
+                self.assertTrue(message.endswith(f"\n{closer}"), message[-20:])
+
+    def test_the_closing_fence_of_a_split_code_block_always_fits(self):
+        for length in range(90, 130):
+            code = [f"{number:02d} " + "x" * (length - 3) for number in range(60)]
+            messages = build("## New\n\n```\n" + "\n".join(code) + "\n```")
+            self.assert_well_formed(messages)
+            for message in messages:
+                self.assertEqual(sum(line == "```" for line in message.split("\n")) % 2, 0, length)
+            self.assertEqual([line for message in messages for line in message.split("\n") if line[:2].isdigit()], code)
+
+    def test_a_long_code_block_that_is_never_closed_still_arrives_whole(self):
+        code = [f"line {number} " + "x" * 100 for number in range(40)]
+        messages = build("## New\n\n```\n" + "\n".join(code))
+        self.assert_well_formed(messages)
+        self.assertEqual([line for message in messages for line in message.split("\n") if line.startswith("line ")], code)
+
+    def test_the_version_heading_stays_above_a_long_first_section(self):
+        messages = build("## Big\n\n" + "\n".join(bullets(12)))
+        self.assertTrue(messages[0].startswith(f"# {VERSION}\n\n## Big\n\n- bullet 0 "))
+
+    def test_a_long_section_after_another_section_starts_its_own_message(self):
+        small = "## First\n\n" + "\n".join(bullets(2))
+        big = "## Big\n\n" + "\n".join(bullets(12))
+        messages = build(f"{small}\n\n{big}")
+        self.assertNotIn("## Big", messages[0])
+        self.assertTrue(messages[1].startswith("## Big\n"))
 
     def test_text_of_exactly_the_limit_stays_one_message(self):
         room = LIMIT - len(f"# {VERSION}\n\n\n\n{LINK}")
@@ -447,6 +546,21 @@ class SkipAndFailure(unittest.TestCase):
         run = Run(answers=[error])
         self.assertEqual(run.code, 0)
         self.assertEqual(run.sleeps, [1])
+
+    def test_a_failure_answer_that_cannot_be_read_is_never_retried(self):
+        for problem in (ValueError("closed"), ConnectionResetError("reset"), http.client.IncompleteRead(b"")):
+            error = http_error(404)
+            error.read = mock.Mock(side_effect=problem)
+            run = Run(answers=[error])
+            self.assert_failed(run, "posted 0 of 1", "404")
+            self.assertEqual(len(run.requests), 1)
+            self.assertEqual(run.sleeps, [])
+
+    def test_a_huge_wait_in_the_answer_falls_back_to_the_header(self):
+        huge = b'{"retry_after": 1' + b"0" * 400 + b"}"
+        run = Run(answers=[http_error(429, huge, {"Retry-After": "4"})])
+        self.assertEqual(run.code, 0)
+        self.assertEqual(run.sleeps, [4])
 
     def test_a_rate_limit_asking_for_a_huge_wait_is_not_a_crash(self):
         huge = b'{"retry_after": 1' + b"0" * 400 + b"}"
