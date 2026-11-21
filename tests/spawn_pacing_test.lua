@@ -160,6 +160,9 @@ local function setup(opts)
 		table.insert(bm.counts, {frame = bm.frame, spawns = spawns, edits = edits, owners = table.concat(owners, ",")})
 	end
 	UI = {updateQueue = bm.updateQueue}
+	-- Pacing reads the camera and the enabler's traffic marks for its far-car hold
+	-- (tests/far_build_test.lua); here no car is held, whatever earlier files left.
+	core_camera, be, mileageEnabler = nil, nil, nil
 	extensions = {
 		mileage_compat = dofile(COMPAT),
 		hookUpdate = function(name) if name == "onPreRender" then bm.cached = MPVehicleGE.onPreRender end end,

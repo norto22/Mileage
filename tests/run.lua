@@ -31,6 +31,11 @@ local files = {
 	"tests/position_rate_test.lua",
 	"tests/perf_meter_test.lua",
 	"tests/spawn_pacing_test.lua",
+	"tests/far_build_test.lua",
+	"tests/traffic_trim_test.lua",
+	"tests/edit_hold_test.lua",
+	"tests/car_state_batch_test.lua",
+	"tests/poll_rate_test.lua",
 	"tests/prefab_sync_test.lua",
 	"tests/load_session_test.lua",
 	"tests/ui_apps_layout_test.lua",
@@ -50,6 +55,7 @@ local files = {
 	"tests/drag_routing_test.lua",
 	"tests/drag_strip_test.lua",
 	"tests/paint_hold_test.lua",
+	"tests/sweep_spread_test.lua",
 	"tests/lua_syntax_test.lua",
 }
 

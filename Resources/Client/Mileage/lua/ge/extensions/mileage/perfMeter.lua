@@ -24,6 +24,9 @@ local logTag = "mileage.perf"
 local REPORT_SECONDS = 30
 local HITCH_SECONDS = 0.1
 local COUNT_EVERY = 1        -- seconds between car counts
+-- Into each second from the first frame after the career start: each once-a-second
+-- check over every car has its own point, so no frame runs two (see positionRate.lua).
+local COUNT_AT = 4 / 6
 local NEAR_DISTANCE = 500    -- metres from this player's car
 
 -- BeamMP's receive functions, called by name for each update of another player's car.
@@ -205,7 +208,7 @@ end
 local function start()
 	if active then return end
 	active = true
-	window, cars, sinceCount, failureLogged = newWindow(), nil, COUNT_EVERY, false
+	window, cars, sinceCount, failureLogged = newWindow(), nil, nil, false
 	wrapReceivers()
 	log("I", logTag, string.format("cost meter active - a line every %d s", REPORT_SECONDS))
 end
@@ -249,6 +252,7 @@ function M.onCareerActive(isActive)
 	local compat = extensions.mileage_compat
 	if isActive and compat and compat.isMPSession() then
 		start()
+		sinceCount = nil
 	else
 		stop("career not active")
 	end
@@ -264,9 +268,9 @@ function M.onUpdate(dtReal)
 	w.sum = w.sum + dt
 	if dt > w.worst then w.worst = dt end
 	if dt > HITCH_SECONDS then w.hitches = w.hitches + 1 end
-	sinceCount = sinceCount + dt
+	if sinceCount then sinceCount = sinceCount + dt else sinceCount = COUNT_EVERY - COUNT_AT end
 	if sinceCount >= COUNT_EVERY then
-		sinceCount = 0
+		sinceCount = sinceCount % COUNT_EVERY
 		local ok, err = pcall(countCars)
 		if not ok then failed(err) end
 	end

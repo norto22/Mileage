@@ -29,6 +29,9 @@ local logTag = "mileage.farTraffic"
 local HIDE_DISTANCE = 1000 -- metres from this game's camera
 local OWNER_MARGIN = 100   -- metres past HIDE_DISTANCE an owner must be before hiding
 local CHECK_EVERY = 1      -- seconds between checks
+-- Into each second from the first frame after the career start: each once-a-second
+-- check over every car has its own point, so no frame runs two (see positionRate.lua).
+local CHECK_AT = 2 / 6
 
 -- Server vehicle ids of the cars held hidden here.
 local hidden = {}
@@ -162,7 +165,7 @@ end
 function M.onCareerActive(on)
 	local compat = extensions.mileage_compat
 	active = on == true and compat ~= nil and compat.isMPSession() == true
-	sinceCheck, failureLogged = CHECK_EVERY, false
+	sinceCheck, failureLogged = nil, false
 	if not active then showAll("career not active") end
 end
 
@@ -170,9 +173,9 @@ function M.onUpdate(dtReal)
 	if not active then return end
 	local dt = tonumber(dtReal)
 	if not dt or dt < 0 then dt = 0 end
-	sinceCheck = sinceCheck + dt
+	if sinceCheck then sinceCheck = sinceCheck + dt else sinceCheck = CHECK_EVERY - CHECK_AT end
 	if sinceCheck < CHECK_EVERY then return end
-	sinceCheck = 0
+	sinceCheck = sinceCheck % CHECK_EVERY
 	local ok, err = pcall(check)
 	if not ok then
 		if not failureLogged then

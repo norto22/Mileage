@@ -237,6 +237,15 @@ local function applyHeldPaints(serverVehicleID, gameVehicleID)
 	if entry.count == 0 then dropHeld(serverVehicleID) end
 end
 
+-- true while mileage/editHold holds this car's edits (its Parts or Tuning screen is open).
+-- The other games still have the car as it was, so its paints are not sent to them then;
+-- when the finished car reaches them they ask for its paints (rxRequestPartPaints), which
+-- are answered as always.
+local function editsHeld(gameVehicleID)
+	local hold = extensions and extensions.mileage_editHold
+	return type(hold) == "table" and type(hold.isHolding) == "function" and hold.isHolding(gameVehicleID) == true
+end
+
 local function sendPartPaints(inventoryId, serverVehicleID, originID)
 	local vehicle = career_modules_inventory.getVehicles()[inventoryId]
 	if not vehicle or not vehicle.partConditions then return end
@@ -258,6 +267,7 @@ end
 local function onInventorySpawnVehicleMP(inventoryId, gameVehicleID)
 	if not inventoryId then return end
 	if gameVehicleID then
+		if editsHeld(gameVehicleID) then return end
 		local serverVehicleID = MPVehicleGE.getServerVehicleID(gameVehicleID)
 		if serverVehicleID then
 			sendPartPaints(inventoryId, serverVehicleID)
@@ -327,7 +337,7 @@ local function onVehicleReady(gameVehicleID)
 			waitingRequests[serverVehicleID] = nil
 			requestPaints(serverVehicleID)
 		end
-	else
+	elseif not editsHeld(gameVehicleID) then
 		local inventoryId = career_modules_inventory.getInventoryIdFromVehicleId(gameVehicleID)
 		if inventoryId then sendPartPaints(inventoryId, serverVehicleID) end
 	end
@@ -362,13 +372,17 @@ end
 local function broadcastForInventoryId(inventoryId)
 	if not inventoryId then return end
 	local gameVehicleID = career_modules_inventory.getVehicleIdFromInventoryId(inventoryId)
-	if not gameVehicleID then return end
+	if not gameVehicleID or editsHeld(gameVehicleID) then return end
 	local serverVehicleID = MPVehicleGE.getServerVehicleID(gameVehicleID)
 	if serverVehicleID then sendPartPaints(inventoryId, serverVehicleID) end
 end
 
+-- Parts sessions started since the last frame, by inventory id. Their paints are sent on
+-- the next frame, so the hold has heard the same start whichever extension hears it first.
+local partsStarted = {}
+
 local function onPartShoppingStartedMP(targetVehicleID, inventoryId)
-	broadcastForInventoryId(inventoryId)
+	if inventoryId ~= nil then partsStarted[inventoryId] = true end
 end
 
 local function onPartShoppingPartInstalledMP(partData)
@@ -389,10 +403,16 @@ local function onUpdate()
 
 	if worldReadyState ~= 2 then return end
 
+	if next(partsStarted) then
+		local started = partsStarted
+		partsStarted = {}
+		for inventoryId in pairs(started) do broadcastForInventoryId(inventoryId) end
+	end
+
 	for i = #pendingPaints, 1, -1 do
 		local inventoryId = pendingPaints[i]
 		local gameVehicleID = career_modules_inventory.getVehicleIdFromInventoryId(inventoryId)
-		if gameVehicleID then
+		if gameVehicleID and not editsHeld(gameVehicleID) then
 			local serverVehicleID = MPVehicleGE.getServerVehicleID(gameVehicleID)
 			if serverVehicleID then
 				sendPartPaints(inventoryId, serverVehicleID)
@@ -406,6 +426,7 @@ end
 local function onBeamMPServerLeave()
 	heldPaints, heldCars = {}, 0
 	waitingRequests = {}
+	partsStarted = {}
 end
 
 local function onExtensionLoaded()

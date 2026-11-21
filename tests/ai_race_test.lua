@@ -501,6 +501,22 @@ local function givenBack(t)
 	return t.entry.roleName == "standard" and t.entry.enableRespawn == true and t.entry.enableAutoPooling == true
 end
 
+World.test("racingCar names the traffic car from the request until it is given back", function(world)
+	local ann, t = annAndCar(world, 2000)
+	world:as(ann, function() same(mileage_aiRace.racingCar(), nil, "no race yet") end)
+	press(world, ann)
+	world:as(ann, function() same(mileage_aiRace.racingCar(), t.car.id, "the car raced in the countdown") end)
+	t.car.speed = 40
+	world:advance(5)
+	world:as(ann, function() same(mileage_aiRace.racingCar(), t.car.id, "the car raced after the green") end)
+	world:advance(40)
+	world:drive(ann, FINISH.x, FINISH.y, FINISH.z)
+	untilResult(world, ann)
+	world:advance(2)
+	expect(givenBack(t), "given back")
+	world:as(ann, function() same(mileage_aiRace.racingCar(), nil, "none once the car is given back") end)
+end)
+
 World.test("a result hands the traffic car back to traffic", function(world)
 	local ann, t = annAndCar(world, 2000)
 	t.entry.enableAutoPooling = "kept"

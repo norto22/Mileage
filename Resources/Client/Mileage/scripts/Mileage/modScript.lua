@@ -31,6 +31,9 @@ end
 -- Foundation
 loadPersistent('mileage/compat')
 loadPersistent('mileage/patches')
+-- One car edit per garage visit: holds BeamMP's edits of a car while Parts or Tuning is open
+-- (listens to the start hooks patches fires).
+loadPersistent('mileage/editHold')
 loadPersistent('mileage/careerPatches')
 loadPersistent('mileage/traffic')
 loadPersistent('mileage/parkingChallenge')
