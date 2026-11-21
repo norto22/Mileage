@@ -667,6 +667,19 @@ test("#166 join race, older server: only batches ever arrive: the unmarked cars 
 	same(framesWithTwo(), 0, "frames that built two cars")
 end)
 
+test("#166 join race: a list with no car states (an empty server map) still ends the wait: the unmarked cars build at once, not after 5 s", function()
+	local pacing, enabler, handlers = setupJoin()
+	bm.hasCar = false
+	tenUnmarked()
+	worldReady(pacing, enabler)
+	run(0.8)
+	same(builtCount(), 0, "built before the list")
+	handlers.rxCareerVehList("null")
+	run(3)
+	same(builtCount(), 10, "built within 3.8 s of the request")
+	same(framesWithTwo(), 0, "frames that built two cars")
+end)
+
 --== a car built before its batched state ===========================================
 
 -- The enabler alone, with another player's car 1-0 (game id 9) built on this game.
