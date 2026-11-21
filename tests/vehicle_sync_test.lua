@@ -393,9 +393,11 @@ local function addPlayer(id, name)
 	return p
 end
 
--- Delivers queued messages both ways until none are left.
+-- Delivers queued messages both ways until none are left. The server's quarter-second
+-- car-state send runs between deliveries.
 local function pump()
 	for _ = 1, 200 do
+		vehicleStatesTimer()
 		if #world.toServer == 0 and #world.toClients == 0 then return end
 		local toServer, toClients = world.toServer, world.toClients
 		world.toServer, world.toClients = {}, {}
@@ -700,14 +702,12 @@ local function hide14(friend)
 	pump()
 end
 
-test("hiding 14 cars sends 14 one-car updates", function()
+test("hiding 14 cars at once sends every player one update holding the 14", function()
 	local _, friend = busyFriend()
 	hide14(friend)
 	local updates = toEveryone()
-	same(#updates, 14, "updates to every player")
-	for i, update in ipairs(updates) do
-		same(rows(update.table), 1, "cars in update " .. i)
-	end
+	same(#updates, 1, "updates to every player")
+	same(rows(updates[1].table), 14, "cars in the update")
 end)
 
 test("my game applies the 14 hides without asking for the list", function()
@@ -756,14 +756,17 @@ test("a car is its owner's by the whole player id, not by the id's first digits"
 	newWorld()
 	onVehicleSpawnHandler(10, 0, "")
 	onVehicleSpawnHandler(1, 0, "")
+	vehicleStatesTimer()
 	world.broadcasts = {}
 	careerVehicleActiveHandler(1, encode({serverVehicleID = "10-0", active = false}))
 	careerVehicleTrafficMarks(1, encode({["10-0"] = true}))
 	careerVehicleActiveHandler(10, encode({serverVehicleID = "1-0", active = false}))
 	careerVehicleTrafficMarks(10, encode({["1-0"] = true}))
+	vehicleStatesTimer()
 	same(#world.broadcasts, 0, "updates for another player's car")
 	careerVehicleActiveHandler(10, encode({serverVehicleID = "10-0", active = false}))
 	careerVehicleTrafficMarks(10, encode({["10-0"] = true}))
+	vehicleStatesTimer()
 	same(#world.broadcasts, 2, "updates for player 10's own car")
 	local last = world.broadcasts[2].table["10-0"]
 	same(last.active, false, "its hide")
@@ -898,6 +901,9 @@ end
 test("a game that sees 100 cars appear asks for the car list once in that second", function()
 	local me = joinBusyServer()
 	same(listRequests(me), 0, "list requests before the next frame")
+	-- A car built before its state waits 0.6 s for the server's next batch first.
+	frames(me, 0.5)
+	same(listRequests(me), 0, "list requests while the cars wait for their states")
 	frames(me, 0.5)
 	same(listRequests(me), 1, "list requests in the first second")
 	frames(me, 3)
@@ -907,7 +913,7 @@ end)
 
 test("a car change inside the second after a list request waits for the next second", function()
 	local me = joinBusyServer()
-	frames(me, 0.5)
+	frames(me, 1)
 	as(me, me.enabler.onVehicleActiveChanged, gameId(1, 7), false)
 	frames(me, 0.5)
 	same(listRequests(me), 1, "list requests half a second later")

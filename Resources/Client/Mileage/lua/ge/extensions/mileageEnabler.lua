@@ -172,16 +172,67 @@ local function requestVehicleStates()
 	listWanted = true
 end
 
-local function updateListRequest(dtReal)
-	local dt = tonumber(dtReal)
-	if dt and dt > 0 then sinceList = math.min(sinceList + dt, LIST_EVERY_SECONDS) end
-	if not listWanted or sinceList < LIST_EVERY_SECONDS then return end
+local function sendListRequest()
 	listWanted = false
 	sinceList = 0
 	TriggerServerEvent("careerVehSyncRequested", "")
 end
 
--- true when the server says another player's car is their traffic or a parked car.
+-- The join's list request, sent at world-ready 1 or 2, whichever comes first. From it
+-- until its answer, or JOIN_LIST_WAIT_SECONDS, join pacing (mileage/spawnPacing.lua) holds
+-- other players' cars whose traffic mark is not known yet. The first car-state message
+-- after the request counts as the answer: the server's one-car messages and its answer
+-- look the same.
+local JOIN_LIST_WAIT_SECONDS = 5
+local joinListAsked = false
+local joinListWaited = nil -- seconds since the join's request, while it is unanswered
+
+local function requestJoinList()
+	if joinListAsked then return end
+	joinListAsked = true
+	joinListWaited = 0
+	if sinceList >= LIST_EVERY_SECONDS then sendListRequest() else requestVehicleStates() end
+end
+
+-- true while the join's list request waits for its answer.
+local function awaitingVehicleStates()
+	return joinListWaited ~= nil
+end
+
+-- The server sends car states in batches (every quarter second), so another player's
+-- car built here before its state came waits STATE_WAIT_SECONDS for it, by server vehicle
+-- id; only a car still without its state then asks for the whole list.
+local STATE_WAIT_SECONDS = 0.6
+local stateWaits = {}
+
+local function updateStateWaits(dt)
+	for serverVehicleID, waited in pairs(stateWaits) do
+		if knownStates[serverVehicleID] and applyKnownState(serverVehicleID) then
+			stateWaits[serverVehicleID] = nil
+		elseif waited + dt >= STATE_WAIT_SECONDS - 1e-6 then
+			stateWaits[serverVehicleID] = nil
+			requestVehicleStates()
+		else
+			stateWaits[serverVehicleID] = waited + dt
+		end
+	end
+end
+
+local function updateListRequest(dtReal)
+	local dt = tonumber(dtReal)
+	if not dt or dt < 0 then dt = 0 end
+	sinceList = math.min(sinceList + dt, LIST_EVERY_SECONDS)
+	if joinListWaited then
+		joinListWaited = joinListWaited + dt
+		if joinListWaited >= JOIN_LIST_WAIT_SECONDS then joinListWaited = nil end
+	end
+	if next(stateWaits) then updateStateWaits(dt) end
+	if not listWanted or sinceList < LIST_EVERY_SECONDS then return end
+	sendListRequest()
+end
+
+-- true when the server says another player's car is their traffic or a parked car. Join
+-- pacing (mileage/spawnPacing.lua) reads it for cars still waiting to be built.
 local function isRemoteTraffic(serverVehicleID)
 	local state = knownStates[serverVehicleID]
 	return type(state) == "table" and state.traffic == true
@@ -201,13 +252,14 @@ end
 -- authoritative active-state map and we apply it to everything we do not own. The
 -- server sends the whole map on request and one entry per change otherwise.
 local function rxCareerVehSync(data)
+	joinListWaited = nil
 	if data == "null" then return end
 	local vehicleStates = jsonDecode(data)
 	if type(vehicleStates) ~= "table" then return end
 	for serverVehicleID, state in pairs(vehicleStates) do
 		if type(state) == "table" then
 			knownStates[serverVehicleID] = state
-			applyKnownState(serverVehicleID)
+			if applyKnownState(serverVehicleID) then stateWaits[serverVehicleID] = nil end
 		end
 	end
 end
@@ -361,8 +413,10 @@ local function onVehicleSpawned(gameVehicleID)
 	if MPVehicleGE.isOwn(gameVehicleID) then return end
 	-- A car BeamMP builds after its state arrived takes the kept state.
 	local serverVehicleID = MPVehicleGE.getServerVehicleID(gameVehicleID)
-	if not (serverVehicleID and applyKnownState(serverVehicleID)) then
+	if not serverVehicleID then
 		requestVehicleStates()
+	elseif not applyKnownState(serverVehicleID) then
+		stateWaits[serverVehicleID] = stateWaits[serverVehicleID] or 0
 	end
 end
 
@@ -891,13 +945,17 @@ end
 -- World-ready 1 comes while the map's loading screen is still up, so the hold taken
 -- there keeps that same screen up. The settings request says this client confirms its
 -- career start, so the server waits for careerStartResult instead of counting the
--- request as a started career.
+-- request as a started career. The full car-state list is asked for from world-ready 1, so
+-- its answer usually comes while the loading screen is up and join pacing knows which of
+-- the other players' queued cars are traffic before it builds the first wave.
 local function onWorldReadyState(state)
 	if state == 1 then
 		holdJoinLoadingScreen()
+		if compat.isMPSession() then requestJoinList() end
 	elseif state == 2 and not syncRequested then
 		TriggerServerEvent("prefabSyncRequested", "")
 		TriggerServerEvent("careerSyncRequested", jsonEncode({confirmsStart = true}))
+		requestJoinList()
 		syncRequested = true
 		log("I", logTag, "join: world ready, settings requested")
 	end
@@ -961,6 +1019,9 @@ local function onBeamMPServerLeave()
 	knownStates = {}
 	listWanted = false
 	sinceList = LIST_EVERY_SECONDS
+	joinListAsked = false
+	joinListWaited = nil
+	stateWaits = {}
 	sentMarks = {}
 	sinceMarks = 0
 	trafficFocusPinned = false
@@ -974,6 +1035,7 @@ M.getClientConfig = getClientConfig
 M.isTrafficCar = isTrafficCar
 M.isRemoteTraffic = isRemoteTraffic
 M.hasTrafficMark = hasTrafficMark
+M.awaitingVehicleStates = awaitingVehicleStates
 M.reapplyRemoteStates = reapplyRemoteStates
 
 M.onCareerActive = onCareerActive

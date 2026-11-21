@@ -2,7 +2,7 @@
 --
 -- When a player joins, BeamMP queues each of their cars (traffic included) and, once
 -- this player has slowed down for a few seconds, builds every waiting car in one frame:
--- one long freeze on every game. While the career runs on a server, Mileage steps in
+-- one long freeze on every game. On a server, from the world being ready, Mileage steps in
 -- front of BeamMP's frame function (MPVehicleGE.onPreRender) and lets BeamMP's queue
 -- hold one waiting car at a time:
 --
@@ -12,11 +12,28 @@
 --     (MPVehicleGE.applyPlayerQueues), until none waits;
 --   * edits of cars already built, and this player's own cars, go through as before.
 --
+-- Another player's traffic or parked car (the server's traffic mark, read through
+-- mileageEnabler) is kept out of BeamMP's queue while it is more than HOLD_DISTANCE from
+-- this game's camera (else the player's car). Its place is the one BeamMP keeps for a car
+-- not built yet (MPVehicleGE.getVehicleByServerID(id).position, moved by its owner's
+-- position packets), or the spawn data's pos while BeamMP has none. Such a car waits in
+-- the queue until it comes near, and is then built at the next pacing step, whether or not
+-- the player is moving: BeamMP's own rule may have run while every waiting car was held,
+-- and it does not run again until another car arrives. The waiting cars are built nearest
+-- first. A car with no known mark, and a car its owner drives, is built as before, at any
+-- distance. Until the join's car-state list has come (mileageEnabler asks for it at
+-- world-ready, and stops waiting after 5 s), a car with no known mark is held like a far
+-- one. Pacing is in place from the multiplayer world being ready, before the career
+-- starts, so a joiner's first wave is held as well: with no car of their own BeamMP would
+-- build it all in one frame.
+--
 -- The other cars' queued spawns are only moved aside for the length of BeamMP's call
 -- and put back straight after, so a car removed while it waits is never built. On any
 -- error every queued spawn is put back, BeamMP builds as it does today, and pacing stays
--- off until the next career start. The game caches each hook's functions, so the cache
--- is refreshed after the wrap is put in place and after it is taken away.
+-- off until the next career start. Career stop also lets BeamMP build every waiting car;
+-- leaving the server only puts them back in BeamMP's queue, which BeamMP then drops with
+-- the session. The game caches each hook's functions, so the cache is refreshed after
+-- the wrap is put in place and after it is taken away.
 --
 -- BeamMP draws a car's marker in the same call, coloured from the queued spawn: a car
 -- whose spawn is moved aside would get the magenta "unknown" marker. So for the call a
@@ -31,11 +48,14 @@ local M = {}
 local logTag = "mileage.spawnPacing"
 
 local PACE_SECONDS = 0.25
+local HOLD_DISTANCE = 1000 -- metres from this game's camera
+local HOLD_SQUARED = HOLD_DISTANCE * HOLD_DISTANCE
 
 -- {module, original, check} while BeamMP's frame function is wrapped.
 local wrapped = nil
 local disabled = false
--- True from BeamMP building the first waiting car until none waits.
+-- True from BeamMP building the first waiting car (or a held car coming near) until no
+-- car within reach waits.
 local releasing = false
 local sinceRelease = 0
 -- The waiting car left in BeamMP's queue on the last frame.
@@ -55,6 +75,15 @@ local colourHex, colourValue = nil, nil
 -- While held cars are aside: BeamMP's UI module, its own updateQueue, and whether BeamMP
 -- sent a count meanwhile.
 local countUi, countReal, countSent = nil, nil, false
+-- The far cars held on the last pacing read, by server vehicle id, and whether one of
+-- them has since come near (or lost its traffic mark).
+local heldFar = {}
+local cameNear = false
+local warnedNoMarks = false
+-- The place in each queued spawn's data, by the queued spawn: read once per spawn.
+local spawnPlaces = setmetatable({}, {__mode = "k"})
+-- Squared distances of this read's waiting cars, by server vehicle id, for the sort.
+local sortDistance = {}
 
 local function recordCount() countSent = true end
 
@@ -102,7 +131,7 @@ local function tellMeter()
 	if meter and meter.built then meter.built() end
 end
 
--- Other players' cars waiting to be built, in a fixed order.
+-- Other players' cars waiting to be built, held or not, in a fixed order.
 local function waitingRemote(vehicles)
 	local list = {}
 	for serverVehicleID, entry in pairs(vehicles) do
@@ -112,6 +141,153 @@ local function waitingRemote(vehicles)
 	end
 	table.sort(list, function(a, b) return tostring(a) < tostring(b) end)
 	return list
+end
+
+-- A position's x, y, z, or nil when it has none. Game positions are vec3 values (cdata
+-- under LuaJIT).
+local function coords(p)
+	local kind = type(p)
+	if kind ~= "table" and kind ~= "cdata" then return nil end
+	local x, y, z = tonumber(p.x), tonumber(p.y), tonumber(p.z)
+	if not (x and y and z) then return nil end
+	return x, y, z
+end
+
+local function playerCarPlace()
+	local veh = be:getObjectByID(be:getPlayerVehicleID(0))
+	if veh then return coords(veh:getPosition()) end
+	return nil
+end
+
+-- Where this game looks from: the camera, else the car the player drives; nil when
+-- neither can be read, and then nothing is held.
+local function viewPoint()
+	local camera = rawget(_G, "core_camera")
+	if type(camera) == "table" and type(camera.getPosition) == "function" then
+		local ok, pos = pcall(camera.getPosition)
+		if ok then
+			local x, y, z = coords(pos)
+			if x then return x, y, z end
+		end
+	end
+	if rawget(_G, "be") == nil then return nil end
+	local ok, x, y, z = pcall(playerCarPlace)
+	if ok and x then return x, y, z end
+	return nil
+end
+
+-- mileageEnabler, when it can read the server's traffic marks, else nil. rawget: a plain
+-- lookup on extensions loads a missing extension.
+local function markReader()
+	local enabler = type(extensions) == "table" and rawget(extensions, "mileageEnabler") or rawget(_G, "mileageEnabler")
+	if type(enabler) == "table" and type(enabler.isRemoteTraffic) == "function" then return enabler end
+	if not warnedNoMarks then
+		warnedNoMarks = true
+		log("W", logTag, "mileageEnabler.isRemoteTraffic missing: far traffic is built like any other car")
+	end
+	return nil
+end
+
+-- While the join's car-state list is awaited: the enabler's read of whether a car's mark
+-- is known yet, else nil.
+local function unmarkedReader(enabler)
+	if not enabler or type(enabler.awaitingVehicleStates) ~= "function"
+			or type(enabler.hasTrafficMark) ~= "function" then
+		return nil
+	end
+	if enabler.awaitingVehicleStates() ~= true then return nil end
+	return enabler.hasTrafficMark
+end
+
+-- The pos in a queued spawn's data, where BeamMP builds a car it has no position for.
+local function spawnPlace(queue)
+	local decode = rawget(_G, "jsonDecode")
+	if type(queue) ~= "table" or type(queue.data) ~= "string" or type(decode) ~= "function" then return false end
+	local ok, data = pcall(decode, queue.data)
+	local pos = ok and type(data) == "table" and data.pos
+	if type(pos) ~= "table" then return false end
+	local x, y, z = tonumber(pos[1] or pos.x), tonumber(pos[2] or pos.y), tonumber(pos[3] or pos.z)
+	if not (x and y and z) then return false end
+	return {x = x, y = y, z = z}
+end
+
+-- A waiting car's place: BeamMP's position for it once it has one (BeamMP treats a zero
+-- vector as none), else its spawn data's.
+local function placeOf(byServerID, serverVehicleID, entry)
+	local vehicle = byServerID and byServerID(serverVehicleID) or entry
+	local x, y, z = coords(type(vehicle) == "table" and vehicle.position or nil)
+	if x and (x ~= 0 or y ~= 0 or z ~= 0) then return x, y, z end
+	local queue = entry.spawnQueue
+	local place = spawnPlaces[queue]
+	if place == nil then
+		place = spawnPlace(queue)
+		spawnPlaces[queue] = place
+	end
+	if place then return place.x, place.y, place.z end
+	return nil
+end
+
+-- Nearest first; cars with no place last; then by id, so the order is fixed.
+local function nearerFirst(a, b)
+	local da, db = sortDistance[a], sortDistance[b]
+	if da ~= db then
+		if da == nil then return false end
+		if db == nil then return true end
+		return da < db
+	end
+	return tostring(a) < tostring(b)
+end
+
+-- Other players' cars waiting to be built: those to build, nearest first, and the far
+-- traffic and parked cars held back, with, while the join's car-state list is awaited,
+-- every car whose mark is not known yet.
+local function sortWaiting(vehicles)
+	local build, hold = {}, {}
+	local isTraffic, hasMark, byServerID, vx, vy, vz
+	local looked = false
+	for serverVehicleID, entry in pairs(vehicles) do
+		if type(entry) == "table" and entry.spawnQueue and not entry.isLocal then
+			if not looked then
+				looked = true
+				sortDistance = {}
+				vx, vy, vz = viewPoint()
+				local enabler = markReader()
+				isTraffic = vx and enabler and enabler.isRemoteTraffic
+				hasMark = unmarkedReader(enabler)
+				local find = wrapped.module.getVehicleByServerID
+				byServerID = type(find) == "function" and find or nil
+			end
+			local far = hasMark ~= nil and hasMark(serverVehicleID) ~= true
+			if vx then
+				local x, y, z = placeOf(byServerID, serverVehicleID, entry)
+				if x then
+					local dx, dy, dz = x - vx, y - vy, z - vz
+					local squared = dx * dx + dy * dy + dz * dz
+					sortDistance[serverVehicleID] = squared
+					far = far or (squared > HOLD_SQUARED and isTraffic and isTraffic(serverVehicleID) == true)
+				end
+			end
+			table.insert(far and hold or build, serverVehicleID)
+		end
+	end
+	if #build > 1 then table.sort(build, nearerFirst) end
+	return build, hold
+end
+
+-- Notes the cars held this read, and whether a car held on the last read is now to build.
+local function noteHeld(build, hold)
+	if next(heldFar) then
+		for i = 1, #build do
+			if heldFar[build[i]] then cameNear = true end
+		end
+	end
+	if #hold == 0 then
+		if next(heldFar) then heldFar = {} end
+		return
+	end
+	local now = {}
+	for i = 1, #hold do now[hold[i]] = true end
+	heldFar = now
 end
 
 -- BeamMP's queued marker colour, or nil when BeamMP would draw held cars no marker
@@ -150,34 +326,44 @@ local function liftedPosition(serverVehicleID, position)
 	return lifted
 end
 
--- Leaves the first waiting car in BeamMP's queue and moves the others aside; returns it.
--- A waiting car's queued edit moves with its spawn: BeamMP applies a car's spawn and then
+-- Moves one waiting car's spawn and edit aside for BeamMP's call.
+local function moveAside(vehicles, serverVehicleID)
+	local entry = vehicles[serverVehicleID]
+	local moved = {entry = entry, queue = entry.spawnQueue, edit = entry.editQueue,
+		spawned = entry.isSpawned, position = entry.position}
+	aside[serverVehicleID] = moved
+	entry.spawnQueue, entry.editQueue = nil, nil
+	if not moved.spawned then
+		entry.isSpawned = true
+		if heldColour and moved.position then
+			moved.lifted = liftedPosition(serverVehicleID, moved.position)
+			entry.position = moved.lifted
+		end
+	end
+end
+
+-- Leaves the nearest waiting car in BeamMP's queue and moves the others, and every far
+-- car held, aside; returns the one left, or nil when none is to be built. A waiting car's
+-- queued edit moves with its spawn: BeamMP applies a car's spawn and then
 -- its edit, and an edit applied to a car not built yet is lost. A held car not built yet
 -- is marked as built for the call, so BeamMP draws it no magenta marker, and its name
 -- tag is lifted when Mileage draws the marker under it.
 local function keepOne(vehicles)
-	local list = waitingRemote(vehicles)
-	if #list < 2 then
+	local build, hold = sortWaiting(vehicles)
+	noteHeld(build, hold)
+	if #build < 2 and #hold == 0 then
 		if next(liftedBySid) then liftedBySid = {} end
-		return list[1]
+		return build[1]
 	end
 	heldColour = queuedMarkerColour()
-	for i = 2, #list do
-		local serverVehicleID = list[i]
-		local entry = vehicles[serverVehicleID]
-		local moved = {entry = entry, queue = entry.spawnQueue, edit = entry.editQueue,
-			spawned = entry.isSpawned, position = entry.position}
-		aside[serverVehicleID] = moved
-		entry.spawnQueue, entry.editQueue = nil, nil
-		if not moved.spawned then
-			entry.isSpawned = true
-			if heldColour and moved.position then
-				moved.lifted = liftedPosition(serverVehicleID, moved.position)
-				entry.position = moved.lifted
-			end
-		end
+	for i = 2, #build do moveAside(vehicles, build[i]) end
+	for i = 1, #hold do moveAside(vehicles, hold[i]) end
+	-- A far car can wait for the whole session: lifted positions of cars no longer
+	-- waiting are dropped.
+	for serverVehicleID in pairs(liftedBySid) do
+		if not aside[serverVehicleID] then liftedBySid[serverVehicleID] = nil end
 	end
-	return list[1]
+	return build[1]
 end
 
 -- Puts every moved spawn and edit back on its car, unless the car is gone or has a new
@@ -231,20 +417,25 @@ local function wasBuilt(vehicles, serverVehicleID)
 end
 
 -- After BeamMP's own call: notices the first car built, then builds one more every
--- PACE_SECONDS while any waits.
+-- PACE_SECONDS while any near car waits. A held car that comes near starts the building
+-- too, at once; a car arriving later raises BeamMP's queue again, so BeamMP's rule starts
+-- it then.
 local function afterFrame(dt)
 	local module = wrapped.module
 	local vehicles = module.getVehicles()
 	if kept and wasBuilt(vehicles, kept) then
 		tellMeter()
-		releasing, sinceRelease, kept = true, 0, nil
+		releasing, sinceRelease, kept, cameNear = true, 0, nil, false
 		return
 	end
 	kept = nil
+	if cameNear and not releasing then releasing, sinceRelease = true, PACE_SECONDS end
+	cameNear = false
 	if not releasing then return end
 	sinceRelease = sinceRelease + dt
 	if sinceRelease < PACE_SECONDS - 1e-6 then return end
 	local nextCar = keepOne(vehicles)
+	cameNear = false
 	if not nextCar then
 		putBack(vehicles)
 		releasing = false
@@ -281,15 +472,17 @@ local function sendHeldCount(vehicles)
 end
 
 -- A car kept in BeamMP's queue this frame may have been built before the failure, which
--- stops BeamMP waiting too, so the cars left are built as well.
-local function stopPacing(err)
+-- stops BeamMP waiting too, so the cars left are built as well; so may BeamMP's rule
+-- have run while cars were held. Leaving the server (build false) only puts them back.
+local function stopPacing(err, build)
 	local vehicles = getVehiclesSafely()
 	putBack(vehicles)
 	heldCount, liftedBySid = 0, {}
 	pcall(sendHeldCount, vehicles)
 	local keptBuilt = kept and (not vehicles or wasBuilt(vehicles, kept))
-	if releasing or keptBuilt then buildAllWaiting() end
-	releasing, kept = false, nil
+	local held = next(heldFar) ~= nil
+	if build ~= false and (releasing or keptBuilt or held) then buildAllWaiting() end
+	releasing, kept, cameNear, heldFar = false, nil, false, {}
 	if err then
 		disabled = true
 		log("E", logTag, "join pacing failed, BeamMP builds joining cars at once until the next career start: " ..
@@ -335,9 +528,9 @@ local function makeCheck(original)
 	end
 end
 
-local function unwrap(why)
+local function unwrap(why, build)
 	if not wrapped then return end
-	stopPacing(nil)
+	stopPacing(nil, build)
 	if wrapped.module.onPreRender == wrapped.check then
 		wrapped.module.onPreRender = wrapped.original
 		refreshHookCache()
@@ -361,9 +554,10 @@ local function wrap()
 	wrapped = {module = module, original = original, check = check}
 	module.onPreRender = check
 	releasing, sinceRelease, kept, aside = false, 0, nil, {}
+	heldFar, cameNear = {}, false
 	refreshHookCache()
-	log("I", logTag, string.format("join pacing active - another player's cars are built one every %.2f s",
-		PACE_SECONDS))
+	log("I", logTag, string.format("join pacing active - another player's cars are built one every %.2f s, " ..
+		"their traffic only within %d m", PACE_SECONDS, HOLD_DISTANCE))
 end
 
 --== hooks ===================================================================
@@ -378,8 +572,19 @@ function M.onCareerActive(active)
 	end
 end
 
+-- From the multiplayer world being ready, before the career starts: the joiner's first
+-- wave of other players' cars arrives then.
+function M.onWorldReadyState(state)
+	if state ~= 1 and state ~= 2 then return end
+	local compat = extensions.mileage_compat
+	if compat and compat.isMPSession() then wrap() end
+end
+
+-- BeamMP drops its vehicle list with the session, so the waiting cars are not built. A
+-- failure in this session does not keep pacing off for the next one.
 function M.onBeamMPServerLeave()
-	unwrap("left the server")
+	unwrap("left the server", false)
+	disabled = false
 end
 
 function M.onExtensionLoaded()
