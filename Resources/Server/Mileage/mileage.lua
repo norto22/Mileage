@@ -4969,7 +4969,9 @@ function trafficLightTimer()
 end
 
 -- The whole car-state list goes to a player at most once every LIST_EVERY_SECONDS; a
--- request inside that time is answered once, from the first tick after it.
+-- request inside that time is answered once, from the first tick after it. It has its
+-- own event, rxCareerVehList: a joining game waits for it before building cars whose
+-- traffic mark it does not know, and must not take a batch of changes for it.
 local LIST_EVERY_SECONDS = 1
 local listAnsweredAt = {}
 local listWanted = {}
@@ -4977,7 +4979,7 @@ local listWanted = {}
 local function sendVehicleList(player_id)
 	listAnsweredAt[player_id] = signalTimer:GetCurrent()
 	listWanted[player_id] = nil
-	sendJson("carStates", player_id, "rxCareerVehSync", vehicleStates)
+	sendJson("carStates", player_id, "rxCareerVehList", vehicleStates)
 end
 
 local function sendWantedVehicleLists()

@@ -357,7 +357,7 @@ local function newWorld()
 		TriggerClientEvent = function(target, event, data)
 			local message = {target = target, event = event, data = data}
 			table.insert(world.toClients, message)
-			if event == "rxCareerVehSync" then
+			if event == "rxCareerVehSync" or event == "rxCareerVehList" then
 				message.table = decode(data)
 				table.insert(world.broadcasts, message)
 			end
@@ -808,10 +808,34 @@ test("a player who asks still gets the full list, hides and marks included", fun
 	careerVehSyncRequested(0, "")
 	same(#world.broadcasts, 1, "lists sent")
 	local list = world.broadcasts[1]
+	same(list.event, "rxCareerVehList", "sent as")
 	same(list.target, 0, "sent to")
 	same(rows(list.table), 17, "cars in the list")
 	same(list.table["1-1"].active, false, "a hidden car")
 	same(list.table["1-1"].traffic, true, "its mark")
+end)
+
+-- #166: the list has its own event, so a joining game can tell it from a batch.
+test("#166: the list goes as rxCareerVehList to the asker only; the other players hear nothing", function()
+	busyFriend()
+	addPlayer(2, "Third")
+	world.toClients = {}
+	careerVehSyncRequested(0, "")
+	same(#world.toClients, 1, "messages sent")
+	same(world.toClients[1].event, "rxCareerVehList", "sent as")
+	same(world.toClients[1].target, 0, "sent to")
+	same(rows(decode(world.toClients[1].data)), 17, "cars in the list")
+end)
+
+test("#166: my game takes the states in the list, hides and marks included", function()
+	local me = busyFriend()
+	as(me, me.handlers.rxCareerVehList, encode({["1-3"] = {active = false, traffic = true},
+		["1-15"] = {active = false, traffic = true}}))
+	same(me.objects[gameId(1, 3)].active, false, "car 1-3 on my game")
+	same(me.objects[gameId(1, 15)].active, false, "car 1-15 on my game")
+	as(me, me.handlers.rxCareerVehList, "null")
+	as(me, me.handlers.rxCareerVehList, "{broken")
+	same(me.objects[gameId(1, 15)].active, false, "car 1-15 after a list that is not one")
 end)
 
 test("a remote car changed by something other than the server asks for the list once", function()
@@ -893,7 +917,7 @@ end
 local function listsTo(id)
 	local n = 0
 	for _, m in ipairs(world.broadcasts) do
-		if m.target == id and rows(m.table) > 1 then n = n + 1 end
+		if m.target == id and m.event == "rxCareerVehList" then n = n + 1 end
 	end
 	return n
 end

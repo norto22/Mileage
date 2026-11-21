@@ -155,7 +155,7 @@ end
 
 local FEATURES = {
 	rxCareerDamage = "damage", rxCareerDamageRequest = "damage",
-	rxCareerVehSync = "carStates", rxCareerTrafficShare = "trafficShare",
+	rxCareerVehSync = "carStates", rxCareerVehList = "carStates", rxCareerTrafficShare = "trafficShare",
 	rxRemotePartPaint = "paint", rxRequestPartPaints = "paint", rxPrefabSync = "prefabs",
 	rxDragMP = "drag", rxDragAuthority = "drag", rxMileageAlive = "alive",
 	rxTrafficSignalTimer = "trafficLights", rxCareerSync = "config", rxClientConfigUpdate = "config",
