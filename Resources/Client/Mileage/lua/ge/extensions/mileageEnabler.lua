@@ -280,6 +280,10 @@ end
 -- with each car's state and passes them on.
 
 local MARKS_EVERY_SECONDS = 1
+-- Into each second from the first frame after the career start: each once-a-second
+-- check over every car has its own point, so no frame runs two (see
+-- mileage/positionRate.lua).
+local MARKS_AT = 1 / 6
 local sinceMarks = 0
 
 -- The mark last sent for each own vehicle: {gameVehicleID, mark}. The game id tells a
@@ -331,9 +335,13 @@ end
 
 local function updateTrafficMarks(dtReal)
 	local dt = tonumber(dtReal)
-	if dt and dt > 0 then sinceMarks = sinceMarks + dt end
+	if not sinceMarks then
+		sinceMarks = MARKS_EVERY_SECONDS - MARKS_AT
+	elseif dt and dt > 0 then
+		sinceMarks = sinceMarks + dt
+	end
 	if sinceMarks < MARKS_EVERY_SECONDS then return end
-	sinceMarks = 0
+	sinceMarks = sinceMarks % MARKS_EVERY_SECONDS
 	sendTrafficMarks()
 end
 
@@ -363,8 +371,14 @@ end
 -- server's settings change), and at once to a car just built, reset or whose vehicle Lua
 -- restarted (ready again), which is forgotten so it gets the setting again.
 local GHOST_EVERY = 1
+-- Into each second from the first frame after the career start, as the traffic marks
+-- above.
+local GHOST_AT = 3 / 6
 local appliedGhost = {}
 local sinceGhosts = GHOST_EVERY
+-- true when the settings changed: every car is gone over on the next frame, out of turn,
+-- and the once-a-second check keeps its point in the second.
+local ghostsDue = false
 
 local function applyGhost(gameVehicleID)
 	if worldReadyState ~= 2 or not clientConfig then return end
@@ -846,7 +860,7 @@ end
 local function rxCareerSync(data)
 	local arrived = os.clockhp()
 	clientConfig = jsonDecode(data)
-	sinceGhosts = GHOST_EVERY
+	ghostsDue = true
 	if not clientConfig then
 		log("E", logTag, "rxCareerSync: could not decode client config")
 		failCareerStart("could not read the server's Mileage settings")
@@ -906,7 +920,7 @@ local function rxClientConfigUpdate(data)
 	-- The shared settings carry no traffic share; this player's last one is kept.
 	if decoded.trafficShare == nil and clientConfig then decoded.trafficShare = clientConfig.trafficShare end
 	clientConfig = decoded
-	sinceGhosts = GHOST_EVERY
+	ghostsDue = true
 	settingsCheck()
 	actionsCheck()
 end
@@ -932,6 +946,9 @@ end
 -- vehicles we already own so we do not end up with duplicates. Never touches
 -- vehicles owned by other players.
 local function onCareerActive(active)
+	if active then
+		sinceMarks, sinceGhosts = nil, nil
+	end
 	if not (active and mileageActive) then return end
 	local vehicles = MPVehicleGE.getVehicles()
 	for _, vehicle in pairs(vehicles) do
@@ -969,9 +986,14 @@ local function onUpdate(dtReal, dtSim, dtRaw)
 	if worldReadyState ~= 2 or not clientConfig then return end
 	updateTrafficMarks(dtReal)
 	local dt = tonumber(dtReal)
-	if dt and dt > 0 then sinceGhosts = sinceGhosts + dt end
-	if sinceGhosts >= GHOST_EVERY then
-		sinceGhosts = 0
+	if not sinceGhosts then
+		sinceGhosts = GHOST_EVERY - GHOST_AT
+	elseif dt and dt > 0 then
+		sinceGhosts = sinceGhosts + dt
+	end
+	if ghostsDue or sinceGhosts >= GHOST_EVERY then
+		ghostsDue = false
+		if sinceGhosts >= GHOST_EVERY then sinceGhosts = sinceGhosts % GHOST_EVERY end
 		applyGhosts()
 	end
 end
@@ -1027,6 +1049,7 @@ local function onBeamMPServerLeave()
 	trafficFocusPinned = false
 	appliedGhost = {}
 	sinceGhosts = GHOST_EVERY
+	ghostsDue = false
 end
 
 --Access

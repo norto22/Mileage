@@ -55,6 +55,7 @@ local files = {
 	"tests/drag_routing_test.lua",
 	"tests/drag_strip_test.lua",
 	"tests/paint_hold_test.lua",
+	"tests/sweep_spread_test.lua",
 	"tests/lua_syntax_test.lua",
 }
 

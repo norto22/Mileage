@@ -47,6 +47,13 @@ local logTag = "mileage.positionRate"
 local PARKED_STILL_SPEED = 0.5   -- metres a second
 local FAR_DISTANCE = 500         -- metres from every other player's car
 local CLASSIFY_EVERY = 1         -- seconds between working out each car's rule
+-- Six checks go over every car once a second. Each runs at its own point in the second,
+-- counted from the first frame after the career start, so no frame runs two of them:
+-- these rules at 0 s, the enabler's traffic marks at 1/6 s, far traffic (farTraffic.lua)
+-- at 2/6 s, the enabler's ghost settings at 3/6 s, the cost meter's car count
+-- (perfMeter.lua) at 4/6 s and the damage roles (damageSync.lua) at 5/6 s. A check's
+-- timer is left empty at the career start and set on that first frame.
+local CLASSIFY_AT = 0
 local PARKED_CHECK_EVERY = 0.25  -- seconds between speed checks of still parked cars
 
 -- Seconds between sends of each update by a car's rule; none for a hidden car (its
@@ -146,7 +153,7 @@ local nextPoll = perUpdate(POLL_NAMES)
 local quiet = false
 
 local clock = 0
-local sinceClassify = CLASSIFY_EVERY
+local sinceClassify = nil
 local sinceParkedCheck = 0
 local failureLogged = false
 
@@ -590,7 +597,7 @@ local function wrap()
 	end
 	if next(added) == nil then return end
 	clearState()
-	sinceClassify, sinceParkedCheck, failureLogged = CLASSIFY_EVERY, 0, false
+	sinceClassify, sinceParkedCheck, failureLogged = nil, 0, false
 	if added.pos then
 		log("I", logTag, string.format("position check active - still parked cars send once a second, " ..
 			"traffic over %d m from other players twice a second, other traffic 20 times a second", FAR_DISTANCE))
@@ -614,6 +621,7 @@ function M.onCareerActive(active)
 	local compat = extensions.mileage_compat
 	if active and compat and compat.isMPSession() then
 		wrap()
+		sinceClassify = nil
 	else
 		unwrap("career not active")
 	end
@@ -624,10 +632,11 @@ function M.onUpdate(dtReal)
 	local dt = tonumber(dtReal)
 	if not dt or dt < 0 then dt = 0 end
 	clock = clock + dt
-	sinceClassify = sinceClassify + dt
+	if sinceClassify then sinceClassify = sinceClassify + dt else sinceClassify = CLASSIFY_EVERY - CLASSIFY_AT end
 	sinceParkedCheck = sinceParkedCheck + dt
 	if sinceClassify >= CLASSIFY_EVERY then
-		sinceClassify, sinceParkedCheck = 0, 0
+		-- What is left over keeps the check at its point in the second.
+		sinceClassify, sinceParkedCheck = sinceClassify % CLASSIFY_EVERY, 0
 		local ok, err = pcall(classify)
 		if not ok then failed(err) end
 	elseif sinceParkedCheck >= PARKED_CHECK_EVERY then

@@ -32,7 +32,11 @@ Mileage was called CareerMP until v0.3.0. A server still running CareerMP needs 
 - Racing your traffic cars on the road (in progress, [#113](https://github.com/norto22/Mileage/issues/113))
 - Getting paid for beating a player in a drag race: the owner's drag prize, once every 5 minutes for the same two racers by default, and a stake you both agree with Drag race… in the player list (in progress, [#145](https://github.com/norto22/Mileage/issues/145))
 - Three or more players at once (in progress, [#32](https://github.com/norto22/Mileage/issues/32))
-- Smoother play with five to eight players together and traffic on: traffic and parked cars send fewer updates, a joining player's cars are built one at a time instead of in one freeze, and other players' traffic more than 1 km away is hidden on your game (in progress, [#118](https://github.com/norto22/Mileage/issues/118), [#86](https://github.com/norto22/Mileage/issues/86))
+- Smoother play with four to eight players together and traffic on (in progress, [#118](https://github.com/norto22/Mileage/issues/118), [#140](https://github.com/norto22/Mileage/issues/140)):
+  - the shared traffic always matches the server's totals: when a player joins, the others remove the cars their smaller share no longer covers, and when a player leaves, the others get their missing cars back while they play
+  - other players' traffic and parked cars more than 1 km away are only built when you come near them, nearest first, so a join builds what is around you instead of the whole map
+  - trying parts or tuning in the garage sends your car to the others once, when you close the screen, instead of rebuilding it on their games for every part
+  - your own parked and hidden cars cost the game far less, traffic sends fewer updates, and Mileage's regular checks no longer all run in the same frame
 - Mod vehicles and longer render distance (in progress, [#100](https://github.com/norto22/Mileage/issues/100))
 - Co-op jobs with split pay ([#89](https://github.com/norto22/Mileage/issues/89))
 - Paying a player to tow or repair your car ([#91](https://github.com/norto22/Mileage/issues/91))
@@ -61,6 +65,8 @@ Race prizes are paid by the server, $2,000 each by default. Change one with `Mil
 A server updated from a version before these defaults moves each prize it still has at $0 to $2,000 and each wait still at 10 minutes to 5, once, on its first start, and the console names every setting it moved with the command that sets it back. Any value you had set to something else stays as it was.
 
 `Mileage Stats` shows what the server sent and received for each part of Mileage, and what playing together costs each player's game: its frame time, frames over 100 ms, the updates it sent and received, and its cars split into driving traffic, parked cars and players' own. Each game reports every 30 seconds and writes the same numbers to its own log under `mileage.perf`, so a session can be compared before and after a change.
+
+Shared traffic is set for the whole server with `roadTrafficTotal` (18 by default) and `parkedTrafficTotal` (24): each player brings `roadTrafficAmount` driving and `parkedTrafficAmount` parked cars (6 and 8) until the players together would pass a total, and then the total is split between them. A player's traffic and parked cars follow their share as players come and go, without restarting the career; a car someone is driving, racing or being chased by is never removed.
 
 ## Credits
 Mileage began as [CareerMP](https://github.com/StanleyDudek/CareerMP) by **Dudekahedron** ([Dudek's Sandbox](https://discord.gg/caU5adg)). The port to BeamNG.drive 0.39, including multiplayer drag racing, is by Vlad Maksimenko ([CareerMP-0.39](https://github.com/vladmaksimenko-0/CareerMP-0.39)). Thanks to Bouboule, and to Lion and Luuk from BeamPaint, for the HTTP request examples the server plugin is built on.

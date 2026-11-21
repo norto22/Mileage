@@ -22,6 +22,9 @@ local M = {}
 local logTag = "mileage.damageSync"
 
 local ROLES_EVERY_SECONDS = 1
+-- Into each second from the first frame after the career start: each once-a-second
+-- check over every car has its own point, so no frame runs two (see positionRate.lua).
+local ROLES_AT = 5 / 6
 local OWNER_CHECKS = 2
 local SENDS_PER_SECOND = 3
 local MAX_QUEUE = 30
@@ -341,14 +344,19 @@ end
 local function onUpdate(dtReal)
 	local dt = tonumber(dtReal) or 0
 	if dt < 0 then dt = 0 end
-	sinceRoles = sinceRoles + dt
+	if sinceRoles then sinceRoles = sinceRoles + dt else sinceRoles = ROLES_EVERY_SECONDS - ROLES_AT end
 	if sinceRoles >= ROLES_EVERY_SECONDS then
-		sinceRoles = 0
+		sinceRoles = sinceRoles % ROLES_EVERY_SECONDS
 		assignRoles()
 		retryRequests()
 	end
 	sendQueued(dt)
 	sendRequests(dt)
+end
+
+-- The roles are checked from here on at their own point in each second.
+local function onCareerActive(active)
+	if active then sinceRoles = nil end
 end
 
 -- A respawned car has a fresh vehicle Lua: it gets its role (and a copy its damage)
@@ -377,6 +385,7 @@ M.resetCopy = resetCopy
 M.shapeApplied = shapeApplied
 M.latchesSetAgain = latchesSetAgain
 M.onUpdate = onUpdate
+M.onCareerActive = onCareerActive
 M.onVehicleSpawned = onVehicleSpawned
 M.onVehicleDestroyed = forget
 M.onBeamMPServerLeave = onBeamMPServerLeave
