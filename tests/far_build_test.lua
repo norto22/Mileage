@@ -511,15 +511,27 @@ local function sent(name)
 	return n
 end
 
--- The server's answer to careerVehSyncRequested: every car's state, traffic marks included.
+-- The server's answer to careerVehSyncRequested (rxCareerVehList): every car's state,
+-- traffic marks included.
 local function answerList(handlers)
 	local list, parts = {}, {}
 	for sid, mark in pairs(bm.traffic) do
 		list[sid] = {active = true, traffic = mark}
 		table.insert(parts, sid)
 	end
+	table.sort(parts)
 	local text = "list:" .. table.concat(parts, ",")
 	bm.json[text] = list
+	handlers.rxCareerVehList(text)
+end
+
+-- One of the server's quarter-second batches of changed car states (rxCareerVehSync).
+local function batch(handlers, states)
+	local parts = {}
+	for sid in pairs(states) do table.insert(parts, sid) end
+	table.sort(parts)
+	local text = "batch:" .. table.concat(parts, ",")
+	bm.json[text] = states
 	handlers.rxCareerVehSync(text)
 end
 
@@ -598,6 +610,56 @@ test("T4 join race: no list answer ever comes: after 5 s the unmarked cars build
 	worldReady(pacing, enabler)
 	run(4.9)
 	same(builtCount(), 0, "built within 5 s of the request")
+	run(3)
+	same(builtCount(), 10, "built once the wait is over")
+	same(bm.built[1].sid, "2-0", "the nearest first")
+	same(bm.built[10].sid, "2-1", "the farthest last")
+	same(framesWithTwo(), 0, "frames that built two cars")
+end)
+
+-- #166: a batch of changed car states is not the answer to the join's list request; only
+-- the list (rxCareerVehList) or the 5 s wait lets unmarked cars build.
+test("#166 join race: a batch for one car 0.2 s after the request, the list 0.8 s later: no unmarked car is built before the list", function()
+	local pacing, enabler, handlers = setupJoin()
+	bm.hasCar = false
+	tenUnmarked()
+	worldReadyState = 1
+	enabler.onWorldReadyState(1)
+	pacing.onWorldReadyState(1)
+	local failures = {}
+	bm.check = everyFrameLooksQueued(failures)
+	run(0.2)
+	batch(handlers, {["1-0"] = {active = true, traffic = true}})
+	run(0.8)
+	same(builtCount(), 0, "built between the batch and the list")
+	noFailures(failures)
+	markTen()
+	answerList(handlers)
+	run(1.2)
+	same(builtCount(), 4, "built after the list")
+	local order = {"2-0", "3-1", "3-0", "2-1"}
+	for i, sid in ipairs(order) do same(bm.built[i].sid, sid, "car built " .. i .. "th") end
+	for i = 0, 5 do expect(bm.vehicles["1-" .. i].spawnQueue ~= nil, "1-" .. i .. " still held") end
+end)
+
+test("#166 join race, older server: only batches ever arrive: the unmarked cars build after 5 s, not before", function()
+	local pacing, enabler, handlers = setupJoin()
+	bm.hasCar = false
+	tenUnmarked()
+	worldReady(pacing, enabler)
+	run(0.2)
+	batch(handlers, {["1-0"] = {active = true}})
+	-- An older server answers the list request with rxCareerVehSync too, which reads
+	-- as one more batch here.
+	run(0.3)
+	batch(handlers, {["2-0"] = {active = true}, ["3-0"] = {active = true}})
+	for _ = 1, 8 do
+		run(0.5)
+		batch(handlers, {["1-1"] = {active = true}})
+	end
+	same(builtCount(), 0, "built within 4.5 s of the request")
+	run(0.4)
+	same(builtCount(), 0, "built within 4.9 s of the request")
 	run(3)
 	same(builtCount(), 10, "built once the wait is over")
 	same(bm.built[1].sid, "2-0", "the nearest first")

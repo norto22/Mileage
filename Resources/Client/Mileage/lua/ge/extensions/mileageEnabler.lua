@@ -180,9 +180,10 @@ end
 
 -- The join's list request, sent at world-ready 1 or 2, whichever comes first. From it
 -- until its answer, or JOIN_LIST_WAIT_SECONDS, join pacing (mileage/spawnPacing.lua) holds
--- other players' cars whose traffic mark is not known yet. The first car-state message
--- after the request counts as the answer: the server's one-car messages and its answer
--- look the same.
+-- other players' cars whose traffic mark is not known yet. Only the list (rxCareerVehList)
+-- is the answer: the server's quarter-second batches (rxCareerVehSync) carry only the
+-- cars that changed. An older server answers with rxCareerVehSync, so there the wait
+-- runs its JOIN_LIST_WAIT_SECONDS.
 local JOIN_LIST_WAIT_SECONDS = 5
 local joinListAsked = false
 local joinListWaited = nil -- seconds since the join's request, while it is unanswered
@@ -250,9 +251,9 @@ end
 -- Career constantly hides/shows vehicles (garage, shopping, missions). A vehicle
 -- hidden locally must be hidden for everyone, so the server keeps the
 -- authoritative active-state map and we apply it to everything we do not own. The
--- server sends the whole map on request and one entry per change otherwise.
-local function rxCareerVehSync(data)
-	joinListWaited = nil
+-- server sends the whole map on request (rxCareerVehList) and the cars that changed in
+-- quarter-second batches otherwise (rxCareerVehSync).
+local function takeVehicleStates(data)
 	if data == "null" then return end
 	local vehicleStates = jsonDecode(data)
 	if type(vehicleStates) ~= "table" then return end
@@ -262,6 +263,16 @@ local function rxCareerVehSync(data)
 			if applyKnownState(serverVehicleID) then stateWaits[serverVehicleID] = nil end
 		end
 	end
+end
+
+local function rxCareerVehSync(data)
+	takeVehicleStates(data)
+end
+
+-- The whole map, the answer to careerVehSyncRequested: it ends the join's wait.
+local function rxCareerVehList(data)
+	joinListWaited = nil
+	takeVehicleStates(data)
 end
 
 -- Puts every kept state on this game again, for a change that is not the server's, such
@@ -1016,6 +1027,7 @@ local function onExtensionLoaded()
 	AddEventHandler("rxClientConfigUpdate", rxClientConfigUpdate)
 	AddEventHandler("rxCareerTrafficShare", rxCareerTrafficShare)
 	AddEventHandler("rxCareerVehSync", rxCareerVehSync)
+	AddEventHandler("rxCareerVehList", rxCareerVehList)
 	AddEventHandler("rxTrafficSignalTimer", rxTrafficSignalTimer)
 
 	log("I", logTag, "Mileage Enabler LOADED (target BeamNG " .. compat.targetGameVersion .. ")")

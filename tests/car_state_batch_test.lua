@@ -2,7 +2,8 @@
 -- when they change, grouped. A game reporting a car hidden or shown as it already is sends
 -- nothing on; the state of every car that spawned, was rebuilt, hidden or shown since the last
 -- send goes out in one {serverVehicleID: state} message on a 250 ms timer. A car deleted, or
--- whose owner left, before that send is left out.
+-- whose owner left, before that send is left out. The full list goes only to a player who
+-- asks for it, as rxCareerVehList.
 --
 -- Runs the real plugin with its onInit on a stand-in BeamMP server whose event timers fire
 -- as BeamMP's do, on the clock.
@@ -89,6 +90,18 @@ local function carStates()
 	local list = {}
 	for _, m in ipairs(server.sent) do
 		if m.event == "rxCareerVehSync" then
+			table.insert(list, {at = m.at, target = m.target, cars = decode(m.data)})
+		end
+	end
+	return list
+end
+
+-- The full car-state lists sent so far (rxCareerVehList, the answer to
+-- careerVehSyncRequested), each decoded like carStates.
+local function lists()
+	local list = {}
+	for _, m in ipairs(server.sent) do
+		if m.event == "rxCareerVehList" then
 			table.insert(list, {at = m.at, target = m.target, cars = decode(m.data)})
 		end
 	end
@@ -298,7 +311,7 @@ test("a hide or show of a car of their own that never spawned keeps no state and
 	run(0.5)
 	same(#carStates(), 0, "messages for cars that never spawned")
 	careerVehSyncRequested(1, "")
-	local list = carStates()
+	local list = lists()
 	same(#list, 1, "the full list")
 	same(size(list[1].cars), 1, "cars in the full list: only the one that spawned")
 	clear()
@@ -313,9 +326,38 @@ test("a full list asked for still goes to the asker at once", function()
 	run(0.5)
 	clear()
 	careerVehSyncRequested(1, "")
-	local messages = carStates()
+	local messages = lists()
 	same(#messages, 1, "messages")
 	same(messages[1].target, 1, "sent to")
+end)
+
+-- #166: a joining game ends its wait for traffic marks on the list alone, so the list
+-- has its own event and a batch can never be taken for it.
+test("#166: the full list goes as rxCareerVehList to the asker only, never as a batch, and counts as a car-state message", function()
+	newServer({0, 1, 2})
+	onVehicleSpawnHandler(0, 0, "")
+	onVehicleSpawnHandler(2, 0, "")
+	run(0.5)
+	clear()
+	local before = statsRow("carStates")
+	careerVehSyncRequested(1, "")
+	same(#server.sent, 1, "messages sent for the request")
+	local messages = lists()
+	same(#messages, 1, "lists")
+	same(messages[1].target, 1, "sent to")
+	same(size(messages[1].cars), 2, "cars in the list")
+	same(#carStates(), 0, "batches sent for the request")
+	local r = statsRow("carStates")
+	same(r.received, before.received + 1, "requests counted")
+	same(r.sent, before.sent + 1, "lists counted")
+	same(r.bytes, before.bytes + #server.sent[1].data, "list bytes counted")
+	-- A change after the request still goes to everyone as a batch.
+	hide(0, "0-0", false)
+	run(0.3)
+	local batches = carStates()
+	same(#batches, 1, "batches after a change")
+	same(batches[1].target, -1, "batch sent to")
+	same(#lists(), 1, "lists after a change")
 end)
 
 -- Rejects a delete that leaves a mark behind (or a pending entry the next spawn cannot
@@ -347,7 +389,7 @@ test("a hide that arrives after its car was deleted keeps no state and sends not
 	run(0.5)
 	same(#carStates(), 0, "messages")
 	careerVehSyncRequested(1, "")
-	local list = carStates()
+	local list = lists()
 	same(#list, 1, "the full list")
 	same(list[1].cars["0-0"], nil, "the deleted car in the full list")
 end)

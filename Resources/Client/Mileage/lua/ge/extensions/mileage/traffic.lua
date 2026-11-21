@@ -404,15 +404,23 @@ end
 -- player is in, a race spot's opponent, a reserved or working taxi, a car in a police
 -- pursuit and the player's own career cars are never deleted; cars above the share that
 -- cannot go yet are tried again every second. A share that grows spawns the missing cars
--- through the game's own traffic and parking spawns, at most 3 a second, and a later
--- share replaces what is still to add. Any error stops this until the next join and a
--- share then only hides cars, as before.
+-- through the game's own traffic and parking spawns, at most 3 a second. Only cars this
+-- game owns in BeamMP count: another player's car in its traffic or parking lists is
+-- never deleted, so it must not take the place of one of this player's.
+--
+-- From the first share of a career on, the cars are matched to the latest share once a
+-- second for the rest of the career, not only until a share is reached: a group built
+-- after the share fell is trimmed, and a group never built is asked for again without a
+-- new share. A group not built within 10 s counts as lost, so a spawner that keeps
+-- failing is asked once every 10 s and that is logged once. Any error stops this until
+-- the next join and a share then only hides cars, as before.
 
 local KEEP_CLEAR_METRES = 150
 local ADD_PER_STEP = 3
 local STEP_SECONDS = 1
--- Cars added this long ago may still arrive above a share that shrank since; a group
--- asked for and not built by then is taken as lost.
+-- A group asked for and not built this long ago is taken as lost and asked for again
+-- (if it still arrives later, the cars above the share are trimmed). Also how long a
+-- kind the game cannot add waits before it is tried again.
 local LATE_SECONDS = 10
 -- Seconds a parked car still to add waits for a free spot out of view before it is left.
 local PARKED_WAIT_SECONDS = 30
@@ -420,10 +428,13 @@ local PARKED_WAIT_SECONDS = 30
 local RESIZE_CONSEQUENCE = "a smaller traffic share only hides cars and a larger one adds none"
 local ADD_CONSEQUENCE = "a larger traffic share adds no cars"
 
--- While the cars do not match the share yet: {road, parked, add = {road, parked},
--- addPolice, startedAt, nextAt, lastAddAt, waitLogged}.
+-- From the first share of a career until it ends: {road, parked (the share), nextAt,
+-- waitLogged, retryAt = {road, parked}, spotWaitFrom, spotsLogged}.
 local resize = nil
 local resizeOff = false
+
+-- A lost group is logged once per server session.
+local lostLogged = false
 
 -- Groups this game asked the game's spawner for and that are not built yet, oldest
 -- first: {n, police, at}. They count as there, so a share that grows again while they
@@ -436,7 +447,15 @@ local addAllowedAt = 0
 
 local function inFlightCount(kind, now)
 	local list = inFlight[kind]
-	while list[1] and now - list[1].at >= LATE_SECONDS do table.remove(list, 1) end
+	while list[1] and now - list[1].at >= LATE_SECONDS do
+		local group = table.remove(list, 1)
+		if not lostLogged then
+			lostLogged = true
+			log("W", logTag, string.format("traffic share: %d %s cars asked for were not built within %d s - "
+				.. "cars still missing are asked for again every %d s", group.n, kind == "road" and "driving" or "parked",
+				LATE_SECONDS, LATE_SECONDS))
+		end
+	end
 	local n, police = 0, 0
 	for _, group in ipairs(list) do n, police = n + group.n, police + group.police end
 	return n, police
@@ -475,15 +494,22 @@ local function inventoryCar(id)
 	return not ok or inventoryId ~= nil
 end
 
--- This game's cars the share counts, as {id, entry}, or nil when the game cannot tell.
--- The reserved taxi comes on top of the share.
+-- A car this game owns in BeamMP; every car when BeamMP cannot tell.
+local function ownCar(id)
+	local mp = MPVehicleGE
+	if type(mp) ~= "table" or type(mp.isOwn) ~= "function" then return true end
+	return mp.isOwn(id) == true
+end
+
+-- This game's own cars the share counts, as {id, entry}, or nil when the game cannot
+-- tell. The reserved taxi comes on top of the share.
 local function carsOf(kind, fns)
 	local cars = {}
 	if kind == "road" then
 		if not fns.trafficData or not fns.removeTraffic then return nil end
 		local data = fns.trafficData()
 		for id, entry in pairs(type(data) == "table" and data or {}) do
-			if type(entry) == "table" and entry.isAi == true and not entry.reserved and not inventoryCar(id) then
+			if type(entry) == "table" and entry.isAi == true and not entry.reserved and ownCar(id) and not inventoryCar(id) then
 				table.insert(cars, {id = id, entry = entry})
 			end
 		end
@@ -491,7 +517,7 @@ local function carsOf(kind, fns)
 		if not fns.parkedList or not fns.removeParked then return nil end
 		local list = fns.parkedList()
 		for _, id in ipairs(type(list) == "table" and list or {}) do
-			if not inventoryCar(id) then table.insert(cars, {id = id}) end
+			if ownCar(id) and not inventoryCar(id) then table.insert(cars, {id = id}) end
 		end
 	end
 	return cars
@@ -667,6 +693,8 @@ local function addParked(n, from, now)
 	return #transforms
 end
 
+-- One second of matching: deletes the cars above the share, then adds what is missing
+-- after the cars still on their way.
 local function resizeStep(now)
 	local fns = resizeFns()
 	if not fns then
@@ -676,44 +704,51 @@ local function resizeStep(now)
 	local keep = {player = be:getPlayerVehicleID(0), racing = aiRaceCar()}
 	local from = viewPoint()
 	local deleted, added, waiting = {road = 0, parked = 0}, {road = 0, parked = 0}, 0
-	local cars = {}
+	local missing, police = {road = 0, parked = 0}, 0
 	for _, kind in ipairs({"road", "parked"}) do
-		cars[kind] = carsOf(kind, fns)
-		local over = cars[kind] and (#cars[kind] - resize[kind]) or 0
+		local coming, comingPolice = inFlightCount(kind, now)
+		local cars = carsOf(kind, fns)
+		local over = cars and (#cars - resize[kind]) or 0
 		if over > 0 then
-			for _, car in ipairs(pickCars(cars[kind], over, from, keep)) do
+			for _, car in ipairs(pickCars(cars, over, from, keep)) do
 				deleteCar(kind, car.id, fns)
 				deleted[kind] = deleted[kind] + 1
 			end
 			waiting = waiting + over - deleted[kind]
+		elseif cars then
+			missing[kind] = math.max(0, -over - coming)
+			if kind == "road" then police = math.max(0, policeFor(resize.road) - policeCount(cars) - comingPolice) end
 		end
-		if not cars[kind] then resize.add[kind] = 0 end
 	end
 
 	local budget = now >= addAllowedAt and ADD_PER_STEP or 0
-	if budget > 0 and resize.add.road > 0 then
-		local n = math.min(budget, resize.add.road)
-		local police = math.min(n, resize.addPolice)
-		local spawned = addRoad(n, police, now)
+	if budget > 0 and missing.road > 0 and now >= resize.retryAt.road then
+		local n = math.min(budget, missing.road)
+		local spawned = addRoad(n, math.min(n, police), now)
 		if spawned then
-			resize.add.road, resize.addPolice = resize.add.road - n, resize.addPolice - police
 			added.road, budget = spawned, budget - n
 		else
-			resize.add.road = 0
+			-- the game cannot spawn traffic now: tried again later
+			resize.retryAt.road = now + LATE_SECONDS
 		end
 	end
-	if budget > 0 and resize.add.parked > 0 then
-		local spawned = addParked(math.min(budget, resize.add.parked), from, now)
+	if budget > 0 and missing.parked > 0 and now >= resize.retryAt.parked then
+		local spawned = addParked(math.min(budget, missing.parked), from, now)
 		if spawned and spawned > 0 then
-			resize.add.parked, added.parked = resize.add.parked - spawned, spawned
-		elseif spawned == 0 and now - resize.startedAt < PARKED_WAIT_SECONDS then
-			-- no free spot out of view this second: tried again the next
-		else
-			if spawned == 0 then
-				log("I", logTag, string.format("traffic share: no free parking spots out of view for %d more parked cars",
-					resize.add.parked))
+			added.parked, resize.spotWaitFrom = spawned, nil
+		elseif spawned == 0 then
+			-- no free spot out of view: looked for every second, then every 10 s
+			resize.spotWaitFrom = resize.spotWaitFrom or now
+			if now - resize.spotWaitFrom >= PARKED_WAIT_SECONDS then
+				if not resize.spotsLogged then
+					resize.spotsLogged = true
+					log("I", logTag, string.format("traffic share: no free parking spots out of view for %d more parked cars",
+						missing.parked))
+				end
+				resize.retryAt.parked = now + LATE_SECONDS
 			end
-			resize.add.parked = 0
+		else
+			resize.retryAt.parked = now + LATE_SECONDS
 		end
 	end
 
@@ -721,32 +756,21 @@ local function resizeStep(now)
 		log("I", logTag, string.format("traffic share: %d driving and %d parked cars deleted", deleted.road, deleted.parked))
 	end
 	if added.road + added.parked > 0 then
-		resize.lastAddAt, addAllowedAt = now, now + STEP_SECONDS
+		addAllowedAt = now + STEP_SECONDS
 		log("I", logTag, string.format("traffic share: %d driving and %d parked cars added", added.road, added.parked))
 	end
-	if waiting > 0 and not resize.waitLogged then
+	if waiting == 0 then
+		resize.waitLogged = nil
+	elseif not resize.waitLogged then
 		resize.waitLogged = true
 		log("I", logTag, string.format("traffic share: %d cars above the share are in use or in view - tried again every second",
 			waiting))
 	end
-	local late = (resize.lastAddAt and (now - resize.lastAddAt) < LATE_SECONDS)
-		or inFlightCount("road", now) > 0 or inFlightCount("parked", now) > 0
-	if waiting == 0 and resize.add.road == 0 and resize.add.parked == 0 and not late then resize = nil end
 end
 
+-- A new share replaces the last one and is matched at once.
 local function startResize(road, parked, now)
-	local fns = resizeFns()
-	if not fns then return end
-	resize = {road = road, parked = parked, add = {road = 0, parked = 0}, addPolice = 0, startedAt = now}
-	local cars = carsOf("road", fns)
-	local coming, comingPolice = inFlightCount("road", now)
-	if cars and road > #cars + coming then
-		resize.add.road = road - #cars - coming
-		resize.addPolice = math.max(0, policeFor(road) - policeCount(cars) - comingPolice)
-	end
-	cars = carsOf("parked", fns)
-	coming = inFlightCount("parked", now)
-	if cars and parked > #cars + coming then resize.add.parked = parked - #cars - coming end
+	resize = {road = road, parked = parked, retryAt = {road = 0, parked = 0}}
 	resizeStep(now)
 	if resize then resize.nextAt = now + STEP_SECONDS end
 end
@@ -814,13 +838,14 @@ local function shareTick(now)
 	end
 	if not resize or now < resize.nextAt then return end
 	resize.nextAt = now + STEP_SECONDS
-	if trafficHeld() then return end
+	-- a career start still spawning its traffic, or traffic held, is not matched
+	if start or trafficHeld() then return end
 	guarded(resizeStep, now)
 end
 
 local function stopResize()
 	resize, resizeOff, careerOptions = nil, false, nil
-	inFlight, addAllowedAt = {road = {}, parked = {}}, 0
+	inFlight, addAllowedAt, lostLogged = {road = {}, parked = {}}, 0, false
 end
 
 --- Fired by the game's spawner when a group is built: the oldest group this game asked

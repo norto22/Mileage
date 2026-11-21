@@ -311,6 +311,19 @@ local function counts(g)
 	return road, #g.parking.list, taxis
 end
 
+-- The same counts with only the cars this game owns in BeamMP.
+local function ownCounts(g)
+	local road = 0
+	for id, e in pairs(g.traffic.data) do
+		if e.isAi and not e.reserved and not g.notOwn[id] then road = road + 1 end
+	end
+	local parked = 0
+	for _, id in ipairs(g.parking.list) do
+		if not g.notOwn[id] then parked = parked + 1 end
+	end
+	return road, parked
+end
+
 local function spawned(g, name)
 	local n = 0
 	for _, s in ipairs(g.spawns) do
@@ -523,7 +536,34 @@ test("A3: another player's car in this game's traffic is never deleted", functio
 	other.active = false
 	newShare(g, 2, 0)
 	expect(exists(g, other), "another player's hidden car stays")
-	same(select(1, counts(g)), 2, "driving cars: two own cars deleted, the other player's kept")
+	same(select(1, ownCounts(g)), 2, "own driving cars: one deleted, the other player's car not counted")
+	same(select(1, counts(g)), 3, "driving cars in the game's traffic, the other player's included")
+end)
+
+-- Rejects a count that takes another player's car in this game's traffic as one of
+-- this player's: it is never deleted, so it would keep an own car from being added.
+test("one other player's car and one own car against a share of two end with two own cars", function()
+	setupClients()
+	local g = careerGame(1, 0)
+	local other = g.addTraffic()
+	g.notOwn[other.id] = true
+	newShare(g, 2, 0)
+	run(2, {g})
+	same(select(1, ownCounts(g)), 2, "own driving cars")
+	expect(exists(g, other), "the other player's car stays")
+	same(#g.deleted, 0, "cars deleted")
+end)
+
+test("another player's car in this game's parking list does not cost an own parked car", function()
+	setupClients()
+	local g = careerGame(3, 2)
+	local other = g.addParked()
+	g.notOwn[other.id] = true
+	newShare(g, 3, 2)
+	run(2, {g})
+	same(select(2, ownCounts(g)), 2, "own parked cars")
+	expect(exists(g, other), "the other player's parked car stays")
+	same(#g.deleted, 0, "cars deleted")
 end)
 
 test("an error while deleting logs once and falls back to hiding the cars", function()
@@ -640,16 +680,71 @@ test("A4: a second grow while the first's cars are still spawning adds only what
 	same(parked, 6, "parked cars")
 end)
 
-test("A4: a group the spawner never builds stops counting after 10 s, so its cars are asked for again", function()
+-- A group asked for while the share was larger and built after the 10 s it counts as
+-- coming. Rejects matching that stops once nothing is still on its way.
+test("a driving group built 12 s after it was asked for, when the share has fallen since, is trimmed", function()
+	setupClients()
+	local g = careerGame(3, 0)
+	g.deferSpawns = true
+	newShare(g, 6, 0)
+	same(spawned(g), 3, "cars asked for by the grow")
+	run(1, {g})
+	newShare(g, 3, 0)
+	run(11, {g})
+	g.deferSpawns = false
+	use(g)
+	g.buildQueued()
+	same(select(1, counts(g)), 6, "driving cars when the late group is built")
+	run(2, {g})
+	same(select(1, counts(g)), 3, "driving cars after")
+	same(spawned(g), 3, "cars asked for in all")
+end)
+
+test("a parked group built 15 s after it was asked for, when the share has fallen since, is trimmed", function()
+	setupClients()
+	local g = careerGame(3, 2)
+	g.deferSpawns = true
+	newShare(g, 3, 5)
+	same(spawned(g, "autoParking"), 3, "parked cars asked for by the grow")
+	run(2, {g})
+	newShare(g, 3, 2)
+	run(13, {g})
+	g.deferSpawns = false
+	use(g)
+	g.buildQueued()
+	run(2, {g})
+	same(select(2, counts(g)), 2, "parked cars after")
+	same(spawned(g), 3, "cars asked for in all")
+end)
+
+-- Rejects a missing group that is asked for again only when another share arrives.
+test("a group the spawner never builds is asked for again 10 s later without a new share", function()
 	setupClients()
 	local g = careerGame(2, 0)
 	g.deferSpawns = true
 	newShare(g, 4, 0)
 	g.queued = {}
-	run(11, {g})
+	run(9, {g})
 	g.deferSpawns = false
-	newShare(g, 4, 0)
+	run(3, {g})
 	same(select(1, counts(g)), 4, "driving cars")
+	same(spawned(g), 4, "cars asked for in all")
+	same(countLines(logs, "not built within 10 s"), 1, "the lost group is logged")
+end)
+
+test("a spawner that never builds is asked again once every 10 s, and that is logged once", function()
+	setupClients()
+	local g = careerGame(2, 0)
+	g.deferSpawns = true
+	newShare(g, 4, 0)
+	for _ = 1, 35 do
+		g.queued = {}
+		run(1, {g})
+	end
+	same(spawned(g), 8, "cars asked for in 35 s (at 0, 10, 20 and 30 s)")
+	same(select(1, counts(g)), 2, "driving cars")
+	same(countLines(logs, "not built within 10 s"), 1, "logged once")
+	same(countLines(logs, "E mileage"), 0, "errors logged")
 end)
 
 test("A4: added parked cars land in free spots more than 150 m from the camera", function()
