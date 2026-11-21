@@ -5225,9 +5225,10 @@ function careerVehicleActiveHandler(player_id, data)
 	local serverVehicleID = vehicleData.serverVehicleID
 	if not ownsVehicle(player_id, serverVehicleID) then return end
 	local state = vehicleStates[serverVehicleID]
+	-- Every car has a state from its spawn (onVehicleSpawnHandler), so a report for a car
+	-- with none is for a car that does not exist: keeping it would grow every game's list.
 	-- A report that changes nothing goes no further.
-	if state and state.active == vehicleData.active then return end
-	state = state or {}
+	if not state or state.active == vehicleData.active then return end
 	state.active = vehicleData.active
 	vehicleStates[serverVehicleID] = state
 	queueVehicleState(serverVehicleID)
