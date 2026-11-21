@@ -407,6 +407,32 @@ test("an edit of another car during the session goes out at once", function()
 	same(edits("0-" .. CAR), 0, "edits of the session's car")
 end)
 
+-- Rejects a match on the server id without its closing colon: car 0-110 starts with 0-11.
+test("an edit of a car whose server id starts with the session car's id goes out at once", function()
+	setup()
+	game.objects[110] = {id = 110, own = true, sid = "0-110", config = "stock"}
+	career_modules_partShopping.startShopping()
+	career_modules_partShopping.installPart()
+	game.rebuild(110, "theirs")
+	same(edits("0-110"), 1, "edits of car 0-110")
+	same(edits("0-11"), 0, "edits of the session's car 0-11")
+end)
+
+-- Rejects a hold that stays on after its session: a Parts visit closed, the next rebuild
+-- of the same car (a repair) goes out at once.
+test("after Parts closes, the next rebuild of the same car goes out at once", function()
+	setup()
+	local parts = career_modules_partShopping
+	parts.startShopping()
+	parts.installPart()
+	parts.applyShopping()
+	frames()
+	same(edits("0-" .. CAR), 1, "edits once Parts closed")
+	career_modules_insurance_insurance.startRepair()
+	same(edits("0-" .. CAR), 2, "edits after the repair")
+	expect(sendIsBeamMPs(), "BeamMP's send is its own again")
+end)
+
 test("every other packet passes during the session, paint and spawns included", function()
 	setup()
 	career_modules_partShopping.startShopping()

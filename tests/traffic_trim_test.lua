@@ -782,3 +782,92 @@ test("leaving the server stops a share being matched", function()
 	run(5, {g})
 	same(spawned(g), before, "cars spawned after leaving")
 end)
+
+-- The last player left of five gets the full per-player amount back through the real
+-- server's share messages. Rejects a server that sends no larger share on a leave, and a
+-- client that only raises the active amounts instead of adding cars.
+test("A4: four of five players leave; the one left with 3 driving and 4 parked has 6 and 8 within 6 s", function()
+	setupClients()
+	newServer()
+	local games, all = {}, {}
+	for id = 0, 4 do
+		local g = startClient(newGame())
+		games[id] = g
+		table.insert(all, g)
+		server.players[id] = "player" .. id
+		onPlayerJoinHandler(id)
+		careerSyncRequested(id, encode({confirmsStart = true}))
+		deliver(games)
+		use(g)
+		g.meter.onBeforeCareerActivate()
+		gameplay_traffic.setupTrafficHelper(6, {simpleVehs = true, autoLoadFromFile = true}, 8, nil)
+		gameplay_traffic.setActiveAmount(6)
+		gameplay_parking.setActiveAmount(8)
+		g.meter.onTrafficOrParkingReady()
+		g.meter.onCareerActive(true)
+		for _ = 1, 5 do
+			server.now = server.now + 1
+			tick()
+			deliver(games)
+			run(1, all)
+		end
+	end
+	run(10, all)
+	local last = games[4]
+	local road, parked = counts(last)
+	same(road, 3, "driving cars of the last joiner before the others leave")
+	same(parked, 4, "parked cars of the last joiner before the others leave")
+	for id = 0, 3 do
+		server.players[id] = nil
+		onPlayerDisconnectHandler(id)
+		games[id] = nil
+	end
+	for _ = 1, 6 do
+		server.now = server.now + 1
+		tick()
+		deliver(games)
+		run(1, {last})
+	end
+	road, parked = counts(last)
+	same(road, 6, "driving cars 6 s after the others left")
+	same(parked, 8, "parked cars 6 s after the others left")
+	same(countLines(logs, "E mileage"), 0, "errors logged")
+end)
+
+-- After an error the share only hides cars, as the log says: a larger share then adds no
+-- cars either, while the active amounts still follow it. Rejects a fallback that keeps
+-- adding cars with the part of the code that failed.
+test("after an error a larger share adds no cars and only sets the active amounts", function()
+	setupClients()
+	local g = careerGame(3, 4)
+	g.traffic.removeTraffic = function() error("broken traffic") end
+	newShare(g, 2, 4)
+	same(countLines(logs, "E mileage.traffic: traffic share"), 1, "error logged")
+	g.spawns = {}
+	newShare(g, 6, 8)
+	run(6, {g})
+	same(spawned(g), 0, "cars spawned after the error")
+	same(g.traffic.active, 6, "active driving amount")
+	same(g.parking.active, 8, "active parked amount")
+	use(g)
+	g.meter.onBeamMPServerLeave()
+end)
+
+-- The fallback lasts until the player leaves the server: the next join matches shares
+-- again. Rejects a fallback flag kept across server sessions.
+test("an error's fallback ends with the server session: the next career deletes cars again", function()
+	setupClients()
+	local g = careerGame(6, 8)
+	local working = g.traffic.removeTraffic
+	g.traffic.removeTraffic = function() error("broken traffic") end
+	newShare(g, 4, 8)
+	same(countLines(logs, "E mileage.traffic: traffic share"), 1, "error logged")
+	use(g)
+	g.meter.onBeamMPServerLeave()
+	g.traffic.removeTraffic = working
+	g.meter.onCareerActive(true)
+	g.deleted = {}
+	newShare(g, 3, 8)
+	expect(#g.deleted >= 1, "cars deleted in the next session: " .. #g.deleted)
+	same(select(1, counts(g)), 3, "driving cars in the next session")
+end)

@@ -447,6 +447,34 @@ test("A8: with no enabler to read marks from nothing is held", function()
 	same(framesWithTwo(), 0, "frames that built two cars")
 end)
 
+-- The hold is at more than 1 km. Rejects a compare of the squared distance against 1000,
+-- and a hold that starts at a rounder or nearer distance.
+test("A6: traffic 999 m from the camera is built, traffic 1001 m away is held", function()
+	local module = setup()
+	module.onCareerActive(true)
+	spawn("1-0", 1, {at = 999, traffic = true})
+	spawn("1-1", 1, {at = 1001, traffic = true})
+	run(3.05)
+	run(2)
+	expect(isBuilt("1-0"), "the car at 999 m built")
+	expect(not isBuilt("1-1"), "the car at 1001 m held")
+end)
+
+-- A car is held only when it is known to be far. Rejects treating a traffic car with no
+-- readable place as far, which would keep it out of the game for the whole session.
+test("A8: a traffic car with no BeamMP position and spawn data that does not read is built", function()
+	local module = setup()
+	module.onCareerActive(true)
+	spawn("1-0", 1, {at = 3000, traffic = true, unplaced = true})
+	bm.vehicles["1-0"].spawnQueue.data = "not json"
+	spawn("1-1", 1, {at = 100})
+	run(3.05)
+	run(2)
+	expect(isBuilt("1-1"), "the near car built")
+	expect(isBuilt("1-0"), "the car with no readable place built")
+	same(countLines(logs, "E mileage"), 0, "errors logged")
+end)
+
 --== T4: from world-ready, with the real enabler ====================================
 
 -- spawnPacing and the real enabler; the enabler's server events are recorded.

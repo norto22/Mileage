@@ -318,6 +318,40 @@ test("a full list asked for still goes to the asker at once", function()
 	same(messages[1].target, 1, "sent to")
 end)
 
+-- Rejects a delete that leaves a mark behind (or a pending entry the next spawn cannot
+-- replace): BeamMP gives a new car the id of one just deleted.
+test("a car deleted and spawned again with the same id inside one window is sent shown", function()
+	newServer({0, 1})
+	onVehicleSpawnHandler(0, 0, "")
+	run(0.5)
+	clear()
+	hide(0, "0-0", false)
+	onVehicleDeletedHandler(0, 0)
+	onVehicleSpawnHandler(0, 0, "")
+	run(0.3)
+	local messages = carStates()
+	same(#messages, 1, "messages")
+	same(messages[1].cars["0-0"].active, true, "the new car's state")
+end)
+
+-- Rejects a handler that makes a state up for a car already gone (the old `or {}`): a
+-- hide that crosses the delete on the wire would bring the deleted car back into every
+-- game's list.
+test("a hide that arrives after its car was deleted keeps no state and sends nothing", function()
+	newServer({0, 1})
+	onVehicleSpawnHandler(0, 0, "")
+	run(0.5)
+	onVehicleDeletedHandler(0, 0)
+	clear()
+	hide(0, "0-0", false)
+	run(0.5)
+	same(#carStates(), 0, "messages")
+	careerVehSyncRequested(1, "")
+	local list = carStates()
+	same(#list, 1, "the full list")
+	same(list[1].cars["0-0"], nil, "the deleted car in the full list")
+end)
+
 test("nothing changed, nothing sent: the timer alone sends no car states", function()
 	newServer({0, 1})
 	run(3)
