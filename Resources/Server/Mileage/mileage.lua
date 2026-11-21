@@ -146,6 +146,9 @@ local activationThreshold = 90
 local startConfirmThreshold = 60
 local START_REASON_MAX_LENGTH = 200
 local vehicleStates = {}
+-- Cars whose state changed since the last car-state send, by server vehicle id; see
+-- vehicleStatesTimer.
+local pendingStates = {}
 local loadedPrefabs = {}
 
 local signalTimer = MP.CreateTimer()
@@ -784,6 +787,9 @@ function onInit()
 
 	MP.RegisterEvent("tick","tick")
 	MP.CreateEventTimer("tick", 1000)
+	-- Car states that changed go to every player together, four times a second.
+	MP.RegisterEvent("vehicleStatesTimer","vehicleStatesTimer")
+	MP.CreateEventTimer("vehicleStatesTimer", 250)
 
 	prepareConfig()
 	Money.start()
@@ -5024,10 +5030,23 @@ local function ownsVehicle(player_id, serverVehicleID)
 end
 Money.ownsVehicle = ownsVehicle
 
--- Sends every player the state of one vehicle; the full map goes only to a player who
+-- Every player hears the state of a vehicle that changed with the others that changed in
+-- the same quarter second (vehicleStatesTimer); the full map goes only to a player who
 -- asks for it (careerVehSyncRequested).
-local function sendVehicleState(serverVehicleID)
-	sendJson("carStates", -1, "rxCareerVehSync", {[serverVehicleID] = vehicleStates[serverVehicleID]})
+local function queueVehicleState(serverVehicleID)
+	pendingStates[serverVehicleID] = true
+end
+
+-- Sends the states that changed since the last send in one {serverVehicleID: state}
+-- message to every player. A car deleted in the meantime has no state and is left out.
+function vehicleStatesTimer()
+	if next(pendingStates) == nil then return end
+	local changed = {}
+	for serverVehicleID in pairs(pendingStates) do
+		changed[serverVehicleID] = vehicleStates[serverVehicleID]
+	end
+	pendingStates = {}
+	if next(changed) then sendJson("carStates", -1, "rxCareerVehSync", changed) end
 end
 
 local function describePlayer(player_id)
@@ -5205,10 +5224,13 @@ function careerVehicleActiveHandler(player_id, data)
 	if not vehicleData or type(vehicleData.active) ~= "boolean" then return end
 	local serverVehicleID = vehicleData.serverVehicleID
 	if not ownsVehicle(player_id, serverVehicleID) then return end
-	local state = vehicleStates[serverVehicleID] or {}
+	local state = vehicleStates[serverVehicleID]
+	-- A report that changes nothing goes no further.
+	if state and state.active == vehicleData.active then return end
+	state = state or {}
 	state.active = vehicleData.active
 	vehicleStates[serverVehicleID] = state
-	sendVehicleState(serverVehicleID)
+	queueVehicleState(serverVehicleID)
 end
 
 -- The owner's game marks which of its cars are traffic or parked:
@@ -5387,7 +5409,7 @@ function onVehicleSpawnHandler(player_id, vehicle_id,  data)
 	vehicleStates[serverVehicleID] = {active = true}
 	-- A race spot's opponents must be cars spawned after the race was asked for.
 	Money.spawnedAt[serverVehicleID] = signalTimer:GetCurrent()
-	sendVehicleState(serverVehicleID)
+	queueVehicleState(serverVehicleID)
 end
 
 -- A rebuilt car is switched on, and every player is told: their copy is rebuilt too and
@@ -5397,13 +5419,14 @@ function onVehicleEditedHandler(player_id, vehicle_id,  data)
 	local state = vehicleStates[serverVehicleID] or {}
 	state.active = true
 	vehicleStates[serverVehicleID] = state
-	sendVehicleState(serverVehicleID)
+	queueVehicleState(serverVehicleID)
 end
 
 function onVehicleDeletedHandler(player_id, vehicle_id)
 	if vehicleStates[player_id .. "-" .. vehicle_id] then
 		vehicleStates[player_id .. "-" .. vehicle_id] = nil
 	end
+	pendingStates[player_id .. "-" .. vehicle_id] = nil
 	Money.spawnedAt[player_id .. "-" .. vehicle_id] = nil
 end
 

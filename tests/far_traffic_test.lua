@@ -125,6 +125,8 @@ end
 
 local function pump()
 	for _ = 1, 200 do
+		-- Car states leave the server on its quarter-second timer.
+		vehicleStatesTimer()
 		if #world.toServer == 0 and #world.toClients == 0 then return end
 		local toServer, toClients = world.toServer, world.toClients
 		world.toServer, world.toClients = {}, {}
