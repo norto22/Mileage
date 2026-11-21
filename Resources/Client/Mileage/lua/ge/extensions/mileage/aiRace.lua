@@ -325,6 +325,12 @@ function M.decline()
 	return true
 end
 
+--- The own traffic car this game races or has asked to race, or nil. A smaller traffic
+--- share (mileage/traffic.lua) never deletes it.
+function M.racingCar()
+	return (race and race.host and not race.given and race.vid) or (pending and pending.vid) or nil
+end
+
 --== the race ================================================================
 
 -- The traffic car stays in the game's traffic, so other games still see it as traffic,

@@ -19,7 +19,9 @@
 -- the player's own setting and the log says the server's amounts were not applied.
 --
 -- For the whole server session it also hides the player's traffic around a mission
--- instead of letting the game delete and respawn it (see "mission hide").
+-- instead of letting the game delete and respawn it (see "mission hide"), and during a
+-- career it deletes or adds cars when the server's share changes (see "matching the
+-- share").
 
 local M = {}
 
@@ -41,6 +43,10 @@ local tutorial = nil
 
 -- Settings already warned about in this join, so a bad value is reported once.
 local warned = {}
+
+-- The traffic options the career start handed the game (police asked for), for the cars
+-- a share that grows adds later.
+local careerOptions = nil
 
 --== replacing game functions ================================================
 
@@ -164,6 +170,7 @@ local function prepareSetup(config, trafficOptions)
 	setActiveAmountOnce(gameplay_traffic, "gameplay_traffic", road)
 	setActiveAmountOnce(gameplay_parking, "gameplay_parking", parked)
 	if start then start.applied = {road = road, parked = parked} end
+	careerOptions = options
 	return road, options, parked
 end
 
@@ -390,15 +397,379 @@ local function removeMissionHide()
 	mission = nil
 end
 
+--== matching the share =====================================================
+-- A share that shrinks deletes this player's cars above it, and BeamMP then deletes them
+-- on every game: a hidden car is still built and kept by everyone. Hidden cars go first,
+-- then visible cars farthest from the camera that are more than 150 m away. The car the
+-- player is in, a race spot's opponent, a reserved or working taxi, a car in a police
+-- pursuit and the player's own career cars are never deleted; cars above the share that
+-- cannot go yet are tried again every second. A share that grows spawns the missing cars
+-- through the game's own traffic and parking spawns, at most 3 a second, and a later
+-- share replaces what is still to add. Any error stops this until the next join and a
+-- share then only hides cars, as before.
+
+local KEEP_CLEAR_METRES = 150
+local ADD_PER_STEP = 3
+local STEP_SECONDS = 1
+-- Cars added this long ago may still arrive above a share that shrank since; a group
+-- asked for and not built by then is taken as lost.
+local LATE_SECONDS = 10
+-- Seconds a parked car still to add waits for a free spot out of view before it is left.
+local PARKED_WAIT_SECONDS = 30
+
+local RESIZE_CONSEQUENCE = "a smaller traffic share only hides cars and a larger one adds none"
+local ADD_CONSEQUENCE = "a larger traffic share adds no cars"
+
+-- While the cars do not match the share yet: {road, parked, add = {road, parked},
+-- addPolice, startedAt, nextAt, lastAddAt, waitLogged}.
+local resize = nil
+local resizeOff = false
+
+-- Groups this game asked the game's spawner for and that are not built yet, oldest
+-- first: {n, police, at}. They count as there, so a share that grows again while they
+-- spawn adds only what is still missing.
+local inFlight = {road = {}, parked = {}}
+
+-- No cars are added before this, so a new share arriving just after a batch still keeps
+-- to 3 a second.
+local addAllowedAt = 0
+
+local function inFlightCount(kind, now)
+	local list = inFlight[kind]
+	while list[1] and now - list[1].at >= LATE_SECONDS do table.remove(list, 1) end
+	local n, police = 0, 0
+	for _, group in ipairs(list) do n, police = n + group.n, police + group.police end
+	return n, police
+end
+
+-- A mission or the tutorial has traffic hidden, or a race spot has it thinned and holds
+-- police out of the pool: a share waits until that ends.
+local function trafficHeld()
+	if hiddenForMission then return true end
+	local compat, spotRace = extensions.mileage_compat, extensions.mileage_spotRace
+	local ok, held = pcall(function()
+		if type(spotRace) == "table" and type(spotRace.inRace) == "function" and spotRace.inRace() then return true end
+		return compat.getForegroundMissionId() ~= nil or compat.isTutorialActive() == true
+	end)
+	return ok and held == true
+end
+
+-- The game functions deleting needs (a missing one is reported once and its kind left
+-- to the active amounts), or nil before the game is up.
+local function resizeFns()
+	if be == nil then return nil end
+	local compat = extensions.mileage_compat
+	return {
+		trafficData = compat.pickOrWarn(gameplay_traffic, "gameplay_traffic", "getTrafficData", RESIZE_CONSEQUENCE),
+		removeTraffic = compat.pickOrWarn(gameplay_traffic, "gameplay_traffic", "removeTraffic", RESIZE_CONSEQUENCE),
+		parkedList = compat.pickOrWarn(gameplay_parking, "gameplay_parking", "getParkedCarsList", RESIZE_CONSEQUENCE),
+		removeParked = compat.pickOrWarn(gameplay_parking, "gameplay_parking", "removeVehicle", RESIZE_CONSEQUENCE),
+	}
+end
+
+-- A car the player owns in the career (bought, or left out in the world).
+local function inventoryCar(id)
+	local inventory = career_modules_inventory
+	if type(inventory) ~= "table" or type(inventory.getInventoryIdFromVehicleId) ~= "function" then return false end
+	local ok, inventoryId = pcall(inventory.getInventoryIdFromVehicleId, id)
+	return not ok or inventoryId ~= nil
+end
+
+-- This game's cars the share counts, as {id, entry}, or nil when the game cannot tell.
+-- The reserved taxi comes on top of the share.
+local function carsOf(kind, fns)
+	local cars = {}
+	if kind == "road" then
+		if not fns.trafficData or not fns.removeTraffic then return nil end
+		local data = fns.trafficData()
+		for id, entry in pairs(type(data) == "table" and data or {}) do
+			if type(entry) == "table" and entry.isAi == true and not entry.reserved and not inventoryCar(id) then
+				table.insert(cars, {id = id, entry = entry})
+			end
+		end
+	else
+		if not fns.parkedList or not fns.removeParked then return nil end
+		local list = fns.parkedList()
+		for _, id in ipairs(type(list) == "table" and list or {}) do
+			if not inventoryCar(id) then table.insert(cars, {id = id}) end
+		end
+	end
+	return cars
+end
+
+local function roleOf(entry)
+	if type(entry) ~= "table" then return nil end
+	return entry.roleName or (type(entry.role) == "table" and entry.role.name) or nil
+end
+
+local function policeCount(cars)
+	local n = 0
+	for _, car in ipairs(cars) do
+		if roleOf(car.entry) == "police" then n = n + 1 end
+	end
+	return n
+end
+
+-- The police the game's police provider puts in this many road cars at a career start.
+local function policeFor(road)
+	local options = careerOptions or {police = road > 0}
+	if not options.police or road < 3 then return 0 end
+	return math.min(math.ceil(road * 0.25), math.floor(road * 0.4))
+end
+
+-- The own traffic car an AI race (mileage/aiRace.lua) has this game race, or nil; false
+-- when it cannot tell, and then no car is taken that step.
+local function aiRaceCar()
+	local aiRace = extensions.mileage_aiRace
+	if type(aiRace) ~= "table" or type(aiRace.racingCar) ~= "function" then return nil end
+	local ok, id = pcall(aiRace.racingCar)
+	if not ok then return false end
+	return id
+end
+
+-- keep: {player = the player's car, racing = aiRaceCar()}.
+local function inUse(car, obj, keep)
+	if car.id == keep.player or keep.racing == false or car.id == keep.racing then return true end
+	local mp = MPVehicleGE
+	if type(mp) == "table" and type(mp.isOwn) == "function" and not mp.isOwn(car.id) then return true end
+	if obj.mileageSpotRacer == "true" then return true end
+	local entry = car.entry
+	if entry and (entry.reserved or entry.claimed) then return true end
+	local police = gameplay_police
+	if entry and type(police) == "table" and type(police.isVehicleInPursuit) == "function" then
+		local ok, pursuing = pcall(police.isVehicleInPursuit, car.id)
+		if not ok or pursuing then return true end
+	end
+	return false
+end
+
+-- Where the player looks from: the camera, else the player's car.
+local function viewPoint()
+	local camera = core_camera
+	if type(camera) == "table" and type(camera.getPosition) == "function" then
+		local ok, pos = pcall(camera.getPosition)
+		if ok and pos then return pos end
+	end
+	local veh = be:getObjectByID(be:getPlayerVehicleID(0) or -1)
+	return veh and veh:getPosition() or nil
+end
+
+local function metres(a, b)
+	local dx, dy, dz = a.x - b.x, a.y - b.y, a.z - b.z
+	return math.sqrt(dx * dx + dy * dy + dz * dz)
+end
+
+-- Up to `over` cars to delete: hidden ones first, then visible ones out of view,
+-- farthest first.
+local function pickCars(cars, over, from, keep)
+	local hidden, far = {}, {}
+	for _, car in ipairs(cars) do
+		local obj = be:getObjectByID(car.id)
+		if obj and not inUse(car, obj, keep) then
+			local pos = obj:getPosition()
+			car.metres = (from and pos) and metres(from, pos) or nil
+			if not obj:getActive() then
+				table.insert(hidden, car)
+			elseif car.metres and car.metres > KEEP_CLEAR_METRES then
+				table.insert(far, car)
+			end
+		end
+	end
+	local function farthest(a, b)
+		if (a.metres or 0) ~= (b.metres or 0) then return (a.metres or 0) > (b.metres or 0) end
+		return a.id < b.id
+	end
+	table.sort(hidden, farthest)
+	table.sort(far, farthest)
+	local picked = {}
+	for _, list in ipairs({hidden, far}) do
+		for _, car in ipairs(list) do
+			if #picked >= over then return picked end
+			table.insert(picked, car)
+		end
+	end
+	return picked
+end
+
+-- Taken out of the game's traffic or parking first, never with parking's
+-- deleteVehicles, which takes the cars at the front of its list.
+local function deleteCar(kind, id, fns)
+	local obj = be:getObjectByID(id)
+	if kind == "road" then fns.removeTraffic(id) else fns.removeParked(id) end
+	if obj then obj:delete() end
+end
+
+-- Spawns n road cars, police first, under the game's own traffic group name so its
+-- traffic system takes them in as at the career start. Not spawnTraffic: that restarts
+-- the traffic system, which resets the player's pursuit and career traffic state.
+local function addRoad(n, police, now)
+	local compat = extensions.mileage_compat
+	if not core_multiSpawn and type(extensions.load) == "function" then extensions.load("core_multiSpawn") end
+	local spawnGroup = compat.pickOrWarn(core_multiSpawn, "core_multiSpawn", "spawnGroup", ADD_CONSEQUENCE)
+	local utils = gameplay_traffic_trafficUtils
+	local createTraffic = compat.pickOrWarn(utils, "gameplay_traffic_trafficUtils", "createTrafficGroup", ADD_CONSEQUENCE)
+	if not spawnGroup or not createTraffic then return nil end
+	local options = careerOptions or {}
+	local group = {}
+	if police > 0 then
+		local createPolice = compat.pick(utils, "createPoliceGroup")
+		local list = createPolice and createPolice(police, options.allMods) or {}
+		-- the game's police provider uses the same car when a group comes back empty
+		for i = 1, police do table.insert(group, list[i] or {model = "fullsize", config = "police"}) end
+	end
+	local civilians = n - #group
+	if civilians > 0 then
+		local list = createTraffic(civilians, options.allMods, options.allConfigs, options.simpleVehs) or {}
+		for i = 1, civilians do
+			table.insert(group, list[(i - 1) % math.max(1, #list) + 1] or {model = "pickup"})
+		end
+	end
+	-- Counted before the spawn: the group can be built before spawnGroup returns.
+	table.insert(inFlight.road, {n = #group, police = police, at = now})
+	spawnGroup(group, #group, {name = "autoTraffic", mode = "traffic", gap = 20, randomPaints = true})
+	return #group
+end
+
+-- Spawns up to n parked cars in free spots more than 150 m from the camera, as the game's
+-- setupVehicles does it but out of view: that one also takes spots next to the player.
+-- Returns how many, 0 when no spot that far is free now, nil when the game cannot.
+local function addParked(n, from, now)
+	local compat = extensions.mileage_compat
+	if not core_multiSpawn and type(extensions.load) == "function" then extensions.load("core_multiSpawn") end
+	local findSpots = compat.pickOrWarn(gameplay_parking, "gameplay_parking", "getRandomParkingSpots", ADD_CONSEQUENCE)
+	local createGroup = compat.pickOrWarn(core_multiSpawn, "core_multiSpawn", "createGroup", ADD_CONSEQUENCE)
+	local spawnGroup = compat.pickOrWarn(core_multiSpawn, "core_multiSpawn", "spawnGroup", ADD_CONSEQUENCE)
+	local baseParams = compat.pickOrWarn(gameplay_traffic_trafficUtils, "gameplay_traffic_trafficUtils",
+		"getBaseGroupParams", ADD_CONSEQUENCE)
+	if not findSpots or not createGroup or not spawnGroup or not baseParams then return nil end
+	if not from then return 0 end
+	local transforms = {}
+	local spots = findSpots(from, KEEP_CLEAR_METRES, nil, n, {checkVehicles = true, standardSize = true})
+	for _, entry in ipairs(type(spots) == "table" and spots or {}) do
+		local ps = type(entry) == "table" and entry.ps
+		if ps and ps.pos and metres(from, ps.pos) > KEEP_CLEAR_METRES then
+			table.insert(transforms, {pos = ps.pos, rot = ps.rot})
+			if #transforms >= n then break end
+		end
+	end
+	-- The spawner places the cars at these spots only when there is one for each car.
+	if #transforms == 0 then return 0 end
+	local params = baseParams()
+	params.allConfigs = true
+	params.filters = params.filters or {}
+	params.filters.Type = {propparked = 1}
+	params.minPop = 0
+	local group = createGroup(#transforms, params)
+	if type(group) ~= "table" or not group[1] then return nil end
+	table.insert(inFlight.parked, {n = #transforms, police = 0, at = now})
+	spawnGroup(group, #transforms, {name = "autoParking", mode = "roadBehind", gap = 50, customTransforms = transforms,
+		randomPaints = true})
+	return #transforms
+end
+
+local function resizeStep(now)
+	local fns = resizeFns()
+	if not fns then
+		resize = nil
+		return
+	end
+	local keep = {player = be:getPlayerVehicleID(0), racing = aiRaceCar()}
+	local from = viewPoint()
+	local deleted, added, waiting = {road = 0, parked = 0}, {road = 0, parked = 0}, 0
+	local cars = {}
+	for _, kind in ipairs({"road", "parked"}) do
+		cars[kind] = carsOf(kind, fns)
+		local over = cars[kind] and (#cars[kind] - resize[kind]) or 0
+		if over > 0 then
+			for _, car in ipairs(pickCars(cars[kind], over, from, keep)) do
+				deleteCar(kind, car.id, fns)
+				deleted[kind] = deleted[kind] + 1
+			end
+			waiting = waiting + over - deleted[kind]
+		end
+		if not cars[kind] then resize.add[kind] = 0 end
+	end
+
+	local budget = now >= addAllowedAt and ADD_PER_STEP or 0
+	if budget > 0 and resize.add.road > 0 then
+		local n = math.min(budget, resize.add.road)
+		local police = math.min(n, resize.addPolice)
+		local spawned = addRoad(n, police, now)
+		if spawned then
+			resize.add.road, resize.addPolice = resize.add.road - n, resize.addPolice - police
+			added.road, budget = spawned, budget - n
+		else
+			resize.add.road = 0
+		end
+	end
+	if budget > 0 and resize.add.parked > 0 then
+		local spawned = addParked(math.min(budget, resize.add.parked), from, now)
+		if spawned and spawned > 0 then
+			resize.add.parked, added.parked = resize.add.parked - spawned, spawned
+		elseif spawned == 0 and now - resize.startedAt < PARKED_WAIT_SECONDS then
+			-- no free spot out of view this second: tried again the next
+		else
+			if spawned == 0 then
+				log("I", logTag, string.format("traffic share: no free parking spots out of view for %d more parked cars",
+					resize.add.parked))
+			end
+			resize.add.parked = 0
+		end
+	end
+
+	if deleted.road + deleted.parked > 0 then
+		log("I", logTag, string.format("traffic share: %d driving and %d parked cars deleted", deleted.road, deleted.parked))
+	end
+	if added.road + added.parked > 0 then
+		resize.lastAddAt, addAllowedAt = now, now + STEP_SECONDS
+		log("I", logTag, string.format("traffic share: %d driving and %d parked cars added", added.road, added.parked))
+	end
+	if waiting > 0 and not resize.waitLogged then
+		resize.waitLogged = true
+		log("I", logTag, string.format("traffic share: %d cars above the share are in use or in view - tried again every second",
+			waiting))
+	end
+	local late = (resize.lastAddAt and (now - resize.lastAddAt) < LATE_SECONDS)
+		or inFlightCount("road", now) > 0 or inFlightCount("parked", now) > 0
+	if waiting == 0 and resize.add.road == 0 and resize.add.parked == 0 and not late then resize = nil end
+end
+
+local function startResize(road, parked, now)
+	local fns = resizeFns()
+	if not fns then return end
+	resize = {road = road, parked = parked, add = {road = 0, parked = 0}, addPolice = 0, startedAt = now}
+	local cars = carsOf("road", fns)
+	local coming, comingPolice = inFlightCount("road", now)
+	if cars and road > #cars + coming then
+		resize.add.road = road - #cars - coming
+		resize.addPolice = math.max(0, policeFor(road) - policeCount(cars) - comingPolice)
+	end
+	cars = carsOf("parked", fns)
+	coming = inFlightCount("parked", now)
+	if cars and parked > #cars + coming then resize.add.parked = parked - #cars - coming end
+	resizeStep(now)
+	if resize then resize.nextAt = now + STEP_SECONDS end
+end
+
+-- Runs fn; an error is logged once and from then on a share only hides cars.
+local function guarded(fn, ...)
+	local ok, err = xpcall(fn, debug.traceback, ...)
+	if ok then return end
+	resize, resizeOff = nil, true
+	log("E", logTag, "traffic share: cars could not be deleted or added, a share now only hides them: " .. tostring(err))
+end
+
 --== share changes ===========================================================
 -- When a player joins or leaves a full server, the server sends everyone already in a new
 -- share of its traffic total (the enabler keeps it with the client config). During a
--- career the share is applied through the game's active amounts, which hide or show
--- traffic cars; a career start reads it in its own setup, and one that arrives while the
--- start is setting up traffic is applied once traffic is ready.
+-- career the cars are matched to the share (see "matching the share") and the game's
+-- active amounts follow it; a career start reads it in its own setup, and one that
+-- arrives while the start is setting up traffic, or while a mission or the tutorial
+-- hides traffic, is applied once that is over.
 
 local careerActive = false
 local shareWaiting = false
+local waitCheckAt = 0
 
 local function applyShare()
 	local config = serverConfig()
@@ -406,6 +777,8 @@ local function applyShare()
 	-- No career start is under way, so a replacement still armed is stale.
 	restoreAll("traffic share changed")
 	local road, parked = M.serverAmounts(config)
+	-- Cars go before the active amounts change, so the game hides none it would keep.
+	if not resizeOff then guarded(startResize, road, parked, os.clockhp()) end
 	local compat = extensions.mileage_compat
 	local consequence = "a new traffic share waits for the next career start"
 	local setRoad = compat.pickOrWarn(gameplay_traffic, "gameplay_traffic", "setActiveAmount", consequence)
@@ -418,7 +791,7 @@ end
 --- The enabler received a new share from the server.
 function M.onTrafficShare()
 	if not serverConfig() then return end
-	if start then
+	if start or (careerActive and trafficHeld()) then
 		shareWaiting = true
 	elseif careerActive then
 		applyShare()
@@ -426,9 +799,35 @@ function M.onTrafficShare()
 end
 
 local function applyWaitingShare()
-	if not shareWaiting then return end
+	if not shareWaiting or trafficHeld() then return end
 	shareWaiting = false
 	if careerActive then applyShare() end
+end
+
+-- Every frame of a career: a waiting share and the cars still to match, once a second.
+local function shareTick(now)
+	if shareWaiting then
+		if start or now < waitCheckAt then return end
+		waitCheckAt = now + STEP_SECONDS
+		applyWaitingShare()
+		return
+	end
+	if not resize or now < resize.nextAt then return end
+	resize.nextAt = now + STEP_SECONDS
+	if trafficHeld() then return end
+	guarded(resizeStep, now)
+end
+
+local function stopResize()
+	resize, resizeOff, careerOptions = nil, false, nil
+	inFlight, addAllowedAt = {road = {}, parked = {}}, 0
+end
+
+--- Fired by the game's spawner when a group is built: the oldest group this game asked
+--- for under that name is there now.
+function M.onVehicleGroupSpawned(_, _, groupName)
+	local kind = (groupName == "autoTraffic" and "road") or (groupName == "autoParking" and "parked") or nil
+	if kind and inFlight[kind][1] then table.remove(inFlight[kind], 1) end
 end
 
 --== hooks ===================================================================
@@ -444,6 +843,8 @@ function M.onCareerActive(active)
 	if careerActive then
 		installTutorialRestore()
 		installMissionHide()
+	else
+		resize = nil
 	end
 end
 
@@ -475,6 +876,7 @@ end
 local replacedSince = nil
 
 function M.onUpdate()
+	if careerActive then shareTick(os.clockhp()) end
 	if not next(replaced) and not start then
 		replacedSince = nil
 		return
@@ -496,6 +898,7 @@ end
 function M.onBeamMPServerLeave()
 	start = nil
 	careerActive, shareWaiting = false, false
+	stopResize()
 	restoreAll("left the server")
 	removeTutorialRestore()
 	removeMissionHide()
@@ -509,6 +912,7 @@ end
 function M.onExtensionUnloaded()
 	start = nil
 	careerActive, shareWaiting = false, false
+	stopResize()
 	restoreAll("unloaded")
 	removeTutorialRestore()
 	removeMissionHide()
